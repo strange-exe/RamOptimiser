@@ -1,4 +1,4 @@
-# Packages the built app for the website: zips the two exes and the README from ..\bin, writes the SHA-256 and
+# Packages the built app for the website: zips the two exes, the README and the LICENSE, writes the SHA-256 and
 # size to src\release.json, and makes favicon.ico and a 180 px apple-touch-icon.png from the app's own icon.
 # Run after `..\build.ps1 -Test`. Reads only; never runs the exes.
 # With -Repo owner/name the download link points at the GitHub Release asset (tag v<yyyy.MM.dd>), which is how
@@ -11,6 +11,7 @@ $site = Resolve-Path (Join-Path $PSScriptRoot '..')
 $bin = Resolve-Path $Bin
 $files = @('RamOptimiser.exe', 'ramopt.exe') | ForEach-Object { Join-Path $bin $_ }
 $files += Join-Path $site '..\README.md'
+$files += Join-Path $site '..\LICENSE'
 foreach ($f in $files) { if (-not (Test-Path $f)) { throw "missing $f; run build.ps1 -Test first" } }
 
 $built = (Get-Item $files[0]).LastWriteTimeUtc

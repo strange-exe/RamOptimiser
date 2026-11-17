@@ -124,3 +124,7 @@ cd site; npm ci --ignore-scripts; npm run build    # static site in site\dist
 - `src/App/` the WPF app (XAML in `src/App/Xaml`, loaded at runtime); `tools/IconGen.cs` makes the app icon at build time
 - `tests/` dependency-free test runner (parsing, policy, struct layouts, settings, task XML, app text, live snapshot)
 - `design.md` the chosen visual theme, tokens and contrast results
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
