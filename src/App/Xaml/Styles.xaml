@@ -718,6 +718,8 @@
 
   <Style x:Key="Skeleton" TargetType="Border">
     <Setter Property="Background" Value="{DynamicResource TrackBackground}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource TrackEdge}"/>
+    <Setter Property="BorderThickness" Value="1"/>
     <Setter Property="CornerRadius" Value="3"/>
     <Setter Property="Height" Value="12"/>
     <Setter Property="HorizontalAlignment" Value="Left"/>

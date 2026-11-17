@@ -53,13 +53,16 @@ namespace RamOptimiser.App
         static readonly string[] TokenKeys =
         {
             "Surface", "Card", "Hairline", "WindowBorder", "ControlBorder", "Text", "MutedText", "DisabledText",
-            "Accent", "OnAccent", "TrackBackground", "SecondaryButton", "Ok", "Caution", "Danger", "DangerBackground",
+            "Accent", "OnAccent", "TrackBackground", "TrackEdge", "SecondaryButton", "Ok", "Caution", "Danger", "DangerBackground",
             "FocusRing", "MapInUse", "MapModified", "MapStandby", "MapFree"
         };
 
         readonly Application app;
         readonly ResourceDictionary light, dark, styles;
         ResourceDictionary tokens;
+        /// <summary>The high-contrast tokens and the system colours they were built from, reused while those hold.</summary>
+        ResourceDictionary highContrast;
+        string highContrastKey;
 
         public ResolvedTheme Current { get; private set; }
 
@@ -89,12 +92,32 @@ namespace RamOptimiser.App
         {
             Current = ThemeResolver.Resolve(mode, ReadPersonalize("AppsUseLightTheme"), SystemParameters.HighContrast);
             ResourceDictionary next = Current == ResolvedTheme.Dark ? dark
-                : Current == ResolvedTheme.Light ? light : BuildHighContrast();
+                : Current == ResolvedTheme.Light ? light : HighContrastTokens();
             if (ReferenceEquals(next, tokens)) return;
             int index = app.Resources.MergedDictionaries.IndexOf(tokens);
             if (index >= 0) app.Resources.MergedDictionaries[index] = next;
             else app.Resources.MergedDictionaries.Insert(0, next);
             tokens = next;
+        }
+
+        /// <summary>
+        /// The same dictionary while the system colours are unchanged, so a broadcast that changes nothing does
+        /// not swap the tokens and re-resolve every DynamicResource in the window.
+        /// </summary>
+        ResourceDictionary HighContrastTokens()
+        {
+            Color[] used =
+            {
+                SystemColors.WindowColor, SystemColors.WindowTextColor, SystemColors.WindowFrameColor, SystemColors.GrayTextColor,
+                SystemColors.HighlightColor, SystemColors.HighlightTextColor, SystemColors.ControlColor
+            };
+            string key = string.Join(",", Array.ConvertAll(used, c => c.ToString()));
+            if (highContrast == null || key != highContrastKey)
+            {
+                highContrast = BuildHighContrast();
+                highContrastKey = key;
+            }
+            return highContrast;
         }
 
         /// <summary>High contrast: every token maps to the user's system colour, never to our palette.</summary>
@@ -112,6 +135,8 @@ namespace RamOptimiser.App
             d["Accent"] = SystemColors.HighlightBrush;
             d["OnAccent"] = SystemColors.HighlightTextBrush;
             d["TrackBackground"] = SystemColors.WindowBrush;
+            // The track fill matches the card here, so tracks and skeletons keep a visible edge (WCAG 1.4.11).
+            d["TrackEdge"] = SystemColors.WindowTextBrush;
             d["SecondaryButton"] = SystemColors.ControlBrush;
             d["Ok"] = SystemColors.WindowTextBrush;
             d["Caution"] = SystemColors.WindowTextBrush;

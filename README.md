@@ -45,8 +45,9 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3):
   a **Clean memory** button, what the last clean freed, and the five apps using the most memory.
 - **Startup** lists apps and services that start with Windows, with a verdict for each (safe to turn off, turn off with
   care, keep on), a search box (Ctrl+F), a filter and a sort. Rows Windows protects, or that need admin rights, say so
-  instead of showing a switch.
-- Opened without admin rights, the app shows status only, plus a **Restart as administrator** link.
+  instead of showing a switch. While a service change applies, the other switches wait until it finishes.
+- Opened without admin rights, the app shows status only, plus a **Restart as administrator** link. The tray menu
+  offers the same restart and says when auto-clean is paused for lack of admin rights.
 - **Settings** has these options:
   - auto-clean when load reaches 50 to 99%, and/or on a schedule
   - which areas to clean
@@ -60,6 +61,10 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3):
   The minimum wait between automatic cleans is 60 seconds, whatever the file says.
   When a clean leaves memory load at or above the threshold (the memory is really in use), the wait doubles
   after each such clean, up to 16 times the setting, and returns to normal once load drops below the threshold.
+- Services Power Clean stops are started again when you quit the app. Each one is first recorded in
+  `stopped-services.txt` in the same folder, so if the app crashes, is ended, or Windows signs out first, the next
+  start as administrator starts them again and says so under **Clean memory**. Only names from Power Clean's own
+  list are read from that file; anything else in it is ignored.
 - Hidden in the tray, the app updates only the tray icon and hands back the memory its window was using.
 
 #### Before you turn on Start with Windows
@@ -73,7 +78,20 @@ build folder like `bin\` inside your user profile or a downloads folder.
 The task is registered through the Task Scheduler API with a fixed definition: it runs only at your sign-in
 (it cannot be started on demand), the path must be a local drive path (no network share, no `%` variables),
 and the app shows the option as on only when the registered task still runs this exact program with
-`--tray`. Both exes load system DLLs from `System32` only.
+`--tray`, for your account. Both exes load system DLLs from `System32` only.
+
+Each account gets its own task, named `RamOptimiser-<your SID>` in the Task Scheduler root folder, so one
+account turning the option on or off never changes another's. Older versions used one task named
+`RamOptimiser`: if that task is yours, the app shows it and replaces it with the per-account task when you
+turn the option on (or removes it when you turn it off); another account's `RamOptimiser` task is left alone.
+If a task exists but starts another copy (for example after you moved the exe), or runs with other settings,
+Settings says so and names the path; turning the option on replaces it. A task the app is not allowed to read
+is reported as unreadable, not as off.
+
+On a PC where you are not an administrator, **Restart as administrator** asks for an administrator's password,
+and Windows then runs the app as that administrator's account. The app notices (the restart passes your SID with
+`--launched-by`), says it is running as that account, with that account's settings and start-up task, and turns
+off the Start with Windows switch so it cannot set up a task for the wrong account.
 
 ### Command line: `bin\ramopt.exe`
 
@@ -87,7 +105,16 @@ bin\ramopt.exe clean --all                 # adds the full standby purge and the
 bin\ramopt.exe watch --threshold 85        # clean when load reaches 85%, at most every 5 minutes
 ```
 
-Exit codes: 0 ok, 1 bad arguments, 2 some area failed, 3 not elevated.
+`watch` uses the same backoff as the app: a clean that leaves load at or above the threshold doubles the wait
+(up to 16 times `--cooldown`, or `--interval` when the cooldown is shorter, so `--cooldown 0` still backs off) until
+load drops below it. The wait follows a monotonic clock, so DST and clock changes don't move it. A failed sample or
+clean is logged with a timestamp and watching goes on; 5 failed checks in a row, or 5 failed cleans in a row (with
+working checks between them), stop it.
+
+`--areas volumes` skips drives that are not ready (for example locked or offline) instead of failing on them.
+
+Exit codes: 0 ok, 1 bad arguments, 2 some area failed or only partly worked (for example one drive refused the
+flush), 3 not elevated, 4 `watch` stopped after 5 errors in a row.
 
 ## How it works
 

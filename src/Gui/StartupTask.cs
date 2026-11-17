@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -22,6 +23,49 @@ namespace RamOptimiser.Gui
         public bool Success { get { return !TimedOut && ExitCode == 0; } }
     }
 
+    /// <summary>One task read: the definition, or the HRESULT and message of the failed read.</summary>
+    public sealed class TaskRead
+    {
+        readonly string xml, error;
+        readonly int hresult;
+
+        TaskRead(string xml, int hresult, string error)
+        {
+            this.xml = xml;
+            this.hresult = hresult;
+            this.error = error;
+        }
+
+        public static TaskRead Found(string xml) { return new TaskRead(xml ?? "", 0, null); }
+        public static TaskRead Failed(int hresult, string error) { return new TaskRead(null, hresult, error); }
+
+        public string Xml { get { return xml; } }
+        public string Error { get { return error; } }
+        public int HResult { get { return hresult; } }
+        public bool Exists { get { return xml != null; } }
+        /// <summary>No such task. Any other failure (access denied, no Task Scheduler) is not "missing".</summary>
+        public bool Missing { get { return xml == null && hresult == StartupTask.HResultFileNotFound; } }
+    }
+
+    /// <summary>
+    /// Absent: no task for this user. Ours: it starts this program as it should. Other: a task exists but
+    /// starts another copy or differs. Unreadable: the task could not be read, so its state is unknown.
+    /// </summary>
+    public enum StartupTaskState { Absent, Ours, Other, Unreadable }
+
+    public sealed class StartupTaskStatus
+    {
+        public StartupTaskState State;
+        /// <summary>The program a stale task starts (Other), when it has exactly one.</summary>
+        public string Command;
+        /// <summary>Other only: the task starts this program, but with other arguments or a lower run level.</summary>
+        public bool SameProgram;
+        /// <summary>The task is this user's, under the old shared name "RamOptimiser".</summary>
+        public bool Legacy;
+        /// <summary>Unreadable only: why.</summary>
+        public string Error;
+    }
+
     /// <summary>
     /// Start-with-Windows through Task Scheduler: a Run key cannot start an app elevated, a task with
     /// RunLevel HighestAvailable can. The task is registered from a Task Scheduler 1.2 XML definition, which
@@ -34,7 +78,17 @@ namespace RamOptimiser.Gui
     /// </summary>
     public static class StartupTask
     {
-        public const string TaskName = "RamOptimiser";
+        /// <summary>
+        /// The one machine-wide name older versions used. A second account turning the option on replaced
+        /// the first account's task; it is now read only to migrate this user's own task, never another's.
+        /// </summary>
+        public const string LegacyTaskName = "RamOptimiser";
+        /// <summary>Each account's task is "RamOptimiser-&lt;SID&gt;", so two accounts never share one.</summary>
+        public const string TaskNamePrefix = LegacyTaskName + "-";
+        /// <summary>HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND): GetTask's answer for a task that does not exist.</summary>
+        public const int HResultFileNotFound = unchecked((int)0x80070002);
+        /// <summary>HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED): GetTask's answer for a task this user may not read.</summary>
+        public const int HResultAccessDenied = unchecked((int)0x80070005);
         public const string TrayArgument = "--tray";
         public const string TaskNamespace = "http://schemas.microsoft.com/windows/2004/02/mit/task";
         public const string RunLevel = "HighestAvailable";
@@ -118,25 +172,64 @@ namespace RamOptimiser.Gui
         /// The arguments of ITaskFolder.RegisterTask(path, xmlText, flags, userId, password, logonType, sddl):
         /// create or update, the user and principal from the XML, no password, no security descriptor.
         /// </summary>
-        internal static object[] BuildRegisterArgs(string xml)
+        internal static object[] BuildRegisterArgs(string taskName, string xml)
         {
+            if (!IsOurTaskName(taskName)) throw new ArgumentException("Not a RAM Optimiser task name.", "taskName");
             if (xml == null) throw new ArgumentNullException("xml");
-            return new object[] { TaskName, xml, TASK_CREATE_OR_UPDATE, null, null, TASK_LOGON_INTERACTIVE_TOKEN, null };
+            return new object[] { taskName, xml, TASK_CREATE_OR_UPDATE, null, null, TASK_LOGON_INTERACTIVE_TOKEN, null };
         }
 
-        public static string BuildDeleteArgs()
+        /// <summary>schtasks arguments that delete one of our tasks; any other name is refused.</summary>
+        public static string BuildDeleteArgs(string taskName)
         {
-            return "/Delete /TN \"" + TaskName + "\" /F";
+            if (!IsOurTaskName(taskName)) throw new ArgumentException("Not a RAM Optimiser task name.", "taskName");
+            return "/Delete /TN \"" + taskName + "\" /F";
+        }
+
+        /// <summary>This account's task name. The SID is checked strictly, so the name is always safe to quote.</summary>
+        public static string TaskNameFor(string sid)
+        {
+            if (!Elevation.IsWellFormedSid(sid)) throw new ArgumentException("Not a SID.", "sid");
+            return TaskNamePrefix + sid;
+        }
+
+        static bool IsOurTaskName(string name)
+        {
+            if (name == LegacyTaskName) return true;
+            return name != null && name.StartsWith(TaskNamePrefix, StringComparison.Ordinal)
+                && Elevation.IsWellFormedSid(name.Substring(TaskNamePrefix.Length));
         }
 
         /// <summary>
         /// True only when a registered task definition runs exePath with exactly --tray at HighestAvailable,
-        /// as its only action. Anything else (another program, other arguments, a lower run level, a DTD,
-        /// malformed XML) reads as "not our task". exePath must itself pass the path checks.
+        /// as its only action, for this user (the Principal UserId is userSid or userName). Anything else
+        /// (another program or account, other arguments, a lower run level, a DTD, malformed XML) reads as
+        /// "not our task". exePath must itself pass the path checks.
         /// </summary>
-        public static bool MatchesRegisteredTask(string xml, string exePath)
+        public static bool MatchesRegisteredTask(string xml, string exePath, string userSid, string userName)
         {
-            if (string.IsNullOrEmpty(xml) || !IsValidExePath(exePath)) return false;
+            if (!IsValidExePath(exePath)) return false;
+            XmlNamespaceManager ns;
+            XmlDocument doc = LoadTask(xml, out ns);
+            if (doc == null || !PrincipalIs(doc, ns, userSid, userName)) return false;
+
+            XmlNodeList actions = doc.SelectNodes("/t:Task/t:Actions/*", ns);
+            if (actions.Count != 1) return false;
+            string command = ExecCommand(doc, ns);
+            XmlNode exec = doc.SelectSingleNode("/t:Task/t:Actions/t:Exec", ns);
+            string arguments = exec == null ? null : Text(exec.SelectSingleNode("t:Arguments", ns));
+            if (command == null || !string.Equals(command, exePath, StringComparison.OrdinalIgnoreCase)) return false;
+            if (arguments != TrayArgument) return false;
+
+            XmlNodeList principals = doc.SelectNodes("/t:Task/t:Principals/t:Principal", ns);
+            return Text(principals[0].SelectSingleNode("t:RunLevel", ns)) == RunLevel;
+        }
+
+        /// <summary>Parses a task definition with DTDs refused; null when it is not a Task Scheduler task.</summary>
+        static XmlDocument LoadTask(string xml, out XmlNamespaceManager ns)
+        {
+            ns = null;
+            if (string.IsNullOrEmpty(xml)) return null;
             var doc = new XmlDocument { XmlResolver = null };
             var readerSettings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };
             try
@@ -145,32 +238,111 @@ namespace RamOptimiser.Gui
                 using (XmlReader reader = XmlReader.Create(sr, readerSettings))
                     doc.Load(reader);
             }
-            catch (XmlException) { return false; }
+            catch (XmlException) { return null; }
 
-            var ns = new XmlNamespaceManager(doc.NameTable);
+            ns = new XmlNamespaceManager(doc.NameTable);
             ns.AddNamespace("t", TaskNamespace);
-            if (doc.SelectSingleNode("/t:Task", ns) == null) return false;
+            return doc.SelectSingleNode("/t:Task", ns) == null ? null : doc;
+        }
 
-            XmlNodeList actions = doc.SelectNodes("/t:Task/t:Actions/*", ns);
-            XmlNodeList execs = doc.SelectNodes("/t:Task/t:Actions/t:Exec", ns);
-            if (actions.Count != 1 || execs.Count != 1) return false;
-            string command = Text(execs[0].SelectSingleNode("t:Command", ns));
-            string arguments = Text(execs[0].SelectSingleNode("t:Arguments", ns));
-            if (command == null || !string.Equals(command, exePath, StringComparison.OrdinalIgnoreCase)) return false;
-            if (arguments != TrayArgument) return false;
-
+        /// <summary>One principal whose UserId is this user's SID or DOMAIN\user (Task Scheduler stores either).</summary>
+        static bool PrincipalIs(XmlDocument doc, XmlNamespaceManager ns, string userSid, string userName)
+        {
             XmlNodeList principals = doc.SelectNodes("/t:Task/t:Principals/t:Principal", ns);
             if (principals.Count != 1) return false;
-            return Text(principals[0].SelectSingleNode("t:RunLevel", ns)) == RunLevel;
+            string id = Text(principals[0].SelectSingleNode("t:UserId", ns));
+            if (string.IsNullOrEmpty(id)) return false;
+            return (!string.IsNullOrEmpty(userSid) && string.Equals(id, userSid, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrEmpty(userName) && string.Equals(id, userName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        static bool PrincipalIs(string xml, string userSid, string userName)
+        {
+            XmlNamespaceManager ns;
+            XmlDocument doc = LoadTask(xml, out ns);
+            return doc != null && PrincipalIs(doc, ns, userSid, userName);
+        }
+
+        /// <summary>The program of the task's only Exec action, or null.</summary>
+        static string ExecCommand(XmlDocument doc, XmlNamespaceManager ns)
+        {
+            XmlNodeList execs = doc.SelectNodes("/t:Task/t:Actions/t:Exec", ns);
+            return execs.Count == 1 ? Text(execs[0].SelectSingleNode("t:Command", ns)) : null;
         }
 
         static string Text(XmlNode node) { return node == null ? null : node.InnerText.Trim(); }
+
+        /// <summary>
+        /// What Settings shows. Reads the task named for this user and the old shared name: the old task
+        /// counts only when its principal is this user (another account's task, including one this user is denied
+        /// reading, is never shown or touched).
+        /// A stale task, this user's or the old one, wins over an exact match because it still starts the
+        /// other copy at sign-in.
+        /// </summary>
+        public static StartupTaskStatus Classify(TaskRead userTask, TaskRead legacyTask, string exePath, string userSid, string userName)
+        {
+            StartupTaskStatus mine = Judge(userTask, exePath, userSid, userName, false);
+            StartupTaskStatus old = Judge(legacyTask, exePath, userSid, userName, true);
+            if (mine.State == StartupTaskState.Other) return mine;
+            if (old.State == StartupTaskState.Other) return old;
+            if (mine.State != StartupTaskState.Absent) return mine;
+            return old;
+        }
+
+        static StartupTaskStatus Judge(TaskRead read, string exePath, string userSid, string userName, bool legacy)
+        {
+            var status = new StartupTaskStatus { State = StartupTaskState.Absent };
+            if (read == null || read.Missing) return status;
+            // A task's owner can always read it, so an old-named task this user is denied belongs to another account:
+            // never shown. This user's own task, and other failures (no Task Scheduler), stay unreadable.
+            if (legacy && read.HResult == HResultAccessDenied) return status;
+            status.Legacy = legacy;
+            if (!read.Exists)
+            {
+                status.State = StartupTaskState.Unreadable;
+                status.Error = read.Error;
+                return status;
+            }
+            if (legacy && !PrincipalIs(read.Xml, userSid, userName)) return new StartupTaskStatus { State = StartupTaskState.Absent };
+            if (MatchesRegisteredTask(read.Xml, exePath, userSid, userName))
+            {
+                status.State = StartupTaskState.Ours;
+                return status;
+            }
+            status.State = StartupTaskState.Other;
+            XmlNamespaceManager ns;
+            XmlDocument doc = LoadTask(read.Xml, out ns);
+            status.Command = doc == null ? null : ExecCommand(doc, ns);
+            status.SameProgram = status.Command != null && IsValidExePath(exePath)
+                && string.Equals(status.Command, exePath, StringComparison.OrdinalIgnoreCase);
+            return status;
+        }
+
+        /// <summary>
+        /// Task names to delete. Turning the option on removes only this user's old-named task (the new one
+        /// replaces it); turning it off removes this user's task too. The old-named task of another account
+        /// is never on the list, and neither is one that could not be read.
+        /// </summary>
+        public static List<string> TasksToRemove(TaskRead userTask, TaskRead legacyTask, string userSid, string userName, bool enabling)
+        {
+            var names = new List<string>();
+            if (!enabling && userTask != null && userTask.Exists) names.Add(TaskNameFor(userSid));
+            if (legacyTask != null && legacyTask.Exists && PrincipalIs(legacyTask.Xml, userSid, userName)) names.Add(LegacyTaskName);
+            return names;
+        }
 
         /// <summary>DOMAIN\user of the process token, the form LogonTrigger and Principal expect.</summary>
         public static string CurrentUserId()
         {
             using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
                 return identity.Name;
+        }
+
+        /// <summary>The SID of the process token (S-1-5-21-...), which names this user's task.</summary>
+        public static string CurrentUserSid()
+        {
+            using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+                return identity.User == null ? null : identity.User.Value;
         }
 
         public static bool IsValidExePath(string exePath)
@@ -216,16 +388,19 @@ namespace RamOptimiser.Gui
 
         // ---- Execution (touches the real Task Scheduler: never called from tests) ----
 
-        /// <summary>Registers (or replaces) the logon task through the Task Scheduler COM API.</summary>
+        /// <summary>
+        /// Registers (or replaces) this user's logon task through the Task Scheduler COM API, then removes this
+        /// user's task under the old shared name, which would otherwise start the app a second time.
+        /// </summary>
         public static SchtasksResult Enable(string exePath)
         {
-            string xml = BuildTaskXml(exePath, CurrentUserId());
-            try
-            {
-                WithRootFolder(folder => Release(Call(folder, "RegisterTask", BuildRegisterArgs(xml))));
-                return new SchtasksResult { ExitCode = 0, StdOut = "", StdErr = "" };
-            }
+            string sid = CurrentUserSid(), user = CurrentUserId();
+            string name = TaskNameFor(sid);
+            string xml = BuildTaskXml(exePath, user);
+            TaskRead legacy = ReadTask(LegacyTaskName);
+            try { WithRootFolder(folder => Release(Call(folder, "RegisterTask", BuildRegisterArgs(name, xml)))); }
             catch (Exception ex) { return Failure(ex); }
+            return Delete(TasksToRemove(null, legacy, sid, user, true));
         }
 
         /// <summary>A failed COM call as a result: the HRESULT as exit code, the message as error text.</summary>
@@ -236,60 +411,53 @@ namespace RamOptimiser.Gui
             return new SchtasksResult { ExitCode = code == 0 ? -1 : code, StdOut = "", StdErr = inner.Message };
         }
 
+        /// <summary>Removes this user's task and this user's old-named task; another account's task is left alone.</summary>
         public static SchtasksResult Disable()
         {
-            return Run(BuildDeleteArgs());
+            string sid = CurrentUserSid(), user = CurrentUserId();
+            return Delete(TasksToRemove(ReadTask(TaskNameFor(sid)), ReadTask(LegacyTaskName), sid, user, false));
         }
 
-        /// <summary>
-        /// True when the registered task is ours for this program: it runs the running exe with --tray at
-        /// HighestAvailable. A missing task, another definition or a failure to read it reads as false.
-        /// </summary>
-        public static bool IsEnabled()
+        static SchtasksResult Delete(List<string> names)
         {
-            SchtasksResult ignored;
-            return IsEnabled(out ignored);
+            foreach (string name in names)
+            {
+                SchtasksResult r = Run(BuildDeleteArgs(name));
+                if (!r.Success) return r;
+            }
+            return new SchtasksResult { ExitCode = 0, StdOut = "", StdErr = "" };
         }
 
-        public static bool IsEnabled(out SchtasksResult result)
+        /// <summary>This user's start-up task as Settings shows it, for the running program.</summary>
+        public static StartupTaskStatus ReadStatus()
         {
             Assembly entry = Assembly.GetEntryAssembly();
-            return IsEnabled(entry == null ? null : entry.Location, out result);
-        }
-
-        public static bool IsEnabled(string exePath, out SchtasksResult result)
-        {
-            string xml;
-            result = ReadRegisteredXml(out xml);
-            if (!result.Success) return false;
-            if (MatchesRegisteredTask(xml, exePath)) return true;
-            result = new SchtasksResult { ExitCode = 0, StdOut = "", StdErr = "The registered task does not start this program." };
-            return false;
+            string sid = CurrentUserSid(), user = CurrentUserId();
+            return Classify(ReadTask(TaskNameFor(sid)), ReadTask(LegacyTaskName), entry == null ? null : entry.Location, sid, user);
         }
 
         /// <summary>
-        /// Reads the task definition through COM (IRegisteredTask.Xml). schtasks /Query /XML writes it to a
+        /// Reads a task definition through COM (IRegisteredTask.Xml). schtasks /Query /XML writes it to a
         /// pipe in the OEM code page, which loses non-ASCII characters in a program path; COM returns the
-        /// exact UTF-16 text.
+        /// exact UTF-16 text. A missing task (0x80070002) and a refused read stay apart.
         /// </summary>
-        static SchtasksResult ReadRegisteredXml(out string xml)
+        static TaskRead ReadTask(string name)
         {
             string text = null;
             try
             {
                 WithRootFolder(folder =>
                 {
-                    object task = Call(folder, "GetTask", TaskName);
+                    object task = Call(folder, "GetTask", name);
                     try { text = Get(task, "Xml") as string; }
                     finally { Release(task); }
                 });
-                xml = text;
-                return new SchtasksResult { ExitCode = 0, StdOut = "", StdErr = "" };
+                return TaskRead.Found(text);
             }
             catch (Exception ex)
             {
-                xml = null; // missing task (0x80070002), no access, or no Task Scheduler: not enabled
-                return Failure(ex);
+                Exception inner = Unwrap(ex);
+                return TaskRead.Failed(Marshal.GetHRForException(inner), inner.Message);
             }
         }
 

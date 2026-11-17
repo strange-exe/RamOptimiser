@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Threading;
@@ -62,9 +64,84 @@ namespace RamOptimiser
         }
     }
 
+    /// <summary>The watch loop. Its sampler, cleaner, clocks and wait are fields, so tests can drive it.</summary>
+    public sealed class Watcher
+    {
+        /// <summary>
+        /// Errors in a row after which watch gives up with ExitWatchFailed: failed iterations, or failed cleans
+        /// (counted on their own, as the samples between two cleans can work while every clean fails).
+        /// </summary>
+        public const int MaxConsecutiveErrors = 5;
+
+        public Func<MemorySnapshot> Sample = MemorySnapshot.Take;
+        public Func<Areas, CleanReport> Clean = Cleaner.Clean;
+        /// <summary>Monotonic time since watching started: the cooldown must not move with DST or clock changes.</summary>
+        public Func<TimeSpan> Elapsed;
+        /// <summary>Wall-clock time, for the log lines only.</summary>
+        public Func<DateTime> Now = () => DateTime.Now;
+        /// <summary>Waits one interval; returns true when watching should stop.</summary>
+        public Func<TimeSpan, bool> WaitStop;
+
+        /// <summary>
+        /// Samples, cleans when AutoCleanPolicy says so, and waits, until WaitStop says stop (ExitOk). A failed sample
+        /// or clean is logged with a timestamp and watching goes on; MaxConsecutiveErrors failed iterations, or failed
+        /// cleans, in a row end it (ExitWatchFailed).
+        /// </summary>
+        public int Run(Options o, TextWriter output, TextWriter errors)
+        {
+            TimeSpan? last = null;
+            TimeSpan cooldown = TimeSpan.FromSeconds(o.CooldownSeconds);
+            TimeSpan interval = TimeSpan.FromSeconds(o.IntervalSeconds);
+            int futileStreak = 0, errorsInARow = 0, failedCleans = 0;
+            do
+            {
+                bool cleaning = false;
+                try
+                {
+                    MemorySnapshot s = Sample();
+                    TimeSpan now = Elapsed();
+                    // Pressure eased by itself: the next time load climbs, the normal cooldown applies again.
+                    if (s.LoadPercent < o.ThresholdPercent) futileStreak = 0;
+                    if (AutoCleanPolicy.ShouldClean(s.LoadPercent, o.ThresholdPercent, last, now,
+                        AutoCleanPolicy.ThresholdCooldown(cooldown, interval, futileStreak)))
+                    {
+                        output.WriteLine("[{0:HH:mm:ss}] load {1}% >= {2}%: cleaning", Now(), s.LoadPercent, o.ThresholdPercent);
+                        // Recorded before cleaning, so a clean that keeps failing still waits the cooldown.
+                        last = now;
+                        cleaning = true;
+                        CleanReport report = Clean(o.Areas);
+                        cleaning = false;
+                        failedCleans = 0;
+                        Program.PrintReport(output, report);
+                        futileStreak = AutoCleanPolicy.NextStreak(futileStreak, report.After.LoadPercent, o.ThresholdPercent);
+                    }
+                    errorsInARow = 0;
+                }
+                catch (Exception ex)
+                {
+                    errorsInARow++;
+                    if (cleaning) failedCleans++;
+                    errors.WriteLine("[{0:HH:mm:ss}] error: {1}", Now(), ex.Message);
+                    if (errorsInARow >= MaxConsecutiveErrors)
+                    {
+                        errors.WriteLine("Stopped after {0} errors in a row.", errorsInARow);
+                        return Program.ExitWatchFailed;
+                    }
+                    if (failedCleans >= MaxConsecutiveErrors)
+                    {
+                        errors.WriteLine("Stopped after {0} failed cleans in a row.", failedCleans);
+                        return Program.ExitWatchFailed;
+                    }
+                }
+            } while (!WaitStop(TimeSpan.FromSeconds(o.IntervalSeconds)));
+            output.WriteLine("Stopped.");
+            return Program.ExitOk;
+        }
+    }
+
     public static class Program
     {
-        public const int ExitOk = 0, ExitUsage = 1, ExitPartial = 2, ExitNotElevated = 3;
+        public const int ExitOk = 0, ExitUsage = 1, ExitPartial = 2, ExitNotElevated = 3, ExitWatchFailed = 4;
 
         public static int Main(string[] args)
         {
@@ -111,21 +188,10 @@ namespace RamOptimiser
                 Console.CancelKeyPress += (s, e) => { e.Cancel = true; stop.Set(); };
                 Console.WriteLine("Watching memory: clean when load >= {0}%, check every {1}s, wait {2}s between cleans. Ctrl+C stops.",
                     o.ThresholdPercent, o.IntervalSeconds, o.CooldownSeconds);
-                DateTime? last = null;
-                do
-                {
-                    MemorySnapshot s = MemorySnapshot.Take();
-                    DateTime now = DateTime.Now;
-                    if (AutoCleanPolicy.ShouldClean(s.LoadPercent, o.ThresholdPercent, last, now, TimeSpan.FromSeconds(o.CooldownSeconds)))
-                    {
-                        Console.WriteLine("[{0:HH:mm:ss}] load {1}% >= {2}%: cleaning", now, s.LoadPercent, o.ThresholdPercent);
-                        PrintReport(Console.Out, Cleaner.Clean(o.Areas));
-                        last = now;
-                    }
-                } while (!stop.WaitOne(TimeSpan.FromSeconds(o.IntervalSeconds)));
+                Stopwatch clock = Stopwatch.StartNew();
+                var watch = new Watcher { Elapsed = () => clock.Elapsed, WaitStop = t => stop.WaitOne(t) };
+                return watch.Run(o, Console.Out, Console.Error);
             }
-            Console.WriteLine("Stopped.");
-            return ExitOk;
         }
 
         public static void PrintStatus(TextWriter w, MemorySnapshot s)
@@ -150,7 +216,9 @@ namespace RamOptimiser
         {
             foreach (AreaResult a in r.Results)
             {
-                string state = a.Skipped ? "skipped" : a.Ok ? "ok" : "FAILED";
+                AreaOutcome outcome = a.Outcome;
+                string state = outcome == AreaOutcome.Skipped ? "skipped" : outcome == AreaOutcome.Partial ? "partial"
+                    : outcome == AreaOutcome.Ok ? "ok" : "FAILED";
                 w.WriteLine("  {0,-12} {1}{2}", AreaNames.NameOf(a.Area), state, a.Message == null ? "" : ": " + a.Message);
             }
             w.WriteLine("In use: {0} -> {1} ({2} freed)",
@@ -163,25 +231,57 @@ namespace RamOptimiser
 
         private static void PrintHelp()
         {
-            Console.WriteLine(
-@"ramopt - trims Windows memory working sets and caches (cleaning needs an elevated terminal)
+            Console.WriteLine(HelpText());
+        }
 
-Usage:
-  ramopt status                          show memory use (no admin needed)
-  ramopt clean [--areas LIST | --all]    clean once
-  ramopt watch [--threshold N] [--interval S] [--cooldown S] [--areas LIST | --all]
-                                         clean whenever load reaches N% (default 85, every 30s, 300s apart)
+        /// <summary>The help text. The area list and the default set come from AreaNames.Known, so they cannot drift.</summary>
+        public static string HelpText()
+        {
+            var w = new StringWriter(CultureInfo.InvariantCulture);
+            w.WriteLine("ramopt - trims Windows memory working sets and caches (cleaning needs an elevated terminal)");
+            w.WriteLine();
+            w.WriteLine("Usage:");
+            w.WriteLine("  ramopt status                          show memory use (no admin needed)");
+            w.WriteLine("  ramopt clean [--areas LIST | --all]    clean once");
+            w.WriteLine("  ramopt watch [--threshold N] [--interval S] [--cooldown S] [--areas LIST | --all]");
+            w.WriteLine("                                         clean whenever load reaches N% (default 85, every 30s, 300s apart);");
+            w.WriteLine("                                         a clean that leaves load at N% or more doubles the wait (up to {0}x)",
+                1 << AutoCleanPolicy.MaxBackoffSteps);
+            w.WriteLine();
+            var optIn = new List<string>();
+            foreach (var kv in AreaNames.Known) if ((Areas.Default & kv.Value) == 0) optIn.Add("'" + kv.Key + "'");
+            w.WriteLine("Areas (comma separated; default = all but {0}):", JoinAnd(optIn));
+            foreach (var kv in AreaNames.Known) w.WriteLine("  {0,-13} {1}", kv.Key, AreaHelp(kv.Value));
+            w.WriteLine();
+            w.WriteLine("Exit codes: {0} ok, {1} bad arguments, {2} some area failed or only partly worked, {3} not elevated,",
+                ExitOk, ExitUsage, ExitPartial, ExitNotElevated);
+            w.Write("            {0} watch stopped after {1} errors in a row.", ExitWatchFailed, Watcher.MaxConsecutiveErrors);
+            return w.ToString();
+        }
 
-Areas (comma separated; default = all but 'standby'):
-  workingsets   trim every process's working set
-  filecache     trim the system file cache
-  modified      write dirty pages to disk
-  standby-low   drop low-priority standby cache
-  standby       drop ALL standby cache (frees most, but apps and files load slower afterwards)
-  combine       merge identical memory pages (Windows 10+)
-  registry      flush registry changes to disk (Windows 8.1+)
+        /// <summary>One line of help per area; throws for an area without one, so a new area cannot be left out.</summary>
+        internal static string AreaHelp(Areas area)
+        {
+            switch (area)
+            {
+                case Areas.CombinePages: return "merge identical memory pages (Windows 10+)";
+                case Areas.WorkingSets: return "trim every process's working set";
+                case Areas.SystemFileCache: return "trim the system file cache";
+                case Areas.VolumeCache: return "write each fixed drive's cached file changes to disk (a burst of disk writes)";
+                case Areas.ModifiedList: return "write dirty pages to disk";
+                case Areas.LowPriorityStandby: return "drop low-priority standby cache";
+                case Areas.StandbyList: return "drop ALL standby cache (frees most, but apps and files load slower afterwards)";
+                case Areas.RegistryCache: return "flush registry changes to disk (Windows 8.1+)";
+                default: throw new ArgumentOutOfRangeException("area");
+            }
+        }
 
-Exit codes: 0 ok, 1 bad arguments, 2 some area failed, 3 not elevated.");
+        static string JoinAnd(IList<string> items)
+        {
+            if (items.Count < 2) return string.Join("", items);
+            var head = new List<string>(items);
+            head.RemoveAt(head.Count - 1);
+            return string.Join(", ", head) + " and " + items[items.Count - 1];
         }
     }
 }

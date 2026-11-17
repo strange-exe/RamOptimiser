@@ -17,7 +17,7 @@ namespace RamOptimiser.App
     {
         readonly NotifyIcon icon;
         readonly ContextMenuStrip menu;
-        readonly ToolStripMenuItem openItem, cleanItem, autoItem, exitItem;
+        readonly ToolStripMenuItem openItem, cleanItem, autoItem, restartItem, exitItem;
         readonly Font boldFont;
         Icon appIcon;          // static icon at the current small-icon size
         Icon percentIcon;      // last rendered percent icon (owned)
@@ -25,7 +25,7 @@ namespace RamOptimiser.App
         bool shownLight, showingPercent;
         bool disposed;
 
-        public event EventHandler OpenRequested, CleanRequested, AutoCleanToggled, ExitRequested;
+        public event EventHandler OpenRequested, CleanRequested, AutoCleanToggled, RestartRequested, ExitRequested;
 
         public TrayController()
         {
@@ -35,12 +35,14 @@ namespace RamOptimiser.App
             openItem.Font = boldFont;
             cleanItem = new ToolStripMenuItem("Clean memory");
             autoItem = new ToolStripMenuItem("Auto-clean") { CheckOnClick = false };
+            restartItem = new ToolStripMenuItem(TrayMenuState.RestartText) { Visible = false };
             exitItem = new ToolStripMenuItem("Exit");
             openItem.Click += delegate { Raise(OpenRequested); };
             cleanItem.Click += delegate { Raise(CleanRequested); };
             autoItem.Click += delegate { Raise(AutoCleanToggled); };
+            restartItem.Click += delegate { Raise(RestartRequested); };
             exitItem.Click += delegate { Raise(ExitRequested); };
-            menu.Items.AddRange(new ToolStripItem[] { openItem, cleanItem, autoItem, new ToolStripSeparator(), exitItem });
+            menu.Items.AddRange(new ToolStripItem[] { openItem, cleanItem, autoItem, restartItem, new ToolStripSeparator(), exitItem });
 
             shownSize = SmallIconSize();
             appIcon = LoadAppIcon(shownSize);
@@ -69,12 +71,15 @@ namespace RamOptimiser.App
             }
         }
 
-        public void SetMenuState(bool canClean, bool cleaning, bool autoOn)
+        /// <summary>Words, not only a grey item: "Clean memory (needs admin)", "Auto-clean (paused: needs admin)".</summary>
+        public void SetMenuState(TrayMenuState state)
         {
             if (disposed) return;
-            cleanItem.Enabled = canClean && !cleaning;
-            cleanItem.Text = cleaning ? "Cleaning..." : "Clean memory";
-            autoItem.Checked = autoOn;
+            cleanItem.Enabled = state.CleanEnabled;
+            cleanItem.Text = state.CleanText;
+            autoItem.Checked = state.AutoChecked;
+            autoItem.Text = state.AutoText;
+            restartItem.Visible = state.ShowRestart;
         }
 
         /// <summary>snapshot null = status unavailable (static icon, plain tooltip).</summary>

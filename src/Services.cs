@@ -171,6 +171,80 @@ namespace RamOptimiser
     }
 
     /// <summary>
+    /// Where Power Clean records the services it stops, so the names outlive a crash, a kill or a sign-out before
+    /// the exit restore. The desktop app sets ServiceTrimmer.Journal; the CLI leaves it null. Both methods return
+    /// false when the record could not be written.
+    /// </summary>
+    public interface IStoppedServiceJournal
+    {
+        bool Add(string name);
+        bool Remove(string name);
+    }
+
+    /// <summary>
+    /// The journal's rules, free of I/O. The journal file sits in a folder the non-elevated user can write, so the
+    /// elevated app trusts none of it: only catalog service names are kept, whatever the file says.
+    /// </summary>
+    public static class StoppedServiceJournal
+    {
+        /// <summary>The catalog has 25 rules; per-user ones can have a few instances. More lines are not ours.</summary>
+        public const int MaxNames = 64;
+        /// <summary>Windows' own limit for a service name.</summary>
+        public const int MaxNameLength = 256;
+
+        /// <summary>Catalog names only (per-user instances included), trimmed, without duplicates, in order.</summary>
+        public static List<string> Keep(IEnumerable<string> names)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var list = new List<string>();
+            if (names == null) return list;
+            foreach (string raw in names)
+            {
+                if (raw == null) continue;
+                string n = raw.Trim();
+                if (n.Length == 0 || n.Length > MaxNameLength || ServiceCatalog.Find(n) == null) continue;
+                if (seen.Add(n)) list.Add(n);
+            }
+            return list;
+        }
+
+        /// <summary>One name per line; blank lines and # comments are ignored. At most MaxNames are kept.</summary>
+        public static List<string> Parse(string text)
+        {
+            var lines = new List<string>();
+            if (text != null)
+                foreach (string line in text.Split('\n'))
+                    if (!line.TrimStart().StartsWith("#", StringComparison.Ordinal)) lines.Add(line);
+            List<string> kept = Keep(lines);
+            if (kept.Count > MaxNames) kept.RemoveRange(MaxNames, kept.Count - MaxNames);
+            return kept;
+        }
+
+        public static string Serialize(IEnumerable<string> names)
+        {
+            var sb = new System.Text.StringBuilder("# Services RamOptimiser's Power Clean stopped and has not started again.\r\n");
+            foreach (string n in Keep(names)) sb.Append(n).Append("\r\n");
+            return sb.ToString();
+        }
+
+        /// <summary>The list plus name, when it is a catalog name not already there.</summary>
+        public static List<string> With(IEnumerable<string> names, string name)
+        {
+            List<string> list = Keep(names);
+            list.Add(name);
+            return Keep(list);
+        }
+
+        /// <summary>The list without name, compared ignoring case.</summary>
+        public static List<string> Without(IEnumerable<string> names, string name)
+        {
+            List<string> list = Keep(names);
+            if (name != null) list.RemoveAll(n => string.Equals(n, name.Trim(), StringComparison.OrdinalIgnoreCase));
+            return list;
+        }
+    }
+
+    /// <summary>
     /// Stops the chosen catalog services for this session only (the startup type is never changed, so they come
     /// back at the next restart or when Windows triggers them) and starts them again on request.
     /// </summary>
@@ -179,6 +253,57 @@ namespace RamOptimiser
         public static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(10);
         static readonly object gate = new object();
         static readonly List<string> stoppedThisSession = new List<string>();
+
+        /// <summary>Persistent copy of the stopped list (see IStoppedServiceJournal). Set once, before any clean.</summary>
+        public static IStoppedServiceJournal Journal { get; set; }
+
+        /// <summary>StopRecorded's result when the journal could not be written: nothing was stopped.</summary>
+        internal const int JournalWriteFailed = -1;
+        const int ErrorServiceDoesNotExist = 1060;
+
+        /// <summary>
+        /// Records the name first, then sends the stop, so a crash after the stop still leaves the way back (as
+        /// StartupServices does). A refused stop forgets the record again, unless keepRecord says this process
+        /// stopped the service earlier and has not started it since. Returns stopOnly's error, or JournalWriteFailed.
+        /// </summary>
+        internal static int StopRecorded(string name, IStoppedServiceJournal journal, bool keepRecord, Func<string, int> stopOnly)
+        {
+            if (journal != null && !journal.Add(name)) return JournalWriteFailed;
+            int err = stopOnly(name);
+            if (err != 0 && journal != null && !keepRecord) journal.Remove(name);
+            return err;
+        }
+
+        /// <summary>True when the exception says the service is not installed (any more). Pure.</summary>
+        internal static bool IsMissingService(InvalidOperationException ex)
+        {
+            var inner = ex == null ? null : ex.InnerException as System.ComponentModel.Win32Exception;
+            return inner != null && inner.NativeErrorCode == ErrorServiceDoesNotExist;
+        }
+
+        static bool IsStoppedByUs(string name)
+        {
+            lock (gate) return stoppedThisSession.Exists(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase));
+        }
+
+        static void Forget(string name)
+        {
+            lock (gate) stoppedThisSession.RemoveAll(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase));
+            IStoppedServiceJournal journal = Journal;
+            if (journal != null) journal.Remove(name);
+        }
+
+        /// <summary>
+        /// Takes on services an earlier run stopped and never started again (read from the journal), so Restore and
+        /// the Restore button cover them. Only catalog names are taken. Returns the names taken.
+        /// </summary>
+        public static List<string> Adopt(IEnumerable<string> names)
+        {
+            List<string> kept = StoppedServiceJournal.Keep(names);
+            foreach (string n in kept)
+                lock (gate) if (!stoppedThisSession.Exists(s => string.Equals(s, n, StringComparison.OrdinalIgnoreCase))) stoppedThisSession.Add(n);
+            return kept;
+        }
 
         /// <summary>Services this process stopped and has not started again.</summary>
         public static List<string> StoppedThisSession()
@@ -302,7 +427,8 @@ namespace RamOptimiser
                 foreach (ServiceAction a in plan)
                 {
                     if (a.Message != null) continue;
-                    int err = NativeService.StopOnly(a.Name);
+                    int err = StopRecorded(a.Name, Journal, IsStoppedByUs(a.Name), NativeService.StopOnly);
+                    if (err == JournalWriteFailed) { a.Failed = true; a.Message = "left running: the list of stopped services could not be saved"; continue; }
                     if (err == NativeService.ErrorDependentServicesRunning) { a.Message = "needed by a service that just started"; continue; }
                     if (err == NativeService.ErrorServiceNotActive) { a.Message = "not running"; continue; }
                     if (err != 0) { a.Failed = true; a.Message = new System.ComponentModel.Win32Exception(err).Message.TrimEnd('.'); continue; }
@@ -323,31 +449,88 @@ namespace RamOptimiser
         /// <summary>Starts again every service this process stopped. Ones already running count as restored.</summary>
         public static List<ServiceAction> Restore()
         {
-            lock (Operation) return RestoreLocked();
+            lock (Operation) return RestoreLocked(StoppedThisSession());
         }
 
-        static List<ServiceAction> RestoreLocked()
+        /// <summary>
+        /// Starts again only the named services that are on this process's stopped list. Start-up uses it for the
+        /// journal's leftovers, so a Power Clean that got the lock first in this run is not undone.
+        /// </summary>
+        public static List<ServiceAction> Restore(IEnumerable<string> names)
+        {
+            var wanted = new HashSet<string>(StoppedServiceJournal.Keep(names), StringComparer.OrdinalIgnoreCase);
+            lock (Operation) return RestoreLocked(StoppedThisSession().FindAll(wanted.Contains));
+        }
+
+        static List<ServiceAction> RestoreLocked(List<string> names)
         {
             var done = new List<ServiceAction>();
-            foreach (string name in StoppedThisSession())
+            foreach (string name in names)
             {
                 ServiceRule rule = ServiceCatalog.Find(name);
                 var a = new ServiceAction { Name = name, Label = rule != null ? rule.Label : name };
                 try
                 {
-                    using (var sc = new ServiceController(name))
-                    {
-                        if (sc.Status == ServiceControllerStatus.Stopped) sc.Start();
-                        sc.WaitForStatus(ServiceControllerStatus.Running, StopTimeout);
-                    }
-                    a.Started = true;
-                    lock (gate) stoppedThisSession.Remove(name);
+                    using (var sc = new ServiceController(name)) RestoreOne(new ServiceControl(sc), a, StopTimeout);
+                    if (a.Started) Forget(name);
                 }
-                catch (System.ServiceProcess.TimeoutException) { a.Failed = true; a.Message = "still starting after " + StopTimeout.TotalSeconds + " s"; }
-                catch (InvalidOperationException ex) { a.Failed = true; a.Message = Describe(ex); }
+                catch (InvalidOperationException ex)
+                {
+                    // Uninstalled, or a per-user instance from an earlier sign-in: nothing left to start.
+                    if (IsMissingService(ex)) { a.Message = "no longer installed"; Forget(name); }
+                    else { a.Failed = true; a.Message = Describe(ex); }
+                }
                 done.Add(a);
             }
             return done;
+        }
+
+        /// <summary>
+        /// Starts one service again and records the outcome in a. A service still stopping (its stop timed out in
+        /// Stop) is waited for first, then started; a paused one is continued. Tests pass a fake service.
+        /// </summary>
+        internal static void RestoreOne(IServiceControl sc, ServiceAction a, TimeSpan timeout)
+        {
+            ServiceControllerStatus status = sc.Status;
+            if (status == ServiceControllerStatus.StopPending)
+            {
+                try { sc.WaitForStatus(ServiceControllerStatus.Stopped, timeout); }
+                catch (System.ServiceProcess.TimeoutException)
+                {
+                    a.Failed = true;
+                    a.Message = "was still stopping after " + timeout.TotalSeconds + " s";
+                    return;
+                }
+                status = ServiceControllerStatus.Stopped;
+            }
+            try
+            {
+                if (status == ServiceControllerStatus.Stopped) sc.Start();
+                else if (status == ServiceControllerStatus.Paused) sc.Continue();
+                sc.WaitForStatus(ServiceControllerStatus.Running, timeout);
+                a.Started = true;
+            }
+            catch (System.ServiceProcess.TimeoutException) { a.Failed = true; a.Message = "still starting after " + timeout.TotalSeconds + " s"; }
+        }
+
+        /// <summary>The ServiceController calls RestoreOne makes.</summary>
+        internal interface IServiceControl
+        {
+            ServiceControllerStatus Status { get; }
+            void Start();
+            void Continue();
+            /// <summary>Throws System.ServiceProcess.TimeoutException when the status is not reached in time.</summary>
+            void WaitForStatus(ServiceControllerStatus status, TimeSpan timeout);
+        }
+
+        sealed class ServiceControl : IServiceControl
+        {
+            readonly ServiceController sc;
+            public ServiceControl(ServiceController sc) { this.sc = sc; }
+            public ServiceControllerStatus Status { get { sc.Refresh(); return sc.Status; } }
+            public void Start() { sc.Start(); }
+            public void Continue() { sc.Continue(); }
+            public void WaitForStatus(ServiceControllerStatus status, TimeSpan timeout) { sc.WaitForStatus(status, timeout); }
         }
 
         static string Describe(InvalidOperationException ex)

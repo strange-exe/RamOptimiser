@@ -154,14 +154,30 @@ namespace RamOptimiser
         }
     }
 
+    /// <summary>How one area went. Partial: it did part of its work (e.g. flushed some drives, not all).</summary>
+    public enum AreaOutcome { Ok, Partial, Skipped, Failed }
+
     public sealed class AreaResult
     {
         public Areas Area;
         public bool Ok;
         public bool Skipped;
+        /// <summary>Set together with Ok when only part of the work succeeded; Message says what failed.</summary>
+        public bool Partial;
         public string Message;
         public int NtStatus;     // the failing NTSTATUS, or 0
         public int Win32Error;   // the failing Win32 error code, or 0
+
+        /// <summary>The one outcome the flags add up to. Skipped wins, then failed, then partial.</summary>
+        public AreaOutcome Outcome
+        {
+            get
+            {
+                if (Skipped) return AreaOutcome.Skipped;
+                if (!Ok) return AreaOutcome.Failed;
+                return Partial ? AreaOutcome.Partial : AreaOutcome.Ok;
+            }
+        }
     }
 
     public sealed class CleanReport
@@ -177,9 +193,15 @@ namespace RamOptimiser
         /// <summary>Drop in "in use" memory (what Task Manager shows as In use). Negative if it grew.</summary>
         public long InUseFreed { get { return (long)Before.InUse - (long)After.InUse; } }
 
+        /// <summary>True when every area did all its work or was skipped; a partial area is not ok.</summary>
         public bool AllOk
         {
-            get { foreach (var r in Results) if (!r.Ok && !r.Skipped) return false; return true; }
+            get
+            {
+                foreach (var r in Results)
+                    if (r.Outcome == AreaOutcome.Failed || r.Outcome == AreaOutcome.Partial) return false;
+                return true;
+            }
         }
     }
 
@@ -274,47 +296,93 @@ namespace RamOptimiser
             }
 
             Version os = Environment.OSVersion.Version;
-            bool repeat = (areas & Areas.WorkingSets) != 0 && (areas & Areas.ModifiedList) != 0;
-            ulong passStart = 0;
-            AreaResult trim = null, flush = null;
-            foreach (var kv in AreaNames.Known)
-            {
-                if ((areas & kv.Value) == 0) continue;
-                var r = new AreaResult { Area = kv.Value };
-                if (kv.Value == Areas.WorkingSets && repeat) passStart = SafeInUse();
-                try { Run(kv.Value, os, r); }
-                catch (Exception ex) { r.Ok = false; r.Message = ex.Message; }
-                report.Results.Add(r);
-                if (kv.Value == Areas.WorkingSets) trim = r;
-                if (kv.Value == Areas.ModifiedList) flush = r;
-                // Further passes run before the standby purges, so the pages they flush are purged too.
-                if (kv.Value == Areas.ModifiedList && repeat && trim.Ok && flush.Ok)
-                    report.Passes = RepeatPasses(os, report.Before.TotalPhys, passStart, maxPasses);
-            }
-            if (report.Passes > 1) trim.Message = report.Passes + " passes";
+            RunAreas(areas, report, maxPasses, SafeInUse, r => Run(r.Area, os, r));
 
             report.After = MemorySnapshot.Take();
             return report;
         }
 
-        /// <summary>Runs trim then flush again while each pass still frees enough; returns the total pass count.</summary>
-        private static int RepeatPasses(Version os, ulong total, ulong passStart, int maxPasses)
+        /// <summary>
+        /// Runs each requested area in AreaNames.Known order and adds its result to the report, then repeats trim and
+        /// flush while it pays. inUse reads "in use" bytes (0 when unknown); run cleans r.Area into r. Tests pass fakes.
+        /// </summary>
+        internal static void RunAreas(Areas areas, CleanReport report, int maxPasses, Func<ulong> inUse, Action<AreaResult> run)
+        {
+            bool repeat = (areas & Areas.WorkingSets) != 0 && (areas & Areas.ModifiedList) != 0;
+            ulong passStart = 0;
+            // What the areas between the trim and the flush (file cache, drives) freed: later passes repeat only trim and
+            // flush, so pass 1 leaves this out to be compared like-for-like.
+            long freedBetween = 0;
+            AreaResult trim = null, flush = null;
+            foreach (var kv in AreaNames.Known)
+            {
+                if ((areas & kv.Value) == 0) continue;
+                var r = new AreaResult { Area = kv.Value };
+                bool between = repeat && trim != null && kv.Value != Areas.ModifiedList && flush == null;
+                ulong areaStart = 0;
+                if (kv.Value == Areas.WorkingSets && repeat) passStart = inUse();
+                if (between) areaStart = inUse();
+                try { run(r); }
+                catch (Exception ex) { r.Ok = false; r.Message = ex.Message; }
+                if (between && areaStart != 0)
+                {
+                    ulong areaEnd = inUse();
+                    if (areaEnd != 0) freedBetween += (long)areaStart - (long)areaEnd;
+                }
+                report.Results.Add(r);
+                if (kv.Value == Areas.WorkingSets) trim = r;
+                if (kv.Value == Areas.ModifiedList) flush = r;
+                // Further passes run before the standby purges, so the pages they flush are purged too.
+                if (kv.Value == Areas.ModifiedList && repeat && trim.Ok && flush.Ok)
+                    report.Passes = RepeatPasses(report.Before.TotalPhys, passStart, freedBetween, maxPasses, inUse, run, trim, flush);
+            }
+            if (report.Passes > 1) trim.Message = Note(report.Passes + " passes", trim.Message);
+        }
+
+        /// <summary>
+        /// Runs trim then flush again while each pass still frees enough; returns the total pass count. A pass that
+        /// fails is noted on the trim or flush result ("pass 2 failed: why"); the area keeps its pass-1 outcome.
+        /// </summary>
+        private static int RepeatPasses(ulong total, ulong passStart, long freedBetween, int maxPasses, Func<ulong> inUse,
+            Action<AreaResult> run, AreaResult trimResult, AreaResult flushResult)
         {
             int passes = 1;
             ulong before = passStart;
+            long leaveOut = freedBetween;
             while (true)
             {
-                ulong now = SafeInUse();
-                long freed = (long)before - (long)now;
+                ulong now = inUse();
+                long freed = (long)before - (long)now - leaveOut;
+                leaveOut = 0;
                 if (before == 0 || now == 0 || !AnotherPass(freed, total, passes, maxPasses)) return passes;
                 var trim = new AreaResult { Area = Areas.WorkingSets };
                 var flush = new AreaResult { Area = Areas.ModifiedList };
-                try { Run(Areas.WorkingSets, os, trim); Run(Areas.ModifiedList, os, flush); }
-                catch (Exception) { return passes; }
-                if (!trim.Ok || !flush.Ok) return passes;
+                string why = null;
+                try
+                {
+                    run(trim);
+                    if (trim.Ok) run(flush);
+                }
+                catch (Exception ex) { why = ex.Message; }
+                AreaResult failed = !trim.Ok ? trim : !flush.Ok ? flush : null;
+                if (failed != null)
+                {
+                    AreaResult target = failed == trim ? trimResult : flushResult;
+                    string reason = (why ?? failed.Message ?? "unknown error").Trim().TrimEnd('.');
+                    target.Message = Note(target.Message, "pass " + (passes + 1) + " failed: " + reason);
+                    return passes;
+                }
                 passes++;
                 before = now;
             }
+        }
+
+        /// <summary>"first; second", or whichever one is not null.</summary>
+        static string Note(string first, string second)
+        {
+            if (string.IsNullOrEmpty(first)) return second;
+            if (string.IsNullOrEmpty(second)) return first;
+            return first + "; " + second;
         }
 
         static ulong SafeInUse()
@@ -359,29 +427,59 @@ namespace RamOptimiser
         /// </summary>
         private static void FlushVolumes(AreaResult r)
         {
-            var flushed = new List<string>();
-            var failed = new List<string>();
+            var drives = new List<KeyValuePair<string, bool>>();
             foreach (DriveInfo d in DriveInfo.GetDrives())
             {
                 if (d.DriveType != DriveType.Fixed) continue;
-                string letter = d.Name.Substring(0, 2); // "C:"
-                using (SafeFileHandle h = Native.CreateFile(@"\\.\" + letter, Native.GENERIC_READ | Native.GENERIC_WRITE,
-                    Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, IntPtr.Zero, Native.OPEN_EXISTING, 0, IntPtr.Zero))
-                {
-                    int err = h.IsInvalid ? Marshal.GetLastWin32Error()
-                        : (Native.FlushFileBuffers(h) ? 0 : Marshal.GetLastWin32Error());
-                    if (err == 0) flushed.Add(letter);
-                    else failed.Add(letter + " " + new Win32Exception(err).Message.TrimEnd('.').ToLowerInvariant());
-                    if (err != 0 && r.Win32Error == 0) r.Win32Error = err;
-                }
+                drives.Add(new KeyValuePair<string, bool>(d.Name.Substring(0, 2), d.IsReady)); // "C:", ready
             }
-            if (flushed.Count == 0 && failed.Count == 0) { Skip(r, "no fixed drives found"); return; }
-            r.Ok = flushed.Count > 0;
-            r.Message = SummariseVolumes(flushed, failed);
-            if (r.Ok) r.Win32Error = 0;
+            FlushVolumes(r, drives, FlushVolume);
         }
 
-        /// <summary>Null when every drive flushed; otherwise "flushed N of M drives; X: why".</summary>
+        /// <summary>
+        /// Flushes each fixed drive (letter, ready) with flush, which returns 0 or a Win32 error. Tests pass fakes.
+        /// A drive that is not ready (locked, offline, no media) is skipped, not flushed and not a failure. Some drives
+        /// refusing makes the area partial; all of them refusing makes it fail.
+        /// </summary>
+        internal static void FlushVolumes(AreaResult r, IEnumerable<KeyValuePair<string, bool>> drives, Func<string, int> flush)
+        {
+            var flushed = new List<string>();
+            var failed = new List<string>();
+            var notReady = new List<string>();
+            foreach (var d in drives)
+            {
+                string letter = d.Key;
+                if (!d.Value) { notReady.Add(letter + " not ready"); continue; }
+                int err = flush(letter);
+                if (err == 0) flushed.Add(letter);
+                else failed.Add(letter + " " + new Win32Exception(err).Message.TrimEnd('.').ToLowerInvariant());
+                if (err != 0 && r.Win32Error == 0) r.Win32Error = err;
+            }
+            if (flushed.Count == 0 && failed.Count == 0)
+            {
+                Skip(r, notReady.Count == 0 ? "no fixed drives found" : "no fixed drive ready; " + string.Join("; ", notReady));
+                return;
+            }
+            r.Ok = flushed.Count > 0;
+            r.Partial = r.Ok && failed.Count > 0;
+            var notes = new List<string>(failed);
+            notes.AddRange(notReady);
+            r.Message = SummariseVolumes(flushed, notes);
+            if (r.Ok && !r.Partial) r.Win32Error = 0;
+        }
+
+        /// <summary>FlushFileBuffers on the "\\.\C:" volume handle: 0, or the Win32 error.</summary>
+        private static int FlushVolume(string letter)
+        {
+            using (SafeFileHandle h = Native.CreateFile(@"\\.\" + letter, Native.GENERIC_READ | Native.GENERIC_WRITE,
+                Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, IntPtr.Zero, Native.OPEN_EXISTING, 0, IntPtr.Zero))
+            {
+                return h.IsInvalid ? Marshal.GetLastWin32Error()
+                    : (Native.FlushFileBuffers(h) ? 0 : Marshal.GetLastWin32Error());
+            }
+        }
+
+        /// <summary>Null when every drive flushed; otherwise "flushed N of M drives; X: why" (failed or not ready).</summary>
         internal static string SummariseVolumes(IList<string> flushed, IList<string> failed)
         {
             if (failed.Count == 0) return null;
@@ -481,10 +579,47 @@ namespace RamOptimiser
     /// <summary>Decides when watch mode should clean: above the threshold and outside the cooldown.</summary>
     public static class AutoCleanPolicy
     {
+        /// <summary>Each clean in a row that leaves load at or above the threshold doubles the wait, up to this many times.</summary>
+        public const int MaxBackoffSteps = 4;
+
         public static bool ShouldClean(uint loadPercent, int thresholdPercent, DateTime? lastClean, DateTime now, TimeSpan cooldown)
         {
             if (loadPercent < thresholdPercent) return false;
             return lastClean == null || now - lastClean.Value >= cooldown;
+        }
+
+        /// <summary>The same on a monotonic clock (time since watching started), which DST and clock changes do not move.</summary>
+        public static bool ShouldClean(uint loadPercent, int thresholdPercent, TimeSpan? lastClean, TimeSpan now, TimeSpan cooldown)
+        {
+            if (loadPercent < thresholdPercent) return false;
+            return lastClean == null || now - lastClean.Value >= cooldown;
+        }
+
+        /// <summary>
+        /// The cooldown, doubled per futile clean in a row (at most 2^MaxBackoffSteps times). When cleaning does not get
+        /// load under the threshold, the memory is really in use, and cleaning again soon only makes programs read their
+        /// pages back from disk. Pure.
+        /// </summary>
+        public static TimeSpan ThresholdCooldown(TimeSpan cooldown, int futileStreak)
+        {
+            int steps = Math.Max(0, Math.Min(MaxBackoffSteps, futileStreak));
+            return TimeSpan.FromTicks(cooldown.Ticks * (1L << steps));
+        }
+
+        /// <summary>
+        /// As above, for a cooldown that may be shorter than the check interval (watch --cooldown 0): once a clean
+        /// was futile, the backoff doubles the longer of the two, so a zero cooldown still backs off. Pure.
+        /// </summary>
+        public static TimeSpan ThresholdCooldown(TimeSpan cooldown, TimeSpan interval, int futileStreak)
+        {
+            if (futileStreak <= 0) return cooldown;
+            return ThresholdCooldown(cooldown > interval ? cooldown : interval, futileStreak);
+        }
+
+        /// <summary>The streak after a clean: one more when load stayed at or above the threshold, else back to 0. Pure.</summary>
+        public static int NextStreak(int streak, uint loadAfter, int thresholdPercent)
+        {
+            return loadAfter >= thresholdPercent ? Math.Min(MaxBackoffSteps, streak + 1) : 0;
         }
     }
 

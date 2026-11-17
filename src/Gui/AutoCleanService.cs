@@ -5,6 +5,9 @@ namespace RamOptimiser.Gui
 {
     public enum CleanReason { Manual, Threshold, Interval }
 
+    /// <summary>Where a failure came from: reading memory, the clean itself, or anything else (an event handler).</summary>
+    public enum ServiceErrorSource { Sample, Clean, Other }
+
     /// <summary>
     /// Samples memory on a thread-pool timer and cleans when the settings say so. Never touches the UI thread:
     /// every event is raised on a worker thread, so a GUI must marshal to its dispatcher. At most one clean
@@ -17,6 +20,7 @@ namespace RamOptimiser.Gui
         readonly Func<Areas, CleanReport> clean;
         readonly Func<DateTime> clock;
         readonly object gate = new object();
+        readonly object idle = new object();   // pulsed when a clean ends (WaitUntilIdle)
 
         volatile AppSettings settings = new AppSettings();
         Timer timer;
@@ -24,12 +28,13 @@ namespace RamOptimiser.Gui
         DateTime? lastClean;     // when the last clean (any reason) started; guarded by gate
         DateTime intervalFrom;   // last clean, or Start() before the first; moved to now if the clock goes back; guarded by gate
         int cleaning;            // 1 while a clean runs (Interlocked)
+        int cleanAreas;          // the running clean's Areas, 0 before it has read them and after it ends (Volatile)
         int ticking;             // 1 while a tick runs (Interlocked)
         int futileStreak;        // threshold cleans in a row that left load at or above the threshold; guarded by gate
         bool disposed;
 
         /// <summary>Each clean in a row that leaves load at or above the threshold doubles the wait, up to this many times.</summary>
-        public const int MaxBackoffSteps = 4;
+        public const int MaxBackoffSteps = AutoCleanPolicy.MaxBackoffSteps;
 
         /// <summary>Cleans in a row that did not bring load under the threshold (0 to MaxBackoffSteps).</summary>
         public int FutileStreak { get { lock (gate) return futileStreak; } }
@@ -39,6 +44,11 @@ namespace RamOptimiser.Gui
         /// <summary>Always follows CleanStarted. The report is null when the clean threw (Error was raised first).</summary>
         public event Action<CleanReport, CleanReason> CleanCompleted;
         public event Action<Exception> Error;
+        /// <summary>
+        /// Raised with Error for every failure, tagged with its source: a manual clean runs beside the sampling
+        /// timer, so a sampling failure can arrive while a clean runs and must not be taken for the clean's.
+        /// </summary>
+        public event Action<Exception, ServiceErrorSource> Failed;
 
         /// <param name="clock">Use () => DateTime.UtcNow in the app: local time jumps at DST changes.</param>
         public AutoCleanService(Func<MemorySnapshot> sample, Func<Areas, CleanReport> clean, Func<DateTime> clock)
@@ -53,6 +63,50 @@ namespace RamOptimiser.Gui
         }
 
         public bool IsCleaning { get { return Volatile.Read(ref cleaning) == 1; } }
+
+        /// <summary>
+        /// A clean runs whose areas include services (Power Clean), so it may still stop some. Before the clean has
+        /// read its areas, the current settings' areas stand in for them.
+        /// </summary>
+        public bool CleanMayStopServices
+        {
+            get
+            {
+                if (!IsCleaning) return false;
+                Areas areas = (Areas)Volatile.Read(ref cleanAreas) | settings.CleanAreas;
+                return (areas & Areas.Services) != 0;
+            }
+        }
+
+        /// <summary>
+        /// Waits up to timeout for a clean in flight to finish. True when none is running. Works after Dispose,
+        /// which leaves a running clean to finish: Exit uses it so the restore never starts before a Power Clean's stops.
+        /// </summary>
+        public bool WaitUntilIdle(TimeSpan timeout)
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            lock (idle)
+            {
+                while (IsCleaning)
+                {
+                    TimeSpan left = timeout - watch.Elapsed;
+                    if (left <= TimeSpan.Zero) return false;
+                    Monitor.Wait(idle, left);
+                }
+                return true;
+            }
+        }
+
+        /// <summary>Clears the running flag and wakes WaitUntilIdle.</summary>
+        void EndClean()
+        {
+            lock (idle)
+            {
+                Volatile.Write(ref cleanAreas, 0);
+                Interlocked.Exchange(ref cleaning, 0);
+                Monitor.PulseAll(idle);
+            }
+        }
 
         public DateTime? LastClean { get { lock (gate) return lastClean; } }
 
@@ -113,7 +167,7 @@ namespace RamOptimiser.Gui
             }
             catch
             {
-                Interlocked.Exchange(ref cleaning, 0);
+                EndClean();
                 throw;
             }
             return true;
@@ -154,14 +208,13 @@ namespace RamOptimiser.Gui
         /// <summary>The settings' cooldown, doubled per futile clean in a row (at most 2^MaxBackoffSteps times). Pure.</summary>
         public static TimeSpan ThresholdCooldown(AppSettings s, int futileStreak)
         {
-            int steps = Math.Max(0, Math.Min(MaxBackoffSteps, futileStreak));
-            return TimeSpan.FromSeconds((double)s.CooldownSeconds * (1 << steps));
+            return AutoCleanPolicy.ThresholdCooldown(TimeSpan.FromSeconds(s.CooldownSeconds), futileStreak);
         }
 
         /// <summary>The streak after a clean: one more when load stayed at or above the threshold, else back to 0. Pure.</summary>
         public static int NextStreak(int streak, uint loadAfter, int thresholdPercent)
         {
-            return loadAfter >= thresholdPercent ? Math.Min(MaxBackoffSteps, streak + 1) : 0;
+            return AutoCleanPolicy.NextStreak(streak, loadAfter, thresholdPercent);
         }
 
         void OnTimer(object state)
@@ -174,7 +227,7 @@ namespace RamOptimiser.Gui
                 try { RunTick(); }
                 finally { Interlocked.Exchange(ref ticking, 0); }
             }
-            catch (Exception ex) { RaiseError(ex); }
+            catch (Exception ex) { RaiseError(ex, ServiceErrorSource.Other); }
         }
 
         /// <summary>One sample-and-decide pass, run synchronously (the timer calls this; so do tests).</summary>
@@ -182,8 +235,8 @@ namespace RamOptimiser.Gui
         {
             MemorySnapshot snap;
             try { snap = sample(); }
-            catch (Exception ex) { RaiseError(ex); return; }
-            if (snap == null) { RaiseError(new InvalidOperationException("The sample function returned no snapshot.")); return; }
+            catch (Exception ex) { RaiseError(ex, ServiceErrorSource.Sample); return; }
+            if (snap == null) { RaiseError(new InvalidOperationException("The sample function returned no snapshot."), ServiceErrorSource.Sample); return; }
             Raise(Sampled, snap);
 
             AppSettings s = settings;
@@ -213,13 +266,14 @@ namespace RamOptimiser.Gui
             try
             {
                 Areas areas = settings.CleanAreas;
+                Volatile.Write(ref cleanAreas, (int)areas);
                 // Recorded before cleaning so a clean that keeps failing (e.g. not elevated) still waits the
                 // cooldown instead of retrying on every tick.
                 lock (gate) { lastClean = clock(); intervalFrom = lastClean.Value; }
                 Raise(CleanStarted, reason);
                 CleanReport report = null;
                 try { report = clean(areas); }
-                catch (Exception ex) { RaiseError(ex); }
+                catch (Exception ex) { RaiseError(ex, ServiceErrorSource.Clean); }
                 if (report != null && report.After != null)
                 {
                     int threshold = settings.ThresholdPercent;
@@ -229,26 +283,32 @@ namespace RamOptimiser.Gui
                 if (completed != null)
                 {
                     try { completed(report, reason); }
-                    catch (Exception ex) { RaiseError(ex); }
+                    catch (Exception ex) { RaiseError(ex, ServiceErrorSource.Other); }
                 }
             }
-            catch (Exception ex) { RaiseError(ex); }
-            finally { Interlocked.Exchange(ref cleaning, 0); }
+            catch (Exception ex) { RaiseError(ex, ServiceErrorSource.Clean); }
+            finally { EndClean(); }
         }
 
         void Raise<T>(Action<T> handler, T arg)
         {
             if (handler == null) return;
             try { handler(arg); }
-            catch (Exception ex) { RaiseError(ex); }
+            catch (Exception ex) { RaiseError(ex, ServiceErrorSource.Other); }
         }
 
-        void RaiseError(Exception ex)
+        void RaiseError(Exception ex, ServiceErrorSource source)
         {
             var handler = Error;
-            if (handler == null) return;
-            try { handler(ex); }
-            catch { } // an Error handler that throws has nowhere left to report to
+            if (handler != null)
+            {
+                try { handler(ex); }
+                catch { } // an Error handler that throws has nowhere left to report to
+            }
+            var tagged = Failed;
+            if (tagged == null) return;
+            try { tagged(ex, source); }
+            catch { }
         }
     }
 }

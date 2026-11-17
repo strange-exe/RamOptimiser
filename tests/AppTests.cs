@@ -39,8 +39,218 @@ namespace RamOptimiser.Tests
             IconTests();
             XamlTests();
             PowerCleanTests();
+            RecoveryTests();
             StartupTests();
+            UiStateTests();
+            SourceTests();
             return failed;
+        }
+
+        // ---------------------------------------------------------------- UI state (U1, U2, U8, U12, U13, U19, P4, P13)
+
+        static void UiStateTests()
+        {
+            var inv = CultureInfo.InvariantCulture;
+
+            // U2: loading and applying are separate; while a change applies, no switch can show an unapplied state.
+            var flow = new StartupFlow();
+            Check("startup flow: starts not loaded", flow.Phase == StartupPhase.NotLoaded && !flow.SwitchesEnabled);
+            Check("startup flow: first load starts", flow.TryStartLoad() && flow.Phase == StartupPhase.Loading);
+            Check("startup flow: a second load waits", !flow.TryStartLoad());
+            Check("startup flow: no change while loading", !flow.TryStartApply("svc|A", "Service A", false));
+            flow.Loaded();
+            Check("startup flow: ready after load", flow.Phase == StartupPhase.Ready && flow.SwitchesEnabled && flow.BusyLine == null);
+            Check("startup flow: a change starts", flow.TryStartApply("svc|A", "Service A", false) && flow.Phase == StartupPhase.Applying);
+            Check("startup flow: switches wait while applying", !flow.SwitchesEnabled);
+            Check("startup flow: a second change is refused", !flow.TryStartApply("svc|B", "Service B", false) && flow.ApplyingKey == "svc|A");
+            Check("startup flow: no fresh load while applying", !flow.TryStartLoad() && flow.Phase == StartupPhase.Applying);
+            Check("startup flow: the changing row shows the state asked for", !flow.ShowsOn("svc|A", true)
+                && flow.ShowsOn("svc|B", true) && !flow.ShowsOn("svc|B", false));
+            Check("startup flow: busy line", flow.BusyLine == "Turning off Service A... Other switches wait until this finishes.", flow.BusyLine);
+            flow.Loaded();
+            Check("startup flow: ready after the reload", flow.Phase == StartupPhase.Ready && flow.ApplyingKey == null && flow.ShowsOn("svc|A", true));
+            Check("startup flow: turning on", flow.TryStartApply("svc|B", "Service B", true)
+                && flow.BusyLine == "Turning on Service B... Other switches wait until this finishes.", flow.BusyLine);
+
+            // U1: a row's error is announced once, not on every rebuild of the list.
+            var said = new AnnouncedErrors();
+            Check("error announce: first time", said.ShouldAnnounce("app|x", "Could not turn off X. access is denied"));
+            Check("error announce: not again on a rebuild", !said.ShouldAnnounce("app|x", "Could not turn off X. access is denied"));
+            Check("error announce: another row is its own", said.ShouldAnnounce("app|y", "Could not turn off Y. access is denied"));
+            Check("error announce: a new error on the row is said", said.ShouldAnnounce("app|x", "Could not turn on X. busy"));
+            said.Forget("app|x");
+            Check("error announce: said again after it was cleared", said.ShouldAnnounce("app|x", "Could not turn on X. busy"));
+
+            // U12: one view state for the Memory tab.
+            var view = new MemoryView();
+            Check("memory view: initial", view.State == MemoryViewState.Initial && !view.HasData
+                && AppText.MemoryCaption(MemoryViewState.Initial) == "Reading memory...");
+            view.SampleFailed();
+            Check("memory view: first sample failed", view.State == MemoryViewState.FailedNoData
+                && AppText.MemoryCaption(MemoryViewState.FailedNoData) == "Unavailable");
+            Check("memory view: clean waits for data", !AppText.CleanEnabled(true, false, MemoryViewState.FailedNoData)
+                && AppText.CleanEnabled(true, false, MemoryViewState.Initial) && AppText.CleanEnabled(true, false, MemoryViewState.LiveWithError)
+                && !AppText.CleanEnabled(false, false, MemoryViewState.Live) && !AppText.CleanEnabled(true, true, MemoryViewState.Live));
+            Check("memory view: clean help says why", AppText.CleanHelp(true, MemoryViewState.FailedNoData, null) == AppText.CleanNeedsData
+                && AppText.CleanHelp(false, MemoryViewState.FailedNoData, null) == AppText.CleanNeedsAdmin
+                && AppText.CleanHelp(true, MemoryViewState.Live, "note") == "note" && AppText.CleanHelp(true, MemoryViewState.Live, null) == "");
+            string noData = AppText.SampleErrorText("Access is denied.", 2, false);
+            Check("sample error: without data says Clean waits", noData
+                == "Memory status could not be read: access is denied. Trying again every 2 seconds. Clean memory waits until it can be read.", noData);
+            Check("sample error: with data", AppText.SampleErrorText("Access is denied.", 2, true)
+                == "Memory status could not be read: access is denied. Trying again every 2 seconds.");
+            var read = new DateTime(2026, 11, 17, 14, 32, 5);
+            view.Sampled(read);
+            Check("memory view: live", view.State == MemoryViewState.Live && view.HasData && AppText.MemoryCaption(MemoryViewState.Live) == null);
+            view.SampleFailed();
+            Check("memory view: live with error keeps when it was read", view.State == MemoryViewState.LiveWithError && view.LastRead == read);
+            string lastRead = AppText.LastReadLine(read, new DateTime(2026, 11, 17, 14, 40, 0), inv);
+            Check("memory view: last read line", lastRead == "Last read at 14:32.", lastRead);
+            view.Sampled(read.AddSeconds(2));
+            Check("memory view: live again", view.State == MemoryViewState.Live);
+
+            // U13: the last-clean line says the day when it was not today.
+            var report = new CleanReport { Before = Snap(16 * GB, 4 * GB, 75), After = Snap(16 * GB, 6 * GB, 62) };
+            report.Results.Add(new AreaResult { Area = Areas.WorkingSets, Ok = true });
+            var cleanAt = new DateTime(2026, 11, 16, 14, 32, 0);
+            string today = AppText.LastClean(cleanAt, cleanAt.AddHours(2), report, false, inv);
+            Check("last clean: today has the time only", today.StartsWith("Last clean at 14:32 freed "), today);
+            string yesterday = AppText.LastClean(cleanAt, new DateTime(2026, 11, 17, 0, 1, 0), report, false, inv);
+            Check("last clean: yesterday says so", yesterday.StartsWith("Last clean yesterday at 14:32 freed "), yesterday);
+            string older = AppText.LastClean(cleanAt, new DateTime(2026, 11, 19, 9, 0, 0), null, true, inv);
+            Check("last clean: older shows the date", older == "Auto-clean on 11/16/2026 at 14:32 did not finish.", older);
+            string failedLine = AppText.ResultLine(cleanAt, cleanAt, null, new InvalidOperationException("Boom."), false, inv);
+            Check("result line: the clean's failure is appended", failedLine == "Last clean at 14:32 did not finish. The clean stopped: boom.", failedLine);
+            Check("result line: a finished clean has no failure text", AppText.ResultLine(cleanAt, cleanAt, report, new InvalidOperationException("x"), false, inv)
+                == AppText.LastClean(cleanAt, cleanAt, report, false, inv));
+
+            // U8: the tray menu says when auto-clean is paused and why Clean is unavailable.
+            TrayMenuState m = TrayMenuState.For(false, false, true);
+            Check("tray: not admin, auto-clean says paused", m.AutoText == "Auto-clean (paused: needs admin)" && m.AutoChecked, m.AutoText);
+            Check("tray: not admin, clean says why", !m.CleanEnabled && m.CleanText == "Clean memory (needs admin)", m.CleanText);
+            Check("tray: not admin offers restart", m.ShowRestart && TrayMenuState.RestartText == "Restart as administrator");
+            m = TrayMenuState.For(false, false, false);
+            Check("tray: not admin, auto-clean off is just off", m.AutoText == "Auto-clean" && !m.AutoChecked);
+            m = TrayMenuState.For(true, false, true);
+            Check("tray: admin", m.CleanEnabled && m.CleanText == "Clean memory" && m.AutoText == "Auto-clean" && m.AutoChecked && !m.ShowRestart);
+            m = TrayMenuState.For(true, true, false);
+            Check("tray: cleaning", !m.CleanEnabled && m.CleanText == "Cleaning..." && !m.AutoChecked);
+            m = TrayMenuState.For(true, false, true, false);
+            Check("tray: memory unreadable, clean says why", !m.CleanEnabled && m.CleanText == "Clean memory (memory status unavailable)", m.CleanText);
+            m = TrayMenuState.For(false, false, true, false);
+            Check("tray: not admin is said before unreadable", m.CleanText == "Clean memory (needs admin)", m.CleanText);
+
+            // P4: a threshold change waiting for its 400 ms save is flushed, once.
+            var save = new PendingSave();
+            Check("pending save: nothing to flush", !save.Pending && !save.Take());
+            save.Changed();
+            Check("pending save: a change is flushed once", save.Pending && save.Take() && !save.Take());
+            save.Changed();
+            save.Cancel();
+            Check("pending save: cancel drops it", !save.Take());
+
+            // P13: a sampling error during a clean stays a sampling error.
+            Check("errors: a clean's failure is the clean's", ServiceErrorRoute.IsCleanFailure(ServiceErrorSource.Clean, false)
+                && ServiceErrorRoute.IsCleanFailure(ServiceErrorSource.Clean, true));
+            Check("errors: a sample's failure during a clean is the sample's", !ServiceErrorRoute.IsCleanFailure(ServiceErrorSource.Sample, true)
+                && !ServiceErrorRoute.IsCleanFailure(ServiceErrorSource.Sample, false));
+            Check("errors: another failure during a clean", ServiceErrorRoute.IsCleanFailure(ServiceErrorSource.Other, true)
+                && !ServiceErrorRoute.IsCleanFailure(ServiceErrorSource.Other, false));
+
+            // U19: only broadcasts that can change colours re-read the theme; high contrast says it overrides the choice.
+            Check("theme: colour broadcasts re-read the theme", ThemeResolver.AffectsTheme(Microsoft.Win32.UserPreferenceCategory.General)
+                && ThemeResolver.AffectsTheme(Microsoft.Win32.UserPreferenceCategory.Color)
+                && ThemeResolver.AffectsTheme(Microsoft.Win32.UserPreferenceCategory.VisualStyle)
+                && ThemeResolver.AffectsTheme(Microsoft.Win32.UserPreferenceCategory.Accessibility));
+            Check("theme: unrelated broadcasts do not", !ThemeResolver.AffectsTheme(Microsoft.Win32.UserPreferenceCategory.Desktop)
+                && !ThemeResolver.AffectsTheme(Microsoft.Win32.UserPreferenceCategory.Power)
+                && !ThemeResolver.AffectsTheme(Microsoft.Win32.UserPreferenceCategory.Locale)
+                && !ThemeResolver.AffectsTheme(Microsoft.Win32.UserPreferenceCategory.Mouse)
+                && !ThemeResolver.AffectsTheme(Microsoft.Win32.UserPreferenceCategory.Keyboard));
+            Check("theme: high contrast note", ThemeResolver.ThemeNote(true) == "High contrast is on, so Windows' own colours are used."
+                && ThemeResolver.ThemeNote(false) == null);
+
+            string main = File.ReadAllText(Path.Combine(XamlDir(), "MainWindow.xaml"));
+            Check("memory tab has a last-read note", main.Contains("x:Name=\"LastReadNote\""));
+            Check("settings has a theme note", main.Contains("x:Name=\"ThemeNote\""));
+        }
+
+        // ---------------------------------------------------------------- WPF-only code paths, checked in source (P4, P14)
+
+        static void SourceTests()
+        {
+            string dir = Path.GetFullPath(Path.Combine(XamlDir(), ".."));
+            string main = File.ReadAllText(Path.Combine(dir, "AppMain.cs"));
+            Match startCatch = Regex.Match(main, @"shell\.Start\(\);\s*\}\s*catch \(Exception ex\)\s*\{(?<body>[^}]*)\}");
+            Check("start-up failure removes the tray icon", startCatch.Success && startCatch.Groups["body"].Value.Contains("EmergencyCleanup()"),
+                startCatch.Success ? startCatch.Groups["body"].Value : "catch not found");
+            // Before the modal error box: its message loop would otherwise run the live tray menu and timer work.
+            string body = startCatch.Success ? startCatch.Groups["body"].Value : "";
+            int cleanup = body.IndexOf("EmergencyCleanup()", StringComparison.Ordinal), fatal = body.IndexOf("Fatal(", StringComparison.Ordinal);
+            Check("start-up failure removes the tray icon before the error box", cleanup >= 0 && fatal > cleanup, body);
+
+            string shell = File.ReadAllText(Path.Combine(dir, "AppShell.cs"));
+            int exit = shell.IndexOf("public void Exit()", StringComparison.Ordinal);
+            int flush = exit < 0 ? -1 : shell.IndexOf("FlushThreshold();", exit, StringComparison.Ordinal);
+            int mark = exit < 0 ? -1 : shell.IndexOf("exiting = true;", exit, StringComparison.Ordinal);
+            Check("exit saves a pending threshold first", exit >= 0 && flush > exit && flush < mark);
+            int restart = shell.IndexOf("void RestartElevated()", StringComparison.Ordinal);
+            int relaunch = restart < 0 ? -1 : shell.IndexOf("TryRelaunchElevated", restart, StringComparison.Ordinal);
+            int flush2 = restart < 0 ? -1 : shell.IndexOf("FlushThreshold();", restart, StringComparison.Ordinal);
+            Check("restart as administrator saves a pending threshold first", restart >= 0 && flush2 > restart && flush2 < relaunch);
+            // Started from the tray with the window hidden, a failed restart shows the window, so its error line is seen.
+            Match restartCatch = restart < 0 ? Match.Empty
+                : Regex.Match(shell.Substring(restart), @"TryRelaunchElevated[^;]*;\s*\}\s*catch \(Exception ex\)\s*\{(?<body>[^}]*)\}");
+            Check("a failed restart as administrator shows its error", restartCatch.Success && restartCatch.Groups["body"].Value.Contains("ShowWindow()")
+                && restartCatch.Groups["body"].Value.Contains("memoryTab.IsSelected = true"),
+                restartCatch.Success ? restartCatch.Groups["body"].Value : "catch not found");
+        }
+
+        // ---------------------------------------------------------------- services restored at start-up (P3, E10)
+
+        static ServiceAction Done(string label, bool started, string message)
+        {
+            return new ServiceAction { Name = label, Label = label, Started = started, Failed = !started && message != "no longer installed", Message = message };
+        }
+
+        static void RecoveryTests()
+        {
+            const string Retry = " Try Restore services in Settings, or restart Windows.";
+            var one = new List<ServiceAction> { Done("Print Spooler", true, null) };
+            string line = AppText.RecoveryLine(one, null);
+            Check("recovery: one restored", line == "Power Clean left 1 service stopped when the app last closed. It is running again.", line);
+            Check("recovery: one restored went well", AppText.RecoveryWentWell(one, null));
+            List<AreaLine> rows = AppText.RecoveryLines(one);
+            Check("recovery: one ok row", rows.Count == 1 && rows[0].Label == "Print Spooler" && rows[0].State == AreaState.Ok
+                && rows[0].Status == "ok" && rows[0].Area == Areas.Services);
+
+            var two = new List<ServiceAction> { Done("Print Spooler", true, null), Done("SysMain", true, null) };
+            line = AppText.RecoveryLine(two, null);
+            Check("recovery: two restored", line == "Power Clean left 2 services stopped when the app last closed. They are running again.", line);
+
+            var mixed = new List<ServiceAction> { Done("Print Spooler", true, null), Done("SysMain", false, "Access is denied") };
+            line = AppText.RecoveryLine(mixed, null);
+            Check("recovery: one of two failed", line == "Power Clean left 2 services stopped when the app last closed. 1 is running again; 1 could not be started." + Retry, line);
+            Check("recovery: a failure gets the warning", !AppText.RecoveryWentWell(mixed, null));
+            rows = AppText.RecoveryLines(mixed);
+            Check("recovery: failed row says why", rows.Count == 2 && rows[1].State == AreaState.Failed && rows[1].Status == "failed: access is denied",
+                rows.Count > 1 ? rows[1].Status : rows.Count.ToString());
+
+            var failedOne = new List<ServiceAction> { Done("Print Spooler", false, "still starting after 10 s") };
+            line = AppText.RecoveryLine(failedOne, null);
+            Check("recovery: the only one failed", line == "Power Clean left 1 service stopped when the app last closed. It could not be started again." + Retry, line);
+
+            var gone = new List<ServiceAction> { Done("Connected Devices Platform", false, "no longer installed") };
+            Check("recovery: a service no longer installed says nothing", AppText.RecoveryLine(gone, null) == null && AppText.RecoveryLines(gone).Count == 0);
+            var withGone = new List<ServiceAction> { Done("Print Spooler", true, null), Done("Connected Devices Platform", false, "no longer installed") };
+            line = AppText.RecoveryLine(withGone, null);
+            Check("recovery: gone ones are not counted", line == "Power Clean left 1 service stopped when the app last closed. It is running again."
+                && AppText.RecoveryWentWell(withGone, null), line);
+            Check("recovery: nothing left, nothing said", AppText.RecoveryLine(new List<ServiceAction>(), null) == null && AppText.RecoveryLine(null, null) == null);
+
+            line = AppText.RecoveryLine(null, "Access is denied.");
+            Check("recovery: the restore itself failed", line == "Services an earlier Power Clean stopped could not be started again: access is denied." + Retry, line);
+            Check("recovery: that gets the warning", !AppText.RecoveryWentWell(null, "x"));
         }
 
         // ---------------------------------------------------------------- Startup view
@@ -233,6 +443,14 @@ namespace RamOptimiser.Tests
             partial.Results.Add(new AreaResult { Area = Areas.CombinePages, NtStatus = unchecked((int)0xC00000BB) });
             Check("last clean: failures counted", AppText.LastClean(at, partial, false, inv)
                 == "Last clean at 14:32 freed nothing. Load went from 75% to 75%. 1 area failed." && !AppText.CleanWentWell(partial));
+            var someDrives = new CleanReport { Before = Snap(16 * GB, 4 * GB, 75), After = Snap(16 * GB, 4 * GB, 75) };
+            someDrives.Results.Add(new AreaResult { Area = Areas.WorkingSets, Ok = true });
+            someDrives.Results.Add(new AreaResult { Area = Areas.VolumeCache, Ok = true, Partial = true, Message = "flushed 1 of 2 drives; E: access is denied" });
+            string someLine = AppText.LastClean(at, someDrives, false, inv);
+            Check("last clean: partial area counted, not a full success",
+                someLine == "Last clean at 14:32 freed nothing. Load went from 75% to 75%. 1 area partly failed." && !AppText.CleanWentWell(someDrives), someLine);
+            Check("last auto-clean: partial area counted", AppText.LastAutoClean(at, someDrives, inv)
+                == "Last auto-clean at 14:32: nothing freed, 1 area partly failed", AppText.LastAutoClean(at, someDrives, inv));
 
             Check("commit: unknown without a limit", AppText.CommitText(new MemorySnapshot()) == "unknown"
                 && AppText.CommitName(new MemorySnapshot()) == "Committed: unknown");
@@ -315,6 +533,11 @@ namespace RamOptimiser.Tests
             Check("describe: label, state, words", line.Label == "Combine identical pages" && line.State == AreaState.Failed
                 && line.Status.StartsWith("failed: "));
             Check("describe: skipped state", AppText.Describe(new AreaResult { Area = Areas.RegistryCache, Skipped = true }).State == AreaState.Skipped);
+            // A partial area keeps its "ok: ..." words, but its row gets the caution state, matching the summary's warning.
+            line = AppText.Describe(new AreaResult { Area = Areas.VolumeCache, Ok = true, Partial = true, Message = "Flushed 1 of 2 drives; E: access is denied" });
+            Check("describe: a partial area has its own state and keeps its ok words", line.State == AreaState.Partial
+                && line.Status == "ok: flushed 1 of 2 drives; E: access is denied", line.State + " " + line.Status);
+            Check("describe: a full ok stays ok", AppText.Describe(new AreaResult { Area = Areas.WorkingSets, Ok = true }).State == AreaState.Ok);
         }
 
         // ---------------------------------------------------------------- clean report wording
@@ -526,6 +749,64 @@ namespace RamOptimiser.Tests
             Check("launch: no args shows the window", !LaunchOptions.Parse(new string[0]).StartInTray && !LaunchOptions.Parse(null).StartInTray);
             Check("launch: --tray", LaunchOptions.Parse(new[] { "--tray" }).StartInTray && LaunchOptions.Parse(new[] { "x", "--TRAY" }).StartInTray);
             Check("launch: unknown args ignored", !LaunchOptions.Parse(new[] { "-tray", "tray" }).StartInTray);
+
+            // P9: the elevated copy is told who launched it; only a well-formed SID is kept.
+            const string Sid = "S-1-5-21-1-2-3-1001";
+            LaunchOptions lo = LaunchOptions.Parse(new[] { Elevation.LauncherArgument, Sid });
+            Check("launch: launcher SID", lo.LauncherSid == Sid && !lo.StartInTray, lo.LauncherSid);
+            Check("launch: no launcher by default", LaunchOptions.Parse(new string[0]).LauncherSid == null
+                && LaunchOptions.Parse(null).LauncherSid == null);
+            Check("launch: a malformed launcher SID is dropped", LaunchOptions.Parse(new[] { Elevation.LauncherArgument, "S-1-5-18\" x" }).LauncherSid == null
+                && LaunchOptions.Parse(new[] { Elevation.LauncherArgument }).LauncherSid == null
+                && LaunchOptions.Parse(new[] { Elevation.LauncherArgument, "s-1-5-18" }).LauncherSid == null);
+            LaunchOptions both = LaunchOptions.Parse(new[] { Elevation.LauncherArgument, "--tray" });
+            Check("launch: --tray after an empty launcher still counts", both.StartInTray && both.LauncherSid == null);
+            Check("relaunch arguments carry the launcher SID", Elevation.RelaunchArgs(Sid) == "--launched-by " + Sid, Elevation.RelaunchArgs(Sid));
+            bool refused = false;
+            try { Elevation.RelaunchArgs("S-1-5-18 --tray"); }
+            catch (ArgumentException) { refused = true; }
+            Check("relaunch arguments refuse a malformed SID", refused);
+            StartWithWindowsTextTests();
+        }
+
+        /// <summary>P2 and P9: what the Settings tab says next to Start with Windows, decided without WPF.</summary>
+        static void StartWithWindowsTextTests()
+        {
+            var absent = new StartupTaskStatus { State = StartupTaskState.Absent };
+            var ours = new StartupTaskStatus { State = StartupTaskState.Ours };
+            var copy = new StartupTaskStatus { State = StartupTaskState.Other, Command = @"C:\Users\me\bin\RamOptimiser.exe" };
+            var same = new StartupTaskStatus { State = StartupTaskState.Other, Command = @"C:\Apps\RamOptimiser.exe", SameProgram = true };
+            var odd = new StartupTaskStatus { State = StartupTaskState.Other };
+            var denied = new StartupTaskStatus { State = StartupTaskState.Unreadable, Error = "Access is denied." };
+
+            Check("startup line: none when absent or ours", AppText.StartupStatusLine(absent) == null && AppText.StartupStatusLine(ours) == null
+                && AppText.StartupStatusLine(null) == null);
+            string line = AppText.StartupStatusLine(copy);
+            Check("startup line: a stale task names the other copy", line == @"A start-up task exists but starts another copy: C:\Users\me\bin\RamOptimiser.exe. Turning this on replaces it.", line);
+            line = AppText.StartupStatusLine(same);
+            Check("startup line: this program with other settings", line == "A start-up task for this program exists with other settings. Turning this on replaces it.", line);
+            line = AppText.StartupStatusLine(odd);
+            Check("startup line: a task that starts something else", line == "A start-up task exists but does not start this program. Turning this on replaces it.", line);
+            line = AppText.StartupStatusLine(denied);
+            Check("startup line: an unreadable task is not shown as off", line == "Could not read the start-up task: Access is denied.", line);
+
+            Check("startup reason: none when ours and elevated", AppText.StartupReason(ours, true, null, null) == null);
+            Check("startup reason: needs admin", AppText.StartupReason(absent, false, null, null) == AppText.StartupNeedsAdmin);
+            string reason = AppText.StartupReason(copy, false, null, null);
+            Check("startup reason: a stale task shows without admin rights too", reason == AppText.StartupStatusLine(copy) + " " + AppText.StartupNeedsAdmin, reason);
+            reason = AppText.StartupReason(copy, true, null, "Could not change the startup task: boom");
+            Check("startup reason: a failure comes first", reason == "Could not change the startup task: boom " + AppText.StartupStatusLine(copy), reason);
+            reason = AppText.StartupReason(copy, true, @"PC\admin", null);
+            Check("startup reason: another account says only that", reason == AppText.StartupOtherAccount(@"PC\admin"), reason);
+            Check("startup other account names it", AppText.StartupOtherAccount(@"PC\admin")
+                == @"Can't change this here: this copy runs as PC\admin, so the task would start for that account, not yours.", AppText.StartupOtherAccount(@"PC\admin"));
+            Check("account notice names the account", AppText.OtherAccountNotice(@"PC\admin")
+                == @"Running as PC\admin, the account that approved the administrator prompt. This copy uses that account's settings and start-up task, not yours.",
+                AppText.OtherAccountNotice(@"PC\admin"));
+
+            Check("startup switch: enabled only elevated, idle and as yourself", AppText.StartupSwitchEnabled(true, false, null)
+                && !AppText.StartupSwitchEnabled(false, false, null) && !AppText.StartupSwitchEnabled(true, true, null)
+                && !AppText.StartupSwitchEnabled(true, false, @"PC\admin"));
         }
 
         // ---------------------------------------------------------------- error log
@@ -611,6 +892,15 @@ namespace RamOptimiser.Tests
                 Check("redesign A token " + key + " defined", light.Contains(key));
             string main = File.ReadAllText(Path.Combine(dir, "MainWindow.xaml"));
             string styles = File.ReadAllText(Path.Combine(dir, "Styles.xaml"));
+            // U19: high contrast maps the track fill to the card's colour, so tracks and skeletons need an edge there.
+            string themes = File.ReadAllText(Path.Combine(dir, Path.Combine("..", "ThemeManager.cs")));
+            string shellCode = File.ReadAllText(Path.Combine(dir, Path.Combine("..", "AppShell.cs")));
+            Check("track edge token in light and dark", light.Contains("TrackEdge") && TokenValue(docs["Light.xaml"], "TrackEdge") == TokenValue(docs["Light.xaml"], "TrackBackground")
+                && TokenValue(docs["Dark.xaml"], "TrackEdge") == TokenValue(docs["Dark.xaml"], "TrackBackground"));
+            Check("track edge is window text in high contrast", themes.Contains("d[\"TrackEdge\"] = SystemColors.WindowTextBrush;"));
+            Check("skeletons have a track edge", Regex.IsMatch(styles, "x:Key=\"Skeleton\"(?:(?!</Style>)[\\s\\S])*?<Setter Property=\"BorderBrush\" Value=\"\\{DynamicResource TrackEdge\\}\"/>"));
+            Check("the commit bar's rest has a track edge", Regex.IsMatch(main, "x:Name=\"CommitRest\"[^>]*BorderBrush=\"\\{DynamicResource TrackEdge\\}\""));
+            Check("top app tracks have a track edge", shellCode.Contains("track.SetResourceReference(Border.BorderBrushProperty, \"TrackEdge\");"));
             Check("three tabs", main.Contains("x:Name=\"MemoryTab\"") && main.Contains("x:Name=\"StartupTab\"") && main.Contains("x:Name=\"SettingsTab\""));
             Check("commit charge shown", main.Contains("x:Name=\"CommitRow\""));
             Check("top apps shown", main.Contains("x:Name=\"TopList\""));
@@ -619,6 +909,7 @@ namespace RamOptimiser.Tests
             // One admin line: the old banner card and the second message under the button are gone.
             Check("no duplicate admin message under the button", !main.Contains("x:Name=\"CleanReason\""));
             Check("no admin banner card", !main.Contains("x:Name=\"ElevationNotice\""));
+            Check("another-account notice exists", main.Contains("x:Name=\"AccountNotice\""));
             Check("figures use tabular numerals", styles.Contains("Typography.NumeralAlignment\" Value=\"Tabular\"") && main.Contains("FigureText"));
 
             // Styles and tokens share the application's resources: a shared key would make
@@ -646,6 +937,17 @@ namespace RamOptimiser.Tests
             foreach (string tag in new[] { "Button", "CheckBox", "TextBox", "ComboBox", "Expander", "ToggleButton" })
                 foreach (XmlElement e in docs["MainWindow.xaml"].SelectNodes("//w:" + tag, ns))
                     Check(tag + " " + e.GetAttribute("x:Name") + " has AutomationProperties.Name", e.HasAttribute("AutomationProperties.Name"));
+        }
+
+        /// <summary>A SolidColorBrush token's Color, or null.</summary>
+        static string TokenValue(XmlDocument d, string key)
+        {
+            foreach (XmlNode n in d.DocumentElement.ChildNodes)
+            {
+                var e = n as XmlElement;
+                if (e != null && e.GetAttribute("Key", "http://schemas.microsoft.com/winfx/2006/xaml") == key) return e.GetAttribute("Color");
+            }
+            return null;
         }
 
         static List<string> Keys(XmlDocument d)

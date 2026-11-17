@@ -52,10 +52,20 @@ namespace RamOptimiser.App
         Exception cleanError;
         bool exiting, cleaningUi, syncing, mapReady, taskbarLight;
         bool viewStale, wasShowing, resultShown;
-        bool startupBusy, startupEnabled, refocusClean, refocusStartup;
+        bool startupBusy, refocusClean, refocusStartup;
         string startupMessage;
+        StartupTaskStatus startupStatus;
+        /// <summary>DOMAIN\user when this elevated copy runs as another account than the one that started it.</summary>
+        string otherAccount;
         int resultCount, sampleCount;
         bool topBusy;
+        /// <summary>Initial, live, live with a failing read, or failed before any figure was read.</summary>
+        readonly MemoryView memView = new MemoryView();
+        /// <summary>The clean the result line shows (null after a start-up restore), so the line can say "yesterday".</summary>
+        DateTime? resultAt;
+        CleanReport resultReport;
+        Exception resultError;
+        bool resultAutomatic;
 
         TabControl tabs;
         TabItem memoryTab, startupTab, settingsTab;
@@ -64,7 +74,7 @@ namespace RamOptimiser.App
         ScrollViewer mainView;
         Border sampleError;
         StackPanel adminLine, topList;
-        TextBlock sampleErrorText, restartError, elevationText, listsNote, freeLabel, powerNote;
+        TextBlock sampleErrorText, restartError, elevationText, listsNote, freeLabel, powerNote, accountNotice, lastReadNote;
         SummaryPanel loadCard, rowInUse, rowModified, rowStandby, rowFree, commitRow;
         Run loadNumber, inUseRun;
         MapPanel mapBar;
@@ -104,17 +114,22 @@ namespace RamOptimiser.App
         ComboBox verdictBox, sortBox;
         List<StartupApp> startupApps;
         List<StartupService> startupServices;
-        bool startupLoading;
+        /// <summary>Loading, ready, or applying a change (and the reload after it): switches work only when ready.</summary>
+        readonly StartupFlow startupFlow = new StartupFlow();
         /// <summary>Errors shown under the row that failed, by row key, until dismissed or the row changes again.</summary>
         readonly Dictionary<string, KeyValuePair<string, string>> rowErrors = new Dictionary<string, KeyValuePair<string, string>>();
+        /// <summary>Row errors already read out, so a rebuild (each search keystroke) does not repeat them.</summary>
+        readonly AnnouncedErrors announcedErrors = new AnnouncedErrors();
         /// <summary>Tag of the control to focus after the list is rebuilt (a row's switch, by key).</summary>
         string refocusTag;
 
         // Settings tab
         CheckBox settingsAutoSwitch, startupCheck, closeToTrayCheck, trayPercentCheck;
-        TextBlock saveError, cooldownText, areaReason, startupReason, thresholdValue;
+        TextBlock saveError, cooldownText, areaReason, startupReason, thresholdValue, themeNote;
         Slider thresholdSlider;
         DispatcherTimer thresholdTimer;
+        /// <summary>A slider value waiting for its 400 ms pause; flushed on exit and before an elevated restart.</summary>
+        readonly PendingSave thresholdPending = new PendingSave();
         ComboBox intervalBox, themeBox;
         Expander moreAreas;
         readonly List<KeyValuePair<CheckBox, Areas>> areaBoxes = new List<KeyValuePair<CheckBox, Areas>>();
@@ -129,6 +144,17 @@ namespace RamOptimiser.App
             settingsPath = SettingsStore.DefaultPath;
             settings = SettingsStore.Load(settingsPath).Normalized();
             elevated = Elevation.IsElevated();
+            // Over-the-shoulder UAC runs this copy as the administrator who typed the password. Only the name
+            // of this account is shown; the launching user's own settings are never read from here.
+            if (elevated && options.LauncherSid != null)
+            {
+                try
+                {
+                    if (Elevation.IsOtherAccount(options.LauncherSid, StartupTask.CurrentUserSid()))
+                        otherAccount = StartupTask.CurrentUserId();
+                }
+                catch (Exception ex) { ErrorLog.TryWrite(ErrorLog.DefaultPath, "could not compare the launching account", ex); }
+            }
         }
 
         static string ExePath { get { return Assembly.GetEntryAssembly().Location; } }
@@ -150,6 +176,7 @@ namespace RamOptimiser.App
             BuildChoices();
             ApplyElevationState();
             SyncSettingsUi(true);
+            ShowThemeNote();
             // A chosen area behind the disclosure is shown, so the list never hides what will be cleaned.
             moreAreas.IsExpanded = (settings.Areas & HiddenAreas) != 0;
             RefreshAutoRow();
@@ -158,6 +185,7 @@ namespace RamOptimiser.App
             tray.OpenRequested += delegate { ShowWindow(); };
             tray.CleanRequested += delegate { RequestClean(); };
             tray.AutoCleanToggled += delegate { SetAutoClean(!settings.AutoCleanEnabled); };
+            tray.RestartRequested += delegate { RestartElevated(); };
             tray.ExitRequested += delegate { Exit(); };
             UpdateTray();
 
@@ -167,8 +195,10 @@ namespace RamOptimiser.App
             service.Sampled += s => Post(() => OnSampled(s));
             service.CleanStarted += r => Post(() => OnCleanStarted(r));
             service.CleanCompleted += (report, r) => Post(() => OnCleanCompleted(report, r));
-            service.Error += ex => Post(() => OnServiceError(ex));
+            service.Failed += (ex, source) => Post(() => OnServiceError(ex, source));
             service.Update(ServiceSettings());
+            // Before service.Start, so a Power Clean of this run is never mistaken for an earlier run's leftover.
+            if (elevated) StartServiceRecovery();
 
             if (instance != null) instance.ActivationRequested += OnActivationRequested;
             SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
@@ -185,27 +215,87 @@ namespace RamOptimiser.App
         public void Exit()
         {
             if (exiting) return;
+            // Before anything is torn down: a threshold set in the last 400 ms is saved, not dropped.
+            try { FlushThreshold(); }
+            catch (Exception ex) { ErrorLog.TryWrite(ErrorLog.DefaultPath, "could not save the threshold on exit", ex); }
             exiting = true;
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
             SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged;
-            if (thresholdTimer != null) thresholdTimer.Stop();
             if (service != null) service.Dispose();
             if (tray != null) tray.Dispose();
             if (instance != null) { instance.ActivationRequested -= OnActivationRequested; instance.Dispose(); instance = null; }
             if (window != null) window.Close();
-            RestoreServicesOnExit();
+            RestoreServicesOnExit(service, elevated);
             app.Shutdown();
         }
 
         /// <summary>
         /// Services Power Clean stopped are this session's doing, so leaving the app starts them again. A foreground
         /// thread keeps the process alive until Restore finishes (at most 10 s per service) after the window has gone.
+        /// A Power Clean still in flight is waited for first (bounded), so a stop it makes after Exit is restored too;
+        /// if the thread is cut short anyway, the journal lets the next elevated start finish the job. A memory-only
+        /// clean, or any clean without administrator rights, stops no services and does not hold the exit up.
         /// </summary>
-        static void RestoreServicesOnExit()
+        static void RestoreServicesOnExit(AutoCleanService cleaner, bool elevated)
         {
-            if (ServiceTrimmer.StoppedThisSession().Count == 0) return;
-            var t = new Thread(() => { try { ServiceTrimmer.Restore(); } catch (Exception) { } }) { IsBackground = false, Name = "restore-services" };
+            bool cleaning = cleaner != null && cleaner.IsCleaning;
+            bool stopsServices = elevated && cleaner != null && cleaner.CleanMayStopServices;
+            if (!PowerCleanRecovery.NeedsExitRestore(ServiceTrimmer.StoppedThisSession().Count, cleaning, stopsServices)) return;
+            var t = new Thread(() =>
+            {
+                try
+                {
+                    if (cleaner != null) cleaner.WaitUntilIdle(PowerCleanRecovery.ExitCleanWait);
+                    ServiceTrimmer.Restore();
+                }
+                catch (Exception) { }
+            }) { IsBackground = false, Name = "restore-services" };
             t.Start();
+        }
+
+        /// <summary>
+        /// Hooks Power Clean up to its journal, then starts again the services an earlier run stopped and never
+        /// restored (it crashed, was ended, or Windows signed out first). The names are read here, before auto-clean
+        /// starts; the restore runs off the UI thread and reports in the last-clean line.
+        /// </summary>
+        void StartServiceRecovery()
+        {
+            var journal = new StoppedServiceStore(StoppedServiceStore.DefaultPath);
+            List<string> leftover = journal.Read();
+            ServiceTrimmer.Journal = journal;
+            if (leftover.Count == 0) return;
+            List<string> adopted = ServiceTrimmer.Adopt(leftover);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                List<ServiceAction> done = null;
+                string failure = null;
+                try { done = ServiceTrimmer.Restore(adopted); }
+                catch (Exception ex) { failure = AppText.Plain(ex.Message, "unknown error"); }
+                Post(() => ShowRecovery(done, failure));
+            });
+        }
+
+        /// <summary>The start-up restore's outcome in the result line, with a row per service behind the disclosure.</summary>
+        void ShowRecovery(List<ServiceAction> done, string failure)
+        {
+            UpdateRestoreUi();
+            string line = AppText.RecoveryLine(done, failure);
+            if (line == null) return;
+            resultAt = null; // not a clean: nothing for RefreshResultLine to redate
+            bool good = AppText.RecoveryWentWell(done, failure);
+            resultText.Text = line;
+            resultGlyph.Data = Icon(good ? "IconCheck" : "IconWarn");
+            resultGlyph.SetResourceReference(Shape.StrokeProperty, good ? "Ok" : "Caution");
+            resultRows.Children.Clear();
+            List<AreaLine> rows = AppText.RecoveryLines(done);
+            for (int i = 0; i < rows.Count; i++) resultRows.Children.Add(BuildResultRow(rows[i], i == 0));
+            resultCount = rows.Count;
+            resultDetails.IsExpanded = false;
+            resultDetails.Header = AppText.DetailsLabel(false, resultCount);
+            resultDetails.Visibility = resultCount > 0 ? Visibility.Visible : Visibility.Collapsed;
+            AutomationProperties.SetName(resultPanel, line);
+            if (!resultShown) EnterResult();
+            if (!good) dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => resultPanel.Announce()));
         }
 
         /// <summary>Last-resort cleanup from the fatal-error path; never throws.</summary>
@@ -253,6 +343,8 @@ namespace RamOptimiser.App
             sampleError = F<Border>("SampleError");
             sampleErrorText = F<TextBlock>("SampleErrorText");
             restartError = F<TextBlock>("RestartError");
+            accountNotice = F<TextBlock>("AccountNotice");
+            lastReadNote = F<TextBlock>("LastReadNote");
             loadCard = F<SummaryPanel>("LoadCard");
             loadNumber = F<Run>("LoadNumber");
             inUseRun = F<Run>("InUseRun");
@@ -318,6 +410,7 @@ namespace RamOptimiser.App
             restoreButton = F<Button>("RestoreButton");
             powerStatus = F<TextBlock>("PowerStatus");
             themeBox = F<ComboBox>("ThemeBox");
+            themeNote = F<TextBlock>("ThemeNote");
             startupCheck = F<CheckBox>("StartupCheck");
             startupReason = F<TextBlock>("StartupReason");
             closeToTrayCheck = F<CheckBox>("CloseToTrayCheck");
@@ -388,12 +481,13 @@ namespace RamOptimiser.App
             OnToggle(settingsPowerSwitch, SetPowerClean);
             restoreButton.Click += delegate { RestoreServices(); };
             thresholdTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = ThresholdSaveDelay };
-            thresholdTimer.Tick += delegate { thresholdTimer.Stop(); SaveThreshold(); };
+            thresholdTimer.Tick += delegate { FlushThreshold(); };
             thresholdSlider.ValueChanged += delegate
             {
                 ShowThreshold();
                 if (syncing) return;
                 // Dragging changes the value many times a second: save once it rests.
+                thresholdPending.Changed();
                 thresholdTimer.Stop();
                 thresholdTimer.Start();
             };
@@ -512,11 +606,18 @@ namespace RamOptimiser.App
 
         // ------------------------------------------------------------------ Startup tab
 
-        /// <summary>Reads apps (registry, fast) and services (WMI, about a second) off the UI thread.</summary>
         void LoadStartup()
         {
-            if (startupLoading) return;
-            startupLoading = true;
+            if (!startupFlow.TryStartLoad()) return;
+            QueryStartup();
+        }
+
+        /// <summary>
+        /// Reads apps (registry, fast) and services (WMI, about a second) off the UI thread: the first load, or the
+        /// reload that ends a change (the flow stays Applying until then, so no switch works in between).
+        /// </summary>
+        void QueryStartup()
+        {
             ThreadPool.QueueUserWorkItem(delegate
             {
                 List<StartupApp> apps = null; List<StartupService> services = null; string failure = null;
@@ -526,7 +627,7 @@ namespace RamOptimiser.App
                 catch (Exception ex) { failure = failure ?? AppText.Plain(ex.Message, "unknown error"); }
                 Post(() =>
                 {
-                    startupLoading = false;
+                    startupFlow.Loaded();
                     startupApps = apps ?? new List<StartupApp>();
                     startupServices = services ?? new List<StartupService>();
                     if (failure != null)
@@ -560,7 +661,7 @@ namespace RamOptimiser.App
                     StartupApp target = a;
                     var it = new StartupItem
                     {
-                        Key = "app|" + a.Name, Name = a.Name, IsService = false, On = a.Enabled,
+                        Key = "app|" + a.Name, Name = a.Name, IsService = false, On = startupFlow.ShowsOn("app|" + a.Name, a.Enabled),
                         Verdict = a.Known == null ? Verdict.Unknown : a.Known.Verdict,
                         Label = a.Known != null ? a.Known.Label : a.Name, Detail = AppText.AppDetail(a)
                     };
@@ -578,7 +679,7 @@ namespace RamOptimiser.App
                     var it = new StartupItem
                     {
                         Key = "svc|" + s.Name, Name = s.Name, IsService = true, ByApp = s.DisabledByApp,
-                        On = s.CanDisable && !s.DisabledByApp,
+                        On = startupFlow.ShowsOn("svc|" + s.Name, s.CanDisable && !s.DisabledByApp),
                         Verdict = s.Known == null ? Verdict.Unknown : s.Known.Verdict,
                         Label = s.Known != null ? s.Known.Label : s.DisplayName, Detail = AppText.ServiceDetail(s)
                     };
@@ -613,7 +714,8 @@ namespace RamOptimiser.App
                     servicesOn++;
                     if (s.Known.Verdict == Verdict.Safe) safeOn++;
                 }
-            startupSummary.Text = AppText.StartupSummary(appsOn, servicesOn, safeOn);
+            // While a change applies its line stays, whatever rebuilds the list (search, filter, sort).
+            startupSummary.Text = startupFlow.BusyLine ?? AppText.StartupSummary(appsOn, servicesOn, safeOn);
             appsCount.Text = "  " + startupApps.Count.ToString(CultureInfo.InvariantCulture);
             servicesCount.Text = "  " + startupServices.Count.ToString(CultureInfo.InvariantCulture);
             AutomationProperties.SetName(showApps, "Startup apps, " + startupApps.Count.ToString(CultureInfo.InvariantCulture));
@@ -674,7 +776,7 @@ namespace RamOptimiser.App
                 FrameworkElement target = FindByTag(startupList, focusTag);
                 dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
                 {
-                    if (target != null && target.IsVisible) target.Focus();
+                    if (target != null && target.IsVisible && target.IsEnabled) target.Focus();
                     else if (focusInList) startupSearch.Focus();
                 }));
             }
@@ -800,6 +902,13 @@ namespace RamOptimiser.App
                 box.SetResourceReference(FrameworkElement.StyleProperty, "SwitchStyle");
                 AutomationProperties.SetName(box, switchName);
                 AutomationProperties.SetHelpText(box, verdict + ". " + it.Detail);
+                // While a change applies, the other switches wait (the summary says why); the one changing stays
+                // focusable and keeps showing the state being applied.
+                if (!startupFlow.SwitchesEnabled && it.Key != startupFlow.ApplyingKey)
+                {
+                    box.IsEnabled = false;
+                    AutomationProperties.SetHelpText(box, startupFlow.BusyLine ?? "");
+                }
                 OnToggle(box, it.Apply);
                 box.VerticalAlignment = VerticalAlignment.Top;
                 Grid.SetColumn(box, 1);
@@ -853,20 +962,34 @@ namespace RamOptimiser.App
             AutomationProperties.SetName(dismiss, "Dismiss error");
             dismiss.Click += delegate
             {
-                rowErrors.Remove(key);
+                ClearRowError(key);
                 refocusTag = key + (startupList.IsKeyboardFocusWithin ? "|sw" : "");
                 BuildStartupList();
             };
             Grid.SetColumn(dismiss, 2);
             grid.Children.Add(dismiss);
             bar.Child = grid;
-            bar.Loaded += delegate { bar.Announce(); };
+            // Read out when the error first shows, not again on each rebuild of the list.
+            bar.Loaded += delegate { if (announcedErrors.ShouldAnnounce(key, title + ". " + message)) bar.Announce(); };
             return bar;
+        }
+
+        void ClearRowError(string key)
+        {
+            rowErrors.Remove(key);
+            announcedErrors.Forget(key);
         }
 
         void SetAppEnabled(StartupApp a, StartupItem it, bool on)
         {
-            rowErrors.Remove(it.Key);
+            if (!startupFlow.SwitchesEnabled)
+            {
+                // A change is applying and its reload would overwrite this one: the switch goes back.
+                refocusTag = it.Key + "|sw";
+                BuildStartupList();
+                return;
+            }
+            ClearRowError(it.Key);
             string failure = null;
             try
             {
@@ -884,11 +1007,15 @@ namespace RamOptimiser.App
 
         void SetServiceStartup(StartupService svc, StartupItem it, bool on)
         {
-            if (startupLoading) return;
-            startupLoading = true;
-            rowErrors.Remove(it.Key);
             refocusTag = it.Key + "|sw";
-            startupSummary.Text = (on ? "Turning on " : "Turning off ") + it.Label + "...";
+            if (!startupFlow.TryStartApply(it.Key, it.Label, on))
+            {
+                // Another change is still applying: the switch goes back to the state that holds.
+                BuildStartupList();
+                return;
+            }
+            ClearRowError(it.Key);
+            BuildStartupList(); // the busy line, and the other switches wait
             ThreadPool.QueueUserWorkItem(delegate
             {
                 StartupChange r;
@@ -896,9 +1023,8 @@ namespace RamOptimiser.App
                 catch (Exception ex) { r = new StartupChange { Ok = false, Message = AppText.Plain(ex.Message, "unknown error") }; }
                 Post(() =>
                 {
-                    startupLoading = false;
                     if (!r.Ok) rowErrors[it.Key] = new KeyValuePair<string, string>(AppText.ChangeFailedTitle(it.Label, on), AppText.ChangeFailedText(r.Message, on));
-                    LoadStartup();
+                    QueryStartup(); // still Applying: Loaded() after the reload makes the switches work again
                 });
             });
         }
@@ -909,8 +1035,17 @@ namespace RamOptimiser.App
         {
             adminLine.Visibility = elevated ? Visibility.Collapsed : Visibility.Visible;
             elevationText.Text = AppText.AdminLine;
-            cleanButton.IsEnabled = elevated && !cleaningUi;
-            AutomationProperties.SetHelpText(cleanButton, elevated ? "" : AppText.CleanNeedsAdmin);
+            accountNotice.Text = otherAccount == null ? "" : AppText.OtherAccountNotice(otherAccount);
+            accountNotice.Visibility = otherAccount == null ? Visibility.Collapsed : Visibility.Visible;
+            UpdateCleanButton();
+        }
+
+        /// <summary>Enabled when elevated, idle and memory was read; the help text says why not, else the Power Clean note.</summary>
+        void UpdateCleanButton()
+        {
+            cleanButton.IsEnabled = AppText.CleanEnabled(elevated, cleaningUi, memView.State);
+            string note = AppText.PowerNote(settings.PowerClean, ChosenServiceCount());
+            AutomationProperties.SetHelpText(cleanButton, AppText.CleanHelp(elevated, memView.State, note));
         }
 
         /// <summary>
@@ -919,6 +1054,8 @@ namespace RamOptimiser.App
         /// </summary>
         void RestartElevated()
         {
+            // The elevated copy reads settings.ini at start: a threshold still waiting for its save goes in first.
+            FlushThreshold();
             restartError.Visibility = Visibility.Collapsed;
             if (instance != null)
             {
@@ -927,11 +1064,19 @@ namespace RamOptimiser.App
                 instance = null;
             }
             bool started = false;
-            try { started = Elevation.TryRelaunchElevated(ExePath, ""); }
+            try
+            {
+                // The elevated copy compares this SID with its own to notice it runs as another account.
+                string sid = StartupTask.CurrentUserSid();
+                started = Elevation.TryRelaunchElevated(ExePath, Elevation.IsWellFormedSid(sid) ? Elevation.RelaunchArgs(sid) : "");
+            }
             catch (Exception ex)
             {
                 restartError.Text = "Could not restart as administrator: " + AppText.Plain(ex.Message, "unknown error") + ".";
                 restartError.Visibility = Visibility.Visible;
+                // Asked from the tray, the window may be hidden or on another tab: bring the error line into view.
+                memoryTab.IsSelected = true;
+                ShowWindow();
             }
             if (started) { Exit(); return; }
 
@@ -962,6 +1107,14 @@ namespace RamOptimiser.App
         void OnSampled(MemorySnapshot s)
         {
             lastSnapshot = s;
+            MemoryViewState before = memView.State;
+            memView.Sampled(DateTime.Now);
+            if (before != MemoryViewState.Live)
+            {
+                lastReadNote.Visibility = Visibility.Collapsed;
+                UpdateCleanButton();
+            }
+            RefreshResultLine();
             if (!WindowShowing || !memoryTab.IsSelected)
             {
                 // Nobody can see the view: skip its animations and redraw it from the newest sample when it shows.
@@ -1058,13 +1211,38 @@ namespace RamOptimiser.App
             if (!animate || !Motion.On) value.Text = Format.Bytes(bytes);
         }
 
-        void OnServiceError(Exception ex)
+        /// <summary>
+        /// A clean's failure goes to its result line; a sampling failure (even one during a manual clean) to the
+        /// banner, and moves the view to LiveWithError or FailedNoData.
+        /// </summary>
+        void OnServiceError(Exception ex, ServiceErrorSource source)
         {
-            if (cleaningUi) { cleanError = ex; return; }
-            sampleErrorText.Text = "Memory status could not be read: " + AppText.Plain(ex.Message, "unknown error")
-                + ". Trying again every " + SampleInterval.TotalSeconds.ToString(CultureInfo.InvariantCulture) + " seconds.";
+            if (ServiceErrorRoute.IsCleanFailure(source, cleaningUi)) { cleanError = ex; return; }
+            memView.SampleFailed();
+            sampleErrorText.Text = AppText.SampleErrorText(ex.Message, (int)SampleInterval.TotalSeconds, memView.HasData);
             sampleError.Visibility = Visibility.Visible;
+            ShowMemoryState();
             if (lastSnapshot == null) UpdateTray();
+        }
+
+        /// <summary>
+        /// FailedNoData: "Unavailable" instead of "Reading memory...", dashes in the legend, Clean waits.
+        /// LiveWithError: the last figures stay, with when they were read under them.
+        /// </summary>
+        void ShowMemoryState()
+        {
+            if (memView.State == MemoryViewState.FailedNoData)
+            {
+                inUseRun.Text = AppText.MemoryCaption(memView.State);
+                foreach (TextBlock value in new[] { valInUse, valModified, valStandby, valFree }) value.Text = "--";
+                AutomationProperties.SetName(loadCard, "Memory load unavailable");
+            }
+            bool stale = memView.State == MemoryViewState.LiveWithError && lastSnapshot != null;
+            string lastRead = stale ? AppText.LastReadLine(memView.LastRead.Value, DateTime.Now, CultureInfo.CurrentCulture) : null;
+            lastReadNote.Text = lastRead ?? "";
+            lastReadNote.Visibility = stale ? Visibility.Visible : Visibility.Collapsed;
+            if (stale) AutomationProperties.SetName(loadCard, AppText.LoadCardName(lastSnapshot) + ". " + lastRead);
+            UpdateCleanButton();
         }
 
         // ------------------------------------------------------------------ top apps
@@ -1121,6 +1299,8 @@ namespace RamOptimiser.App
                 bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0, 1 - share), GridUnitType.Star) });
                 var track = new Border { CornerRadius = new CornerRadius(1.5) };
                 track.SetResourceReference(Border.BackgroundProperty, "TrackBackground");
+                track.BorderThickness = new Thickness(1);
+                track.SetResourceReference(Border.BorderBrushProperty, "TrackEdge");
                 Grid.SetColumnSpan(track, 2);
                 bar.Children.Add(track);
                 var fill = new Border { CornerRadius = new CornerRadius(1.5) };
@@ -1136,7 +1316,7 @@ namespace RamOptimiser.App
 
         void RequestClean()
         {
-            if (!elevated || cleaningUi || exiting) return;
+            if (exiting || !AppText.CleanEnabled(elevated, cleaningUi, memView.State)) return;
             bool started;
             try { started = service.CleanNow(); }
             catch (ObjectDisposedException) { return; }
@@ -1164,7 +1344,7 @@ namespace RamOptimiser.App
             if (on && cleanButton.IsKeyboardFocused) refocusClean = true;
             cleaningUi = on;
             SetCleanLabel();
-            cleanButton.IsEnabled = elevated && !on;
+            UpdateCleanButton();
             if (!on && refocusClean && cleanButton.IsEnabled)
             {
                 refocusClean = false;
@@ -1180,8 +1360,11 @@ namespace RamOptimiser.App
         /// </summary>
         void ShowResult(CleanReport report, Exception error, bool automatic)
         {
-            string line = AppText.LastClean(DateTime.Now, report, automatic, CultureInfo.CurrentCulture);
-            if (report == null && error != null) line += " " + AppText.FailedSummary(error);
+            resultAt = DateTime.Now;
+            resultReport = report;
+            resultError = error;
+            resultAutomatic = automatic;
+            string line = AppText.ResultLine(resultAt.Value, resultAt.Value, report, error, automatic, CultureInfo.CurrentCulture);
             resultText.Text = line;
             bool good = AppText.CleanWentWell(report);
             resultGlyph.Data = Icon(!good ? "IconWarn" : report.InUseFreed > 0 ? "IconCheck" : "IconDash");
@@ -1202,11 +1385,29 @@ namespace RamOptimiser.App
             resultDetails.Header = AppText.DetailsLabel(false, resultCount);
             resultDetails.Visibility = resultCount > 0 ? Visibility.Visible : Visibility.Collapsed;
 
-            // Screen readers get the in-use figures too, which the line leaves to the legend.
-            string spoken = report != null && report.Before != null && report.After != null ? line + " " + AppText.Summary(report) : line;
-            AutomationProperties.SetName(resultPanel, spoken);
+            AutomationProperties.SetName(resultPanel, SpokenResult(line));
             if (!resultShown) EnterResult();
             if (!automatic) dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => resultPanel.Announce()));
+        }
+
+        /// <summary>Screen readers get the in-use figures too, which the line leaves to the legend.</summary>
+        string SpokenResult(string line)
+        {
+            CleanReport r = resultReport;
+            return r != null && r.Before != null && r.After != null ? line + " " + AppText.Summary(r) : line;
+        }
+
+        /// <summary>
+        /// Run on each sample: once the clean is no longer from today the line says "yesterday" or the date, so a
+        /// result from days ago in the tray never reads as current. Changed quietly (not announced).
+        /// </summary>
+        void RefreshResultLine()
+        {
+            if (resultAt == null) return;
+            string line = AppText.ResultLine(resultAt.Value, DateTime.Now, resultReport, resultError, resultAutomatic, CultureInfo.CurrentCulture);
+            if (line == resultText.Text) return;
+            resultText.Text = line;
+            AutomationProperties.SetName(resultPanel, SpokenResult(line));
         }
 
         /// <summary>The first result enters with a fade and an 8 px rise, 320 ms QuinticEase out; later ones replace it in place.</summary>
@@ -1227,13 +1428,16 @@ namespace RamOptimiser.App
         static readonly Geometry CheckGlyph = Freeze(Geometry.Parse("M3.5,8.5 L6.5,11.5 L12.5,4.5"));
         static readonly Geometry CrossGlyph = Freeze(Geometry.Parse("M4.5,4.5 L11.5,11.5 M11.5,4.5 L4.5,11.5"));
         static readonly Geometry DashGlyph = Freeze(Geometry.Parse("M4.5,8 L11.5,8"));
+        /// <summary>The IconWarn shape from Styles.xaml, for a row that only partly worked.</summary>
+        static readonly Geometry WarnGlyph = Freeze(Geometry.Parse("M8,2.5 L14,13.5 H2 Z M8,6.5 V9.5 M8,11.75 V11.8"));
 
         static Geometry Freeze(Geometry g) { g.Freeze(); return g; }
 
-        /// <summary>Glyph plus words: ok (check), failed: reason (cross), skipped: reason (dash).</summary>
+        /// <summary>Glyph plus words: ok (check), ok: partly (warning), failed: reason (cross), skipped: reason (dash).</summary>
         static UIElement BuildResultRow(AreaLine line, bool first)
         {
-            string brush = line.State == AreaState.Ok ? "Ok" : line.State == AreaState.Failed ? "Danger" : "MutedText";
+            string brush = line.State == AreaState.Ok ? "Ok" : line.State == AreaState.Failed ? "Danger"
+                : line.State == AreaState.Partial ? "Caution" : "MutedText";
             var row = new SummaryPanel { Padding = new Thickness(0, 6, 0, 6) };
             if (!first)
             {
@@ -1253,7 +1457,8 @@ namespace RamOptimiser.App
             {
                 Width = 16, Height = 16, StrokeThickness = 1.5, VerticalAlignment = VerticalAlignment.Center,
                 StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round, StrokeLineJoin = PenLineJoin.Round,
-                Data = line.State == AreaState.Ok ? CheckGlyph : line.State == AreaState.Failed ? CrossGlyph : DashGlyph
+                Data = line.State == AreaState.Ok ? CheckGlyph : line.State == AreaState.Failed ? CrossGlyph
+                    : line.State == AreaState.Partial ? WarnGlyph : DashGlyph
             };
             glyph.SetResourceReference(Shape.StrokeProperty, brush);
             grid.Children.Add(glyph);
@@ -1317,6 +1522,13 @@ namespace RamOptimiser.App
         void ShowThreshold()
         {
             thresholdValue.Text = ((int)Math.Round(thresholdSlider.Value)).ToString(CultureInfo.InvariantCulture) + "%";
+        }
+
+        /// <summary>Saves a threshold still waiting for its 400 ms pause: on the timer, and before exit, an elevated restart or a resync.</summary>
+        void FlushThreshold()
+        {
+            if (thresholdTimer != null) thresholdTimer.Stop();
+            if (thresholdPending.Take()) SaveThreshold();
         }
 
         void SaveThreshold()
@@ -1505,6 +1717,8 @@ namespace RamOptimiser.App
 
         void SyncSettingsUi(bool includeThreshold)
         {
+            // The slider is about to be reset from the settings: a value still waiting for its save goes in first.
+            if (includeThreshold) FlushThreshold();
             syncing = true;
             try
             {
@@ -1514,11 +1728,10 @@ namespace RamOptimiser.App
                 string note = AppText.PowerNote(settings.PowerClean, ChosenServiceCount());
                 powerNote.Text = note ?? "";
                 powerNote.Visibility = note == null ? Visibility.Collapsed : Visibility.Visible;
-                AutomationProperties.SetHelpText(cleanButton, elevated ? (note ?? "") : AppText.CleanNeedsAdmin);
+                UpdateCleanButton();
                 SetCleanLabel();
                 if (includeThreshold)
                 {
-                    thresholdTimer.Stop();
                     thresholdSlider.Value = settings.ThresholdPercent;
                     ShowThreshold();
                 }
@@ -1563,16 +1776,24 @@ namespace RamOptimiser.App
             UpdateStartupUi();
             ThreadPool.QueueUserWorkItem(delegate
             {
-                bool on = false;
-                try { on = StartupTask.IsEnabled(); }
-                catch (Exception) { on = false; }
-                Post(() => FinishStartupChange(on, null));
+                StartupTaskStatus status = ReadStartupStatus();
+                Post(() => FinishStartupChange(status, null));
             });
+        }
+
+        /// <summary>Absent, ours, stale or unreadable; a failure to ask at all reads as unreadable, never as off.</summary>
+        static StartupTaskStatus ReadStartupStatus()
+        {
+            try { return StartupTask.ReadStatus(); }
+            catch (Exception ex)
+            {
+                return new StartupTaskStatus { State = StartupTaskState.Unreadable, Error = AppText.Plain(ex.Message, "unknown error") };
+            }
         }
 
         void ToggleStartup(bool want)
         {
-            if (!elevated || startupBusy) { UpdateStartupUi(); return; }
+            if (!AppText.StartupSwitchEnabled(elevated, startupBusy, otherAccount)) { UpdateStartupUi(); return; }
             refocusStartup = startupCheck.IsKeyboardFocused;
             startupBusy = true;
             startupMessage = null;
@@ -1587,18 +1808,17 @@ namespace RamOptimiser.App
                     if (!r.Success) failure = FirstLine(r.StdErr, "schtasks exit code " + r.ExitCode.ToString(CultureInfo.InvariantCulture));
                 }
                 catch (Exception ex) { failure = AppText.Plain(ex.Message, "unknown error"); }
-                bool on = false;
-                try { on = StartupTask.IsEnabled(); }
-                catch (Exception) { on = false; }
-                Post(() => FinishStartupChange(on, failure == null ? null : "Could not change the startup task: " + failure));
+                StartupTaskStatus status = ReadStartupStatus();
+                Post(() => FinishStartupChange(status, failure == null ? null : "Could not change the startup task: " + failure));
             });
         }
 
-        void FinishStartupChange(bool on, string message)
+        void FinishStartupChange(StartupTaskStatus status, string message)
         {
             startupBusy = false;
-            startupEnabled = on;
+            startupStatus = status;
             startupMessage = message;
+            bool on = status != null && status.State == StartupTaskState.Ours;
             if (settings.StartWithWindows != on)
             {
                 settings.StartWithWindows = on;
@@ -1613,10 +1833,10 @@ namespace RamOptimiser.App
             if (startupCheck == null) return;
             bool wasSyncing = syncing;
             syncing = true;
-            startupCheck.IsChecked = startupEnabled;
+            startupCheck.IsChecked = startupStatus != null && startupStatus.State == StartupTaskState.Ours;
             syncing = wasSyncing;
-            startupCheck.IsEnabled = elevated && !startupBusy;
-            string reason = !elevated ? AppText.StartupNeedsAdmin : startupMessage;
+            startupCheck.IsEnabled = AppText.StartupSwitchEnabled(elevated, startupBusy, otherAccount);
+            string reason = AppText.StartupReason(startupStatus, elevated, otherAccount, startupMessage);
             startupReason.Text = reason ?? "";
             startupReason.Visibility = string.IsNullOrEmpty(reason) ? Visibility.Collapsed : Visibility.Visible;
             AutomationProperties.SetHelpText(startupCheck, reason ?? "");
@@ -1635,8 +1855,9 @@ namespace RamOptimiser.App
         void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
         {
             // Raised on the SystemEvents thread; WPF refreshes SystemParameters on its own broadcast handler,
-            // so the re-read runs later, at background priority.
-            if (exiting) return;
+            // so the re-read runs later, at background priority. Wallpaper, power, locale and the like change no
+            // colour: they are ignored, so the tokens and window frame are not re-applied for nothing.
+            if (exiting || !ThemeResolver.AffectsTheme(e.Category)) return;
             dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(ReapplyTheme));
         }
 
@@ -1652,13 +1873,23 @@ namespace RamOptimiser.App
             theme.Apply(settings.Theme);
             theme.ApplyWindowFrame(window);
             taskbarLight = theme.TaskbarIsLight();
+            ShowThemeNote();
             UpdateTray();
+        }
+
+        /// <summary>Under high contrast the Theme box's choice has no effect: a line under it says so.</summary>
+        void ShowThemeNote()
+        {
+            string note = ThemeResolver.ThemeNote(theme.Current == ResolvedTheme.HighContrast);
+            themeNote.Text = note ?? "";
+            themeNote.Visibility = note == null ? Visibility.Collapsed : Visibility.Visible;
+            AutomationProperties.SetHelpText(themeBox, note ?? "");
         }
 
         void UpdateTray()
         {
             if (tray == null) return;
-            tray.SetMenuState(elevated, cleaningUi, settings.AutoCleanEnabled);
+            tray.SetMenuState(TrayMenuState.For(elevated, cleaningUi, settings.AutoCleanEnabled, memView.State != MemoryViewState.FailedNoData));
             tray.Update(lastSnapshot, settings.ShowTrayPercent, taskbarLight);
         }
     }

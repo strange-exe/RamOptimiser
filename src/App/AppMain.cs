@@ -52,6 +52,9 @@ namespace RamOptimiser.App
             }
             catch (Exception ex)
             {
+                // The tray icon and the auto-clean timer may already exist: remove them before the error box, whose
+                // message loop would otherwise run their clicks and work against a shell that failed to start.
+                if (shell != null) shell.EmergencyCleanup();
                 Fatal("start-up failed", ex);
                 return 1;
             }

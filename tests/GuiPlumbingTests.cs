@@ -41,6 +41,7 @@ namespace RamOptimiser.Tests
             {
                 SettingsTests(dir);
                 SafeFolderTests(dir);
+                StoppedStoreTests(dir);
             }
             finally
             {
@@ -48,6 +49,7 @@ namespace RamOptimiser.Tests
             }
             DecideTests();
             ServiceTests();
+            IdleWaitTests();
             StartupTaskTests();
             ElevationTests();
             SingleInstanceTests();
@@ -207,6 +209,85 @@ namespace RamOptimiser.Tests
             }
         }
 
+        // ---------------------------------------------------------------- Power Clean journal file (P3, E10)
+
+        static void StoppedStoreTests(string dir)
+        {
+            string folder = Path.Combine(dir, "journal");
+            string path = Path.Combine(folder, "stopped-services.txt");
+            var store = new StoppedServiceStore(path);
+            Check("journal file: missing reads as empty", StoppedServiceStore.Load(path).Count == 0);
+            Check("journal file: add records", store.Add("Spooler") && store.Add("SysMain") && store.Add("Spooler"));
+            Check("journal file: both names, once each", string.Join(",", StoppedServiceStore.Load(path).ToArray()) == "Spooler,SysMain",
+                File.Exists(path) ? File.ReadAllText(path) : "no file");
+            Check("journal file: a foreign name is not recorded", store.Add("WinDefend") && !File.ReadAllText(path).Contains("WinDefend"));
+            Check("journal file: remove", store.Remove("spooler") && string.Join(",", StoppedServiceStore.Load(path).ToArray()) == "SysMain");
+            Check("journal file: removing the last name deletes the file", store.Remove("SysMain") && !File.Exists(path));
+            Check("journal file: no temp files left", Directory.GetFiles(folder).Length == 0, string.Join(", ", Directory.GetFiles(folder)));
+
+            File.WriteAllText(path, "WinDefend\r\nwuauserv\r\nSpooler\r\n");
+            Check("journal file: planted names are dropped", string.Join(",", StoppedServiceStore.Load(path).ToArray()) == "Spooler");
+            File.WriteAllText(path, "");
+            Check("journal file: empty", StoppedServiceStore.Load(path).Count == 0);
+            File.WriteAllBytes(path, new byte[] { 0xFF, 0xFE, 0, 0x53, 0x70, 0x6F, 0x6F, 0x6C, 0x65, 0x72 });
+            Check("journal file: binary garbage", StoppedServiceStore.Load(path).Count == 0);
+            var big = new StringBuilder();
+            while (big.Length <= StoppedServiceStore.MaxFileBytes) big.Append("Spooler\r\n");
+            File.WriteAllText(path, big.ToString());
+            Check("journal file: oversized is not read", StoppedServiceStore.Load(path).Count == 0);
+            Check("journal file: add over an oversized file starts it again", store.Add("Fax")
+                && string.Join(",", StoppedServiceStore.Load(path).ToArray()) == "Fax");
+            File.Delete(path);
+
+            // A journal another process holds open for writing (sharing everything) passes the link checks but
+            // cannot be read: Add and Remove must not take it for an empty one and write over, or delete, its names.
+            File.WriteAllText(path, "Spooler\r\nSysMain\r\n");
+            using (new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+            {
+                Check("journal file: add over an unreadable journal fails", !store.Add("Fax"));
+                Check("journal file: remove over an unreadable journal fails", !store.Remove("Spooler"));
+            }
+            Check("journal file: an unreadable journal keeps its names", File.Exists(path)
+                && string.Join(",", StoppedServiceStore.Load(path).ToArray()) == "Spooler,SysMain",
+                File.Exists(path) ? File.ReadAllText(path) : "no file");
+            System.Collections.Generic.List<string> loaded;
+            Check("journal file: TryLoad reads a missing file as empty", StoppedServiceStore.TryLoad(path + ".none", out loaded) && loaded.Count == 0);
+            File.Delete(path);
+
+            // A junction folder and a hard-linked file: the elevated app neither reads nor writes through them.
+            string real = Path.Combine(dir, "journal-real");
+            Directory.CreateDirectory(real);
+            string junction = Path.Combine(dir, "journal-junction");
+            if (Mklink("/J", junction, real))
+            {
+                File.WriteAllText(Path.Combine(real, "stopped-services.txt"), "Spooler\r\n");
+                var through = new StoppedServiceStore(Path.Combine(junction, "stopped-services.txt"));
+                Check("journal file: not read through a junction", through.Read().Count == 0);
+                Check("journal file: add through a junction fails and writes nothing", !through.Add("Fax")
+                    && File.ReadAllText(Path.Combine(real, "stopped-services.txt")) == "Spooler\r\n" && Directory.GetFiles(real).Length == 1);
+                Check("journal file: remove through a junction fails", !through.Remove("Spooler")
+                    && File.Exists(Path.Combine(real, "stopped-services.txt")));
+                Directory.Delete(junction, false); // removes the link only
+            }
+            else Check("test setup: journal junction created", false);
+
+            string victim = Path.Combine(dir, "journal-victim.txt");
+            File.WriteAllText(victim, "Spooler\r\n");
+            string linked = Path.Combine(folder, "linked.txt");
+            if (Mklink("/H", linked, victim))
+            {
+                var hard = new StoppedServiceStore(linked);
+                Check("journal file: a hard-linked file is not read", hard.Read().Count == 0);
+                Check("journal file: a hard-linked file is not written", !hard.Add("Fax") && File.ReadAllText(victim) == "Spooler\r\n");
+            }
+            else Check("test setup: journal hard link created", false);
+
+            Check("exit restore: services stopped", PowerCleanRecovery.NeedsExitRestore(2, false, false));
+            Check("exit restore: a clean in flight may still stop some", PowerCleanRecovery.NeedsExitRestore(0, true, true));
+            Check("exit restore: a clean in flight that cannot stop services is not waited for", !PowerCleanRecovery.NeedsExitRestore(0, true, false));
+            Check("exit restore: nothing to do", !PowerCleanRecovery.NeedsExitRestore(0, false, false));
+        }
+
         static Exception Catch(Action a)
         {
             try { a(); return null; }
@@ -292,6 +373,43 @@ namespace RamOptimiser.Tests
         static CleanReport FakeReport()
         {
             return new CleanReport { Before = Snap(95), After = Snap(60) };
+        }
+
+        /// <summary>Exit waits for a clean in flight (P3): Dispose leaves it running, WaitUntilIdle waits for it.</summary>
+        static void IdleWaitTests()
+        {
+            var now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            // Not disposed: the clean thread and the releasing thread may still touch it after the checks.
+            var release = new ManualResetEvent(false);
+            using (var svc = new AutoCleanService(() => Snap(10), a => { release.WaitOne(10000); return FakeReport(); }, () => now))
+            {
+                Check("idle wait: nothing running", svc.WaitUntilIdle(TimeSpan.Zero));
+                Check("idle wait: test clean started", svc.CleanNow());
+                Check("idle wait: times out while a clean runs", !svc.WaitUntilIdle(TimeSpan.FromMilliseconds(100)));
+                svc.Dispose();
+                ThreadPool.QueueUserWorkItem(delegate { Thread.Sleep(100); release.Set(); });
+                Check("idle wait: returns when the clean finishes, after Dispose", svc.WaitUntilIdle(TimeSpan.FromSeconds(10)) && !svc.IsCleaning);
+                release.Set();
+            }
+
+            // Only a clean whose areas include services (Power Clean) can stop any, so only that one holds Exit up.
+            foreach (bool power in new[] { false, true })
+            {
+                var hold = new ManualResetEvent(false);
+                var entered = new ManualResetEvent(false);
+                using (var svc = new AutoCleanService(() => Snap(10), a => { entered.Set(); hold.WaitOne(10000); return FakeReport(); }, () => now))
+                {
+                    svc.Update(new AppSettings { PowerClean = power });
+                    Check("services wait: nothing running", !svc.CleanMayStopServices);
+                    svc.CleanNow();
+                    entered.WaitOne(10000);
+                    Check(power ? "services wait: a Power Clean in flight may stop services" : "services wait: a memory-only clean in flight stops none",
+                        svc.CleanMayStopServices == power);
+                    hold.Set();
+                    svc.WaitUntilIdle(TimeSpan.FromSeconds(10));
+                    Check("services wait: none after the clean (" + power + ")", !svc.CleanMayStopServices);
+                }
+            }
         }
 
         static void ServiceTests()
@@ -422,6 +540,36 @@ namespace RamOptimiser.Tests
                 }
             }
 
+            // P13: every failure says where it came from, so a sampling error during a clean is not the clean's.
+            {
+                ServiceErrorSource? cleanSource = null;
+                using (var completed = new ManualResetEvent(false))
+                using (var svc = new AutoCleanService(() => Snap(10), a => { throw new InvalidOperationException("boom"); }, () => DateTime.UtcNow))
+                {
+                    svc.Failed += (ex, source) => cleanSource = source;
+                    svc.CleanCompleted += (r, why) => completed.Set();
+                    svc.CleanNow();
+                    Check("failure source: a throwing clean is the clean's", completed.WaitOne(5000) && cleanSource == ServiceErrorSource.Clean,
+                        cleanSource.ToString());
+                    WaitUntil(() => !svc.IsCleaning, 5000);
+                }
+            }
+            {
+                ServiceErrorSource? sampleSource = null;
+                using (var release = new ManualResetEvent(false))
+                using (var svc = new AutoCleanService(() => { throw new IOException("sample failed"); },
+                    a => { release.WaitOne(5000); return FakeReport(); }, () => DateTime.UtcNow))
+                {
+                    svc.Failed += (ex, source) => sampleSource = source;
+                    Check("failure source: manual clean running", svc.CleanNow());
+                    svc.RunTick(); // a sample fails while the manual clean runs
+                    Check("failure source: a sampling error during a clean is the sample's", sampleSource == ServiceErrorSource.Sample,
+                        sampleSource.ToString());
+                    release.Set();
+                    WaitUntil(() => !svc.IsCleaning, 5000);
+                }
+            }
+
             // The real timer survives a sample function that throws, and a handler that throws.
             {
                 int calls = 0, errors = 0;
@@ -467,15 +615,27 @@ namespace RamOptimiser.Tests
 
         // ---------------------------------------------------------------- StartupTask
 
+        // The fixture's own user (the principal RegisteredXml writes) and another account on the same PC.
+        const string MySid = "S-1-5-21-1-2-3-1001", OtherSid = "S-1-5-21-1-2-3-1002", MyName = @"PC\me";
+
         static void StartupTaskTests()
         {
-            Check("schtasks delete args", StartupTask.BuildDeleteArgs() == @"/Delete /TN ""RamOptimiser"" /F", StartupTask.BuildDeleteArgs());
+            // P1: one task per user, named by SID, so two accounts never share or overwrite one task.
+            string mine = StartupTask.TaskNameFor(MySid);
+            Check("task name: per user, by SID", mine == "RamOptimiser-" + MySid, mine);
+            Check("task name: two users get two tasks", mine != StartupTask.TaskNameFor(OtherSid));
+            Check("task name: the old shared name", StartupTask.LegacyTaskName == "RamOptimiser");
+            Throws<ArgumentException>("task name: refuses a malformed SID", () => StartupTask.TaskNameFor("S-1-5-21-1\" /F"));
+            Throws<ArgumentException>("task name: refuses no SID", () => StartupTask.TaskNameFor(null));
+            Check("schtasks delete args", StartupTask.BuildDeleteArgs(mine) == "/Delete /TN \"RamOptimiser-" + MySid + "\" /F", StartupTask.BuildDeleteArgs(mine));
+            Check("schtasks delete args: the old name", StartupTask.BuildDeleteArgs(StartupTask.LegacyTaskName) == @"/Delete /TN ""RamOptimiser"" /F");
+            Throws<ArgumentException>("schtasks delete args: only our task names", () => StartupTask.BuildDeleteArgs("Other\" /TN \"x"));
             // The definition goes to Task Scheduler as a string over COM; no file in the user's TEMP is involved.
             var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
             Check("task registration has no temp-file path", typeof(StartupTask).GetMethod("BuildCreateArgs", flags) == null
                 && typeof(StartupTask).GetMethod("TaskXmlBytes", flags) == null && typeof(StartupTask).GetMethod("SameBytes", flags) == null);
-            object[] reg = StartupTask.BuildRegisterArgs("<Task/>");
-            Check("COM RegisterTask arguments", reg != null && reg.Length == 7 && (string)reg[0] == "RamOptimiser"
+            object[] reg = StartupTask.BuildRegisterArgs(mine, "<Task/>");
+            Check("COM RegisterTask arguments", reg != null && reg.Length == 7 && (string)reg[0] == mine
                 && (string)reg[1] == "<Task/>" && reg[2] is int && (int)reg[2] == 6 && reg[3] == null && reg[4] == null
                 && reg[5] is int && (int)reg[5] == 3 && reg[6] == null);
             int createOrUpdate = StartupTask.TASK_CREATE_OR_UPDATE, interactiveToken = StartupTask.TASK_LOGON_INTERACTIVE_TOKEN;
@@ -502,6 +662,7 @@ namespace RamOptimiser.Tests
             Throws<ArgumentException>("task XML validates the path", () => StartupTask.BuildTaskXml("RamOptimiser.exe", @"PC\me"));
             Throws<ArgumentException>("task XML needs a user", () => StartupTask.BuildTaskXml(@"C:\a.exe", ""));
             TaskXmlTests();
+            TaskStateTests();
         }
 
         static void TaskXmlTests()
@@ -545,17 +706,25 @@ namespace RamOptimiser.Tests
             Check("task XML: declares utf-16", xml.StartsWith("<?xml version=\"1.0\" encoding=\"utf-16\"?>"), xml.Substring(0, Math.Min(60, xml.Length)));
 
             Check("current user id is DOMAIN\\user", StartupTask.CurrentUserId().IndexOf('\\') > 0, StartupTask.CurrentUserId());
-            RegisteredTaskTests(exe, xml);
+            Check("current user SID is well formed", Elevation.IsWellFormedSid(StartupTask.CurrentUserSid()), StartupTask.CurrentUserSid());
+            RegisteredTaskTests(exe, xml, user);
         }
 
         /// <summary>The shape Task Scheduler returns for a registered task (extra elements, its own layout).</summary>
         static string RegisteredXml(string command, string arguments, string runLevel, string extraAction)
         {
+            return RegisteredXml(command, arguments, runLevel, extraAction, MySid);
+        }
+
+        /// <summary>principal is the Principal UserId (a SID or DOMAIN\user); null leaves it out.</summary>
+        static string RegisteredXml(string command, string arguments, string runLevel, string extraAction, string principal)
+        {
             return "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
                 + "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
                 + "  <RegistrationInfo>\r\n    <Description>Starts RAM Optimiser.</Description>\r\n    <URI>\\RamOptimiser</URI>\r\n  </RegistrationInfo>\r\n"
                 + "  <Triggers>\r\n    <LogonTrigger>\r\n      <Enabled>true</Enabled>\r\n      <UserId>PC\\me</UserId>\r\n    </LogonTrigger>\r\n  </Triggers>\r\n"
-                + "  <Principals>\r\n    <Principal id=\"Author\">\r\n      <UserId>S-1-5-21-1-2-3-1001</UserId>\r\n"
+                + "  <Principals>\r\n    <Principal id=\"Author\">\r\n"
+                + (principal == null ? "" : "      <UserId>" + principal + "</UserId>\r\n")
                 + "      <LogonType>InteractiveToken</LogonType>\r\n"
                 + (runLevel == null ? "" : "      <RunLevel>" + runLevel + "</RunLevel>\r\n")
                 + "    </Principal>\r\n  </Principals>\r\n"
@@ -566,37 +735,104 @@ namespace RamOptimiser.Tests
                 + "    </Exec>\r\n" + (extraAction ?? "") + "  </Actions>\r\n</Task>\r\n";
         }
 
-        static void RegisteredTaskTests(string exe, string ownXml)
+        /// <summary>The matcher as the fixture's user (MySid, PC\me) sees it.</summary>
+        static bool Ours(string xml, string path)
+        {
+            return StartupTask.MatchesRegisteredTask(xml, path, MySid, MyName);
+        }
+
+        static void RegisteredTaskTests(string exe, string ownXml, string ownUser)
         {
             string path = @"C:\Program Files\RamOptimiser\RamOptimiser.exe";
-            Check("registered task: our own definition matches", StartupTask.MatchesRegisteredTask(ownXml, exe));
-            Check("registered task: scheduler layout matches", StartupTask.MatchesRegisteredTask(
-                RegisteredXml(path, "--tray", "HighestAvailable", null), path));
-            Check("registered task: path case is ignored", StartupTask.MatchesRegisteredTask(
-                RegisteredXml(path.ToUpperInvariant(), "--tray", "HighestAvailable", null), path));
-            Check("registered task: another program is not ours", !StartupTask.MatchesRegisteredTask(
+            Check("registered task: our own definition matches", StartupTask.MatchesRegisteredTask(ownXml, exe, MySid, ownUser));
+            Check("registered task: scheduler layout matches", Ours(RegisteredXml(path, "--tray", "HighestAvailable", null), path));
+            Check("registered task: path case is ignored", Ours(RegisteredXml(path.ToUpperInvariant(), "--tray", "HighestAvailable", null), path));
+            Check("registered task: another program is not ours", !Ours(
                 RegisteredXml(@"C:\Users\me\Downloads\RamOptimiser.exe", "--tray", "HighestAvailable", null), path));
-            Check("registered task: other arguments are not ours", !StartupTask.MatchesRegisteredTask(
-                    RegisteredXml(path, "--tray --evil", "HighestAvailable", null), path)
-                && !StartupTask.MatchesRegisteredTask(RegisteredXml(path, null, "HighestAvailable", null), path)
-                && !StartupTask.MatchesRegisteredTask(RegisteredXml(path, "", "HighestAvailable", null), path));
-            Check("registered task: needs HighestAvailable", !StartupTask.MatchesRegisteredTask(
-                    RegisteredXml(path, "--tray", "LeastPrivilege", null), path)
-                && !StartupTask.MatchesRegisteredTask(RegisteredXml(path, "--tray", null, null), path));
-            Check("registered task: a second action is not ours", !StartupTask.MatchesRegisteredTask(
-                RegisteredXml(path, "--tray", "HighestAvailable",
-                    "    <Exec>\r\n      <Command>C:\\x\\other.exe</Command>\r\n    </Exec>\r\n"), path));
+            Check("registered task: other arguments are not ours", !Ours(RegisteredXml(path, "--tray --evil", "HighestAvailable", null), path)
+                && !Ours(RegisteredXml(path, null, "HighestAvailable", null), path)
+                && !Ours(RegisteredXml(path, "", "HighestAvailable", null), path));
+            Check("registered task: needs HighestAvailable", !Ours(RegisteredXml(path, "--tray", "LeastPrivilege", null), path)
+                && !Ours(RegisteredXml(path, "--tray", null, null), path));
+            Check("registered task: a second action is not ours", !Ours(RegisteredXml(path, "--tray", "HighestAvailable",
+                "    <Exec>\r\n      <Command>C:\\x\\other.exe</Command>\r\n    </Exec>\r\n"), path));
             Check("registered task: wrong namespace, junk and empty are not ours",
-                !StartupTask.MatchesRegisteredTask(RegisteredXml(path, "--tray", "HighestAvailable", null)
+                !Ours(RegisteredXml(path, "--tray", "HighestAvailable", null)
                     .Replace("http://schemas.microsoft.com/windows/2004/02/mit/task", "urn:other"), path)
-                && !StartupTask.MatchesRegisteredTask("<Task", path) && !StartupTask.MatchesRegisteredTask("", path)
-                && !StartupTask.MatchesRegisteredTask(null, path));
+                && !Ours("<Task", path) && !Ours("", path) && !Ours(null, path));
             string body = RegisteredXml("&p;", "--tray", "HighestAvailable", null);
             string withDtd = "<?xml version=\"1.0\"?>\r\n<!DOCTYPE Task [<!ENTITY p \"" + path + "\">]>\r\n"
                 + body.Substring(body.IndexOf("<Task ", StringComparison.Ordinal));
-            Check("registered task: a DTD is refused", !StartupTask.MatchesRegisteredTask(withDtd, path));
+            Check("registered task: a DTD is refused", !Ours(withDtd, path));
             Check("registered task: the expected path must itself be valid",
-                !StartupTask.MatchesRegisteredTask(RegisteredXml(@"\\srv\s\RamOptimiser.exe", "--tray", "HighestAvailable", null), @"\\srv\s\RamOptimiser.exe"));
+                !Ours(RegisteredXml(@"\\srv\s\RamOptimiser.exe", "--tray", "HighestAvailable", null), @"\\srv\s\RamOptimiser.exe"));
+
+            // P1: the same program for another account is that account's task, not this user's.
+            Check("registered task: another user's SID is not ours", !Ours(RegisteredXml(path, "--tray", "HighestAvailable", null, OtherSid), path));
+            Check("registered task: the SID is compared whole", !Ours(RegisteredXml(path, "--tray", "HighestAvailable", null, MySid + "0"), path));
+            Check("registered task: principal by account name, any case", Ours(RegisteredXml(path, "--tray", "HighestAvailable", null, @"pc\ME"), path));
+            Check("registered task: another account name is not ours", !Ours(RegisteredXml(path, "--tray", "HighestAvailable", null, @"PC\other"), path));
+            Check("registered task: no principal user is not ours", !Ours(RegisteredXml(path, "--tray", "HighestAvailable", null, null), path));
+            Check("registered task: no current user matches nothing",
+                !StartupTask.MatchesRegisteredTask(RegisteredXml(path, "--tray", "HighestAvailable", null), path, null, null));
+        }
+
+        /// <summary>P1 migration and P2's three states, decided from what the two task reads returned.</summary>
+        static void TaskStateTests()
+        {
+            string path = @"C:\Program Files\RamOptimiser\RamOptimiser.exe", old = @"C:\Users\me\bin\RamOptimiser.exe";
+            TaskRead missing = TaskRead.Failed(StartupTask.HResultFileNotFound, "The system cannot find the file specified.");
+            TaskRead denied = TaskRead.Failed(unchecked((int)0x80070005), "Access is denied.");
+            TaskRead mine = TaskRead.Found(RegisteredXml(path, "--tray", "HighestAvailable", null));
+            TaskRead mineOld = TaskRead.Found(RegisteredXml(old, "--tray", "HighestAvailable", null));
+            TaskRead mineLow = TaskRead.Found(RegisteredXml(path, "--tray", "LeastPrivilege", null));
+            TaskRead theirs = TaskRead.Found(RegisteredXml(old, "--tray", "HighestAvailable", null, OtherSid));
+            Func<TaskRead, TaskRead, StartupTaskStatus> classify = (u, l) => StartupTask.Classify(u, l, path, MySid, MyName);
+
+            StartupTaskStatus s = classify(missing, missing);
+            Check("task state: no task is absent", s.State == StartupTaskState.Absent);
+            s = classify(mine, missing);
+            Check("task state: this user's task for this program is ours", s.State == StartupTaskState.Ours && !s.Legacy);
+            s = classify(mineOld, missing);
+            Check("task state: a task for another copy is stale and names its path", s.State == StartupTaskState.Other
+                && s.Command == old && !s.SameProgram && !s.Legacy, s.State + " " + s.Command);
+            s = classify(mineLow, missing);
+            Check("task state: this program with other settings is stale", s.State == StartupTaskState.Other && s.SameProgram);
+            s = classify(denied, missing);
+            Check("task state: a denied read is unreadable, not absent", s.State == StartupTaskState.Unreadable && s.Error == "Access is denied.");
+            s = classify(TaskRead.Found(RegisteredXml(path, "--tray", "HighestAvailable", null, OtherSid)), missing);
+            Check("task state: this user's task name held by another principal is stale", s.State == StartupTaskState.Other);
+
+            s = classify(missing, mine);
+            Check("migration: this user's old-named task counts as ours", s.State == StartupTaskState.Ours && s.Legacy);
+            s = classify(missing, mineOld);
+            Check("migration: this user's old-named task for another copy is stale", s.State == StartupTaskState.Other
+                && s.Legacy && s.Command == old);
+            s = classify(missing, theirs);
+            Check("migration: another user's old-named task is not shown", s.State == StartupTaskState.Absent);
+            // Its owner can always read their own task, so an old-named task this user is denied is another account's.
+            s = classify(missing, denied);
+            Check("migration: an old-named task this user is denied is another account's, not shown", s.State == StartupTaskState.Absent, s.State.ToString());
+            s = classify(missing, TaskRead.Failed(unchecked((int)0x80070422), "The service cannot be started."));
+            Check("migration: an old-named task unreadable for another reason is unreadable", s.State == StartupTaskState.Unreadable && s.Legacy);
+            s = classify(denied, missing);
+            Check("migration: this user's own task denied is still unreadable", s.State == StartupTaskState.Unreadable && !s.Legacy);
+            s = classify(mine, mineOld);
+            Check("migration: a stale old-named task of this user still shows", s.State == StartupTaskState.Other
+                && s.Legacy && s.Command == old);
+            s = classify(mine, theirs);
+            Check("migration: another user's old-named task leaves ours alone", s.State == StartupTaskState.Ours && !s.Legacy);
+
+            string me = StartupTask.TaskNameFor(MySid);
+            Func<TaskRead, TaskRead, bool, string> remove = (u, l, enabling)
+                => string.Join(",", StartupTask.TasksToRemove(u, l, MySid, MyName, enabling).ToArray());
+            Check("remove on enable: this user's old-named task", remove(null, mineOld, true) == StartupTask.LegacyTaskName);
+            Check("remove on enable: never another user's old-named task", remove(null, theirs, true) == "");
+            Check("remove on enable: nothing else", remove(mine, missing, true) == "" && remove(null, denied, true) == "");
+            Check("remove on disable: this user's task and old-named task", remove(mine, mine, false) == me + "," + StartupTask.LegacyTaskName,
+                remove(mine, mine, false));
+            Check("remove on disable: never another user's old-named task", remove(mine, theirs, false) == me && remove(missing, theirs, false) == "");
+            Check("remove on disable: an unreadable old-named task is left alone", remove(mine, denied, false) == me);
         }
 
         // ---------------------------------------------------------------- Elevation
@@ -606,6 +842,18 @@ namespace RamOptimiser.Tests
             Check("UAC cancel is recognised", Elevation.IsUacCancel(new Win32Exception(1223)));
             Check("other launch errors are not a cancel", !Elevation.IsUacCancel(new Win32Exception(2)) && !Elevation.IsUacCancel(null));
             Throws<ArgumentException>("relaunch needs a path", () => Elevation.TryRelaunchElevated("", null));
+
+            // P9: the launching user's SID crosses the UAC boundary on the command line, so it is checked strictly.
+            Check("SID format: well formed", Elevation.IsWellFormedSid("S-1-5-18") && Elevation.IsWellFormedSid(MySid)
+                && Elevation.IsWellFormedSid("S-1-5-21-4294967295-1-2-500"));
+            string[] bad = { null, "", "BA", "S-1", "S-1-5", "s-1-5-18", "S-1-5-018", "S-1-5-18-", "S-1-5--18", "S-2-5-18",
+                "S-1-5-4294967296", "S-1-5-18 x", " S-1-5-18", "S-1-5-18\" /F", "S-1-0x5-18", "S-1-5-1-2-3-4-5-6-7-8-9-10-11-12-13-14-15-16" };
+            foreach (string b in bad)
+                Check("SID format: refuses " + (b ?? "null"), !Elevation.IsWellFormedSid(b));
+            Check("other account: none without a launcher", !Elevation.IsOtherAccount(null, MySid));
+            Check("other account: the same user", !Elevation.IsOtherAccount(MySid, MySid));
+            Check("other account: another SID", Elevation.IsOtherAccount(OtherSid, MySid));
+            Check("other account: a malformed launcher is ignored", !Elevation.IsOtherAccount("junk", MySid));
         }
 
         // ---------------------------------------------------------------- SingleInstance

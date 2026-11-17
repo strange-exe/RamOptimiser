@@ -156,9 +156,13 @@ for grouped cards with a title, a one-line description and the control on the ri
 | Hairline / WindowBorder / ControlBorder | #E5E5E5 / #CFCFCF / #868686 | #3B3B3B / #444444 / #9A9A9A |
 | Text / MutedText | #1A1A1A / #5C5C5C | #FFFFFF / #C8C8C8 |
 | Accent / OnAccent | #005FB8 / #FFFFFF | #60CDFF / #101010 |
+| TrackBackground / TrackEdge | #EDEDED / #EDEDED | #333333 / #333333 |
 | Ok / Caution / Danger / DangerBackground | #0F7B0F / #9D5D00 / #C42B1C / #FDE7E9 | #6CCB5F / #FCE100 / #FF99A4 / #442726 |
 | MapInUse / MapStandby / MapFree | #005FB8 / #CFE1F3 / #FBFBFB | #60CDFF / #1F4A63 / #2B2B2B |
 | MapModified | accent hatch on Card | accent hatch on Card |
+TrackEdge is the 1 px edge of the commit bar's rest, the top-app tracks and the loading skeletons. It equals the
+track fill in light and dark (no visible change); high contrast maps it to WindowText, because the track fill is
+Window there, the same as the card. Hover fills still use TrackBackground (owner's visual check pending).
 Type: Segoe UI Variable Text (Segoe UI fallback), 12/13/14/28/44, weights 400 and 600; figures tabular.
 Radii: controls 4, cards 8. Icons: one 16-unit stroke set (1.5 px, round caps) in Styles.xaml.
 

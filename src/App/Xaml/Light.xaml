@@ -13,6 +13,8 @@
   <SolidColorBrush x:Key="Accent" Color="#005FB8"/>
   <SolidColorBrush x:Key="OnAccent" Color="#FFFFFF"/>
   <SolidColorBrush x:Key="TrackBackground" Color="#EDEDED"/>
+  <!-- A track's own edge: the fill colour here, window text in high contrast, where the fill matches the card. -->
+  <SolidColorBrush x:Key="TrackEdge" Color="#EDEDED"/>
   <SolidColorBrush x:Key="SecondaryButton" Color="#FBFBFB"/>
   <SolidColorBrush x:Key="Ok" Color="#0F7B0F"/>
   <SolidColorBrush x:Key="Caution" Color="#9D5D00"/>

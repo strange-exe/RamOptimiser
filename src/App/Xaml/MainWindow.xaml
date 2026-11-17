@@ -47,6 +47,8 @@
                     Text="%" FontFamily="{DynamicResource DisplayFont}" FontSize="28" FontWeight="SemiBold"/><Run
                     Text="   " FontSize="14"/><Run x:Name="InUseRun" Text="Reading memory..." FontSize="14" Foreground="{DynamicResource MutedText}"/></TextBlock>
               </app:SummaryPanel>
+              <!-- While sampling fails after a good read: when the figures were last read -->
+              <TextBlock x:Name="LastReadNote" Style="{StaticResource Small}" Margin="0,2,0,0" Visibility="Collapsed"/>
 
               <!-- Memory map: one bar for the whole of RAM; the ring is a 3:1 edge over the parts. -->
               <Grid Height="24" Margin="0,10,0,0">
@@ -114,7 +116,8 @@
                   <Grid Height="4" Margin="0,6,0,0">
                     <app:MapPanel x:Name="CommitBar" Background="{DynamicResource TrackBackground}" Gap="0" Radius="2">
                       <Border x:Name="CommitUsed" Background="{DynamicResource Accent}"/>
-                      <Border x:Name="CommitRest" Background="{DynamicResource TrackBackground}"/>
+                      <Border x:Name="CommitRest" Background="{DynamicResource TrackBackground}"
+                              BorderBrush="{DynamicResource TrackEdge}" BorderThickness="1"/>
                     </app:MapPanel>
                   </Grid>
                   <TextBlock Style="{StaticResource Small}" Margin="0,6,0,0"
@@ -140,6 +143,9 @@
             <TextBlock x:Name="RestartError" Visibility="Collapsed" Margin="0,6,0,0" TextWrapping="Wrap" FontSize="13"
                        FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
           </StackPanel>
+          <!-- Elevated as another account (over-the-shoulder UAC): stays for the whole run -->
+          <TextBlock x:Name="AccountNotice" Style="{StaticResource Small}" Margin="4,6,4,0" TextWrapping="Wrap"
+                     Visibility="Collapsed"/>
 
           <!-- 3. The last clean, manual or automatic (announced politely to screen readers) -->
           <app:LiveRegion x:Name="ResultPanel" Margin="4,8,0,0" Visibility="Collapsed"
@@ -437,6 +443,8 @@
                 <ComboBox x:Name="ThemeBox" DockPanel.Dock="Right" Width="170" AutomationProperties.Name="Theme"/>
                 <TextBlock Text="Theme" VerticalAlignment="Center" Margin="0,0,12,0"/>
               </DockPanel>
+              <!-- High contrast overrides the choice above -->
+              <TextBlock x:Name="ThemeNote" Style="{StaticResource Small}" Margin="16,-4,16,10" TextWrapping="Wrap" Visibility="Collapsed"/>
               <Border Style="{StaticResource RowDivider}" Padding="16,10">
                 <Grid>
                   <Grid.ColumnDefinitions>

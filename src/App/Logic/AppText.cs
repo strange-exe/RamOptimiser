@@ -11,7 +11,7 @@ namespace RamOptimiser.App
 {
     public enum ResolvedTheme { Light, Dark, HighContrast }
 
-    public enum AreaState { Ok, Failed, Skipped }
+    public enum AreaState { Ok, Failed, Skipped, Partial }
 
     /// <summary>One line of the clean result: the area's label, its state and the words shown for it.</summary>
     public sealed class AreaLine
@@ -19,7 +19,7 @@ namespace RamOptimiser.App
         public Areas Area;
         public string Label;
         public AreaState State;
-        /// <summary>"ok", "failed: reason" or "skipped: reason".</summary>
+        /// <summary>"ok", "failed: reason" or "skipped: reason" (a Partial area reads "ok: what it did; what failed").</summary>
         public string Status;
     }
 
@@ -35,6 +35,61 @@ namespace RamOptimiser.App
         public const string CleanNeedsAdmin = "Cleaning needs administrator rights. Use Restart as administrator, below this button.";
         public const string LastAreaReason = "At least one area must stay selected.";
         public const string StartupNeedsAdmin = "Needs administrator rights: restart as administrator to change this.";
+
+        /// <summary>
+        /// The line under Start with Windows for a task that exists but is not this program's (stale), or that
+        /// could not be read. Null when there is no task or it is ours: the switch alone says that.
+        /// </summary>
+        public static string StartupStatusLine(StartupTaskStatus status)
+        {
+            if (status == null) return null;
+            const string Replaces = " Turning this on replaces it.";
+            switch (status.State)
+            {
+                case StartupTaskState.Other:
+                    if (status.SameProgram) return "A start-up task for this program exists with other settings." + Replaces;
+                    if (!string.IsNullOrEmpty(status.Command))
+                        return "A start-up task exists but starts another copy: " + status.Command + "." + Replaces;
+                    return "A start-up task exists but does not start this program." + Replaces;
+                case StartupTaskState.Unreadable:
+                    string error = string.IsNullOrEmpty(status.Error) ? null : status.Error.Trim().TrimEnd('.');
+                    return string.IsNullOrEmpty(error) ? "Could not read the start-up task." : "Could not read the start-up task: " + error + ".";
+                default:
+                    return null;
+            }
+        }
+
+        /// <summary>
+        /// Everything said under Start with Windows, in order: a failed change, the task's state, then why the
+        /// switch is locked. Running as another account replaces it all: nothing here applies to the user.
+        /// </summary>
+        public static string StartupReason(StartupTaskStatus status, bool elevated, string otherAccount, string failure)
+        {
+            if (!string.IsNullOrEmpty(otherAccount)) return StartupOtherAccount(otherAccount);
+            var parts = new List<string>();
+            if (!string.IsNullOrEmpty(failure)) parts.Add(failure);
+            string line = StartupStatusLine(status);
+            if (line != null) parts.Add(line);
+            if (!elevated) parts.Add(StartupNeedsAdmin);
+            return parts.Count == 0 ? null : string.Join(" ", parts.ToArray());
+        }
+
+        public static string StartupOtherAccount(string account)
+        {
+            return "Can't change this here: this copy runs as " + account + ", so the task would start for that account, not yours.";
+        }
+
+        /// <summary>Shown for as long as an elevated copy runs as another account than the one that started it.</summary>
+        public static string OtherAccountNotice(string account)
+        {
+            return "Running as " + account + ", the account that approved the administrator prompt. "
+                + "This copy uses that account's settings and start-up task, not yours.";
+        }
+
+        public static bool StartupSwitchEnabled(bool elevated, bool busy, string otherAccount)
+        {
+            return elevated && !busy && string.IsNullOrEmpty(otherAccount);
+        }
 
         /// <summary>
         /// The not-elevated notice. Some Windows builds let any user read the standby and modified lists;
@@ -114,7 +169,9 @@ namespace RamOptimiser.App
             {
                 Area = r.Area,
                 Label = AreaLabel(r.Area),
-                State = r.Ok ? AreaState.Ok : r.Skipped ? AreaState.Skipped : AreaState.Failed,
+                // Partial keeps its "ok: ..." words, with a caution glyph that matches the summary's warning.
+                State = r.Outcome == AreaOutcome.Partial ? AreaState.Partial
+                    : r.Ok ? AreaState.Ok : r.Skipped ? AreaState.Skipped : AreaState.Failed,
                 Status = Status(r)
             };
         }
@@ -279,18 +336,90 @@ namespace RamOptimiser.App
         /// </summary>
         public static string LastClean(DateTime localTime, CleanReport report, bool automatic, CultureInfo culture)
         {
-            string head = (automatic ? "Auto-clean at " : "Last clean at ") + localTime.ToString("t", culture);
+            return LastClean(localTime, localTime, report, automatic, culture);
+        }
+
+        /// <summary>
+        /// As above, read at localNow: a clean from an earlier day says so ("Last clean yesterday at 14:32", "on
+        /// 15/11/2026 at 14:32"), since the app can sit in the tray for days. Recomputed as the day changes.
+        /// </summary>
+        public static string LastClean(DateTime localTime, DateTime localNow, CleanReport report, bool automatic, CultureInfo culture)
+        {
+            string head = (automatic ? "Auto-clean " : "Last clean ") + When(localTime, localNow, culture);
             if (report == null || report.Before == null || report.After == null) return head + " did not finish.";
-            int failed = 0;
-            foreach (AreaResult r in report.Results) if (!r.Ok && !r.Skipped) failed++;
+            int failed = CountOutcome(report, AreaOutcome.Failed), partial = CountOutcome(report, AreaOutcome.Partial);
             string text = head + (report.InUseFreed > 0 ? " freed " + Format.Bytes(report.InUseFreed) : " freed nothing")
                 + ". Load went from " + report.Before.LoadPercent.ToString(CultureInfo.InvariantCulture) + "% to "
                 + report.After.LoadPercent.ToString(CultureInfo.InvariantCulture) + "%.";
             if (failed > 0) text += " " + failed.ToString(CultureInfo.InvariantCulture) + (failed == 1 ? " area failed." : " areas failed.");
+            if (partial > 0) text += " " + partial.ToString(CultureInfo.InvariantCulture) + (partial == 1 ? " area partly failed." : " areas partly failed.");
             return text;
         }
 
-        /// <summary>True when the clean ran every area it tried (skips are fine): the line gets a check, else a warning.</summary>
+        /// <summary>"at 14:32" today, "yesterday at 14:32", or "on 15/11/2026 at 14:32" (the culture's short date).</summary>
+        public static string When(DateTime localTime, DateTime localNow, CultureInfo culture)
+        {
+            string time = "at " + localTime.ToString("t", culture);
+            if (localTime.Date == localNow.Date) return time;
+            if (localTime.Date == localNow.Date.AddDays(-1)) return "yesterday " + time;
+            return "on " + localTime.ToString("d", culture) + " " + time;
+        }
+
+        /// <summary>The result line: the last clean, plus why it stopped when it threw before reporting anything.</summary>
+        public static string ResultLine(DateTime localTime, DateTime localNow, CleanReport report, Exception error, bool automatic, CultureInfo culture)
+        {
+            string line = LastClean(localTime, localNow, report, automatic, culture);
+            if (report == null && error != null) line += " " + FailedSummary(error);
+            return line;
+        }
+
+        /// <summary>The words after the load figure until a sample arrives, or when none could be read; null once live.</summary>
+        public static string MemoryCaption(MemoryViewState state)
+        {
+            if (state == MemoryViewState.Initial) return "Reading memory...";
+            if (state == MemoryViewState.FailedNoData) return "Unavailable";
+            return null;
+        }
+
+        public const string CleanNeedsData = "Clean memory waits until memory status can be read.";
+
+        /// <summary>Clean needs administrator rights, no clean running, and memory status read at least once if it failed.</summary>
+        public static bool CleanEnabled(bool elevated, bool cleaning, MemoryViewState state)
+        {
+            return elevated && !cleaning && state != MemoryViewState.FailedNoData;
+        }
+
+        /// <summary>Clean memory's help text: why it is unavailable, else the Power Clean note (or nothing).</summary>
+        public static string CleanHelp(bool elevated, MemoryViewState state, string powerNote)
+        {
+            if (!elevated) return CleanNeedsAdmin;
+            if (state == MemoryViewState.FailedNoData) return CleanNeedsData;
+            return powerNote ?? "";
+        }
+
+        /// <summary>The banner when a sample fails; before any figure was read it also says Clean waits.</summary>
+        public static string SampleErrorText(string message, int retrySeconds, bool hasData)
+        {
+            string text = "Memory status could not be read: " + Plain(message, "unknown error") + ". Trying again every "
+                + retrySeconds.ToString(CultureInfo.InvariantCulture) + " seconds.";
+            return hasData ? text : text + " Clean memory waits until it can be read.";
+        }
+
+        /// <summary>Under the figures while sampling fails: when they were last read, so they don't pass for current.</summary>
+        public static string LastReadLine(DateTime localRead, DateTime localNow, CultureInfo culture)
+        {
+            return "Last read " + When(localRead, localNow, culture) + ".";
+        }
+
+        static int CountOutcome(CleanReport report, AreaOutcome outcome)
+        {
+            int n = 0;
+            foreach (AreaResult r in report.Results) if (r.Outcome == outcome) n++;
+            return n;
+        }
+
+        /// <summary>True when the clean ran every area it tried in full (skips are fine): the line gets a check, else a
+        /// warning. An area that only partly worked (some drives not flushed) gets the warning too.</summary>
         public static bool CleanWentWell(CleanReport report)
         {
             return report != null && report.Before != null && report.After != null && report.AllOk;
@@ -446,6 +575,58 @@ namespace RamOptimiser.App
                 + (stoppedByApp == 1 ? " service is" : " services are") + " stopped by this app. They come back when you quit the app or restart Windows.";
         }
 
+        /// <summary>
+        /// The result line after start-up started again the services an earlier run's Power Clean left stopped (it
+        /// crashed, was ended, or Windows signed out first). Null when there is nothing to say: none were left, or
+        /// every one is no longer installed (a per-user service from an earlier sign-in).
+        /// </summary>
+        public static string RecoveryLine(IList<ServiceAction> done, string failure)
+        {
+            const string Retry = " Try Restore services in Settings, or restart Windows.";
+            if (failure != null) return "Services an earlier Power Clean stopped could not be started again: " + Plain(failure, "unknown error") + "." + Retry;
+            int started = 0, failed = 0;
+            if (done != null)
+                foreach (ServiceAction a in done)
+                {
+                    if (a.Started) started++;
+                    else if (a.Failed) failed++;
+                }
+            int total = started + failed;
+            if (total == 0) return null;
+            string head = "Power Clean left " + Count(total, "service") + " stopped when the app last closed.";
+            if (failed == 0) return head + (total == 1 ? " It is running again." : " They are running again.");
+            if (started == 0) return head + (total == 1 ? " It" : " They") + " could not be started again." + Retry;
+            return head + " " + started.ToString(CultureInfo.InvariantCulture) + (started == 1 ? " is" : " are") + " running again; "
+                + failed.ToString(CultureInfo.InvariantCulture) + " could not be started." + Retry;
+        }
+
+        /// <summary>The check: nothing failed.</summary>
+        public static bool RecoveryWentWell(IList<ServiceAction> done, string failure)
+        {
+            if (failure != null) return false;
+            if (done != null) foreach (ServiceAction a in done) if (a.Failed) return false;
+            return true;
+        }
+
+        /// <summary>One row per service started or failed, for the details under the result line.</summary>
+        public static List<AreaLine> RecoveryLines(IList<ServiceAction> done)
+        {
+            var lines = new List<AreaLine>();
+            if (done == null) return lines;
+            foreach (ServiceAction a in done)
+            {
+                if (!a.Started && !a.Failed) continue;
+                lines.Add(new AreaLine
+                {
+                    Area = Areas.Services,
+                    Label = a.Label,
+                    State = a.Started ? AreaState.Ok : AreaState.Failed,
+                    Status = a.Started ? "ok" : "failed: " + Plain(a.Message, "unknown error")
+                });
+            }
+            return lines;
+        }
+
         public static string CooldownText(int seconds)
         {
             if (seconds <= 0) return "no minimum wait between cleans";
@@ -489,10 +670,10 @@ namespace RamOptimiser.App
         {
             string at = "Last auto-clean at " + localTime.ToString("t", culture);
             if (report == null) return at + " did not finish";
-            int failed = 0;
-            foreach (AreaResult r in report.Results) if (!r.Ok && !r.Skipped) failed++;
+            int failed = CountOutcome(report, AreaOutcome.Failed), partial = CountOutcome(report, AreaOutcome.Partial);
             string text = at + ": " + (report.InUseFreed > 0 ? "freed " + Format.Bytes(report.InUseFreed) : "nothing freed");
             if (failed > 0) text += ", " + failed.ToString(CultureInfo.InvariantCulture) + (failed == 1 ? " area failed" : " areas failed");
+            if (partial > 0) text += ", " + partial.ToString(CultureInfo.InvariantCulture) + (partial == 1 ? " area partly failed" : " areas partly failed");
             return text;
         }
     }
@@ -621,6 +802,31 @@ namespace RamOptimiser.App
             return taskbarIsLight ? unchecked((int)0xFF1A1A1A) : unchecked((int)0xFFFFFFFF);
         }
 
+        /// <summary>
+        /// Broadcasts that can change the app's colours: the light/dark setting and taskbar colour (General,
+        /// "ImmersiveColorSet"), system colours, visual style and high contrast. Wallpaper, power, locale and the
+        /// rest change nothing here, so the token dictionary is not swapped for them.
+        /// </summary>
+        public static bool AffectsTheme(Microsoft.Win32.UserPreferenceCategory category)
+        {
+            switch (category)
+            {
+                case Microsoft.Win32.UserPreferenceCategory.General:
+                case Microsoft.Win32.UserPreferenceCategory.Color:
+                case Microsoft.Win32.UserPreferenceCategory.VisualStyle:
+                case Microsoft.Win32.UserPreferenceCategory.Accessibility:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>Under the Theme box while high contrast overrides it; null otherwise.</summary>
+        public static string ThemeNote(bool highContrast)
+        {
+            return highContrast ? "High contrast is on, so Windows' own colours are used." : null;
+        }
+
         public static string ThemeLabel(ThemeMode mode)
         {
             switch (mode)
@@ -635,15 +841,26 @@ namespace RamOptimiser.App
     public sealed class LaunchOptions
     {
         public bool StartInTray;
+        /// <summary>The SID of the account that restarted the app as administrator, when it was well formed.</summary>
+        public string LauncherSid;
 
-        /// <summary>"--tray" starts hidden in the notification area. Anything else is ignored.</summary>
+        /// <summary>
+        /// "--tray" starts hidden in the notification area. "--launched-by SID" names the account that asked
+        /// for elevation; a value that is not a strict SID is dropped (and not consumed). Anything else is ignored.
+        /// </summary>
         public static LaunchOptions Parse(string[] args)
         {
             var o = new LaunchOptions();
             if (args == null) return o;
-            foreach (string a in args)
-                if (a != null && string.Equals(a.Trim(), StartupTask.TrayArgument, StringComparison.OrdinalIgnoreCase))
+            for (int i = 0; i < args.Length; i++)
+            {
+                string a = args[i];
+                if (a == null) continue;
+                if (string.Equals(a.Trim(), StartupTask.TrayArgument, StringComparison.OrdinalIgnoreCase))
                     o.StartInTray = true;
+                else if (a == Elevation.LauncherArgument && i + 1 < args.Length && Elevation.IsWellFormedSid(args[i + 1]))
+                    o.LauncherSid = args[++i];
+            }
             return o;
         }
     }
