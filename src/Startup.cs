@@ -96,7 +96,15 @@ namespace RamOptimiser
         public string Name;
         public string ExeName;
         public string ExePath;
+        /// <summary>The company the file names (its version info). Kept for today's callers; AppText.PublisherLine
+        /// is the line that says whether a signature backs it.</summary>
         public string Publisher;
+        /// <summary>The file's embedded Authenticode signature. Display only: never part of a Keep or switch decision.</summary>
+        public SignatureState Signature;
+        /// <summary>Who signed the file, for a Signed row whose certificate name could be read; else null.</summary>
+        public string Signer;
+        /// <summary>The company the file names, which anyone can write into a file: the same value as Publisher.</summary>
+        public string ClaimedCompany;
         public bool Enabled;
         public KnownItem Known;
         /// <summary>Packaged rows: the package family name (e.g. 5319275A.WhatsAppDesktop_cv1g1gvanyjgm).</summary>
@@ -184,7 +192,8 @@ namespace RamOptimiser
                 else if (IsRunOnce(a.Source)) a.Enabled = true;
                 else a.Enabled = IsApprovedEnabled(ReadApproved(a));
                 a.Known = KnownFor(a, roots);
-                a.Publisher = PublisherOf(a.ExePath);
+                // After Known, which a signature never changes. Inspect opens only local-drive files, no network.
+                ApplyPublisher(a, PublisherOf(a.ExePath), ChecksSignature(a) ? Signature.Inspect(a.ExePath) : null);
             }
             return list;
         }
@@ -218,6 +227,28 @@ namespace RamOptimiser
             if (a == null) return null;
             string trusted = a.Source == StartupSource.UserFolder ? null : a.ExePath;
             return TrustedKnown(StartupKnowledge.FindApp(a.ExeName), trusted, protectedRoots);
+        }
+
+        /// <summary>
+        /// Whether a row's program gets a signature check: any row with an exe path, except a packaged app, which is
+        /// signed as a package (AppxSignature.p7x) rather than per exe, so "Not signed" would be wrong for it. Pure.
+        /// </summary>
+        public static bool ChecksSignature(StartupApp a)
+        {
+            return a != null && !string.IsNullOrEmpty(a.ExePath) && a.Source != StartupSource.Packaged;
+        }
+
+        /// <summary>
+        /// Fills a row's publisher facts: the company the file claims and what its signature says (NotChecked when
+        /// there is no result). Touches nothing else, so Known, Keep and the switch stay as the location decided. Pure.
+        /// </summary>
+        public static void ApplyPublisher(StartupApp a, string claimed, SignatureInfo signature)
+        {
+            if (a == null) return;
+            a.ClaimedCompany = claimed;
+            a.Publisher = claimed;
+            a.Signature = signature == null ? SignatureState.NotChecked : signature.State;
+            a.Signer = signature == null ? null : signature.Signer;
         }
 
         public static bool IsRunOnce(StartupSource s)
