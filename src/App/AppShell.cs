@@ -162,6 +162,21 @@ namespace RamOptimiser.App
         readonly PendingSave thresholdPending = new PendingSave();
         ComboBox intervalBox, themeBox;
         Expander moreAreas;
+
+        // Activity (settings tab, P7 and R4): this session's cleans and auto-clean events, from memory only.
+        StackPanel recentCleanRows, activityRows;
+        TextBox activityPath;
+        const int ActivityRowsShown = 20;
+        readonly ActivityHistory activity = new ActivityHistory(ActivityRowsShown);
+        /// <summary>The last clean, for the tray's tooltip line and status item; null before the first.</summary>
+        LastCleanInfo lastClean;
+        /// <summary>The auto-clean status the activity list last compared with, and whether the user just pressed Resume.</summary>
+        AutoCleanStatus loggedStatus;
+        bool userResumed;
+        /// <summary>The last sampling failure put in the activity list (ErrorGate), and whether reading is failing now.</summary>
+        string loggedReadError;
+        DateTime? loggedReadErrorUtc;
+        bool readFailing;
         readonly List<KeyValuePair<CheckBox, Areas>> areaBoxes = new List<KeyValuePair<CheckBox, Areas>>();
         static readonly Areas HiddenAreas = Areas.ModifiedList | Areas.VolumeCache | Areas.CombinePages | Areas.RegistryCache;
 
@@ -216,6 +231,7 @@ namespace RamOptimiser.App
             tray = new TrayController();
             tray.OpenRequested += delegate { ShowWindow(); };
             tray.CleanRequested += delegate { RequestClean(); };
+            tray.StatusClicked += delegate { ShowMemoryTab(); };
             tray.AutoCleanToggled += delegate { SetAutoClean(!settings.AutoCleanEnabled); };
             tray.PauseRequested += delegate { PauseAutoClean(); };
             tray.ResumeRequested += delegate { ResumeAutoClean(); };
@@ -226,9 +242,18 @@ namespace RamOptimiser.App
             powerServices = new List<string>(settings.PowerServices);
             // Services are stopped only when the areas include Areas.Services, i.e. under Power Clean. Automatic cleans
             // wait while the PC sleeps or has just woken, a full-screen app runs, and (scheduled ones) while locked or
-            // on battery (P5).
-            service = new AutoCleanService(MemorySnapshot.Take, areas => Cleaner.Clean(areas, powerServices), () => DateTime.UtcNow,
-                SystemConditions.AwakeTime, SystemConditions.Read, new GateOptions());
+            // on battery (P5). Each clean takes the cross-process clean lock without waiting (one running in ramopt makes
+            // this one skip and say so) and writes its record to cleans.log under it; automatic cleans stop at the
+            // 120 s limit, manual ones have none (E9, E22, R4).
+            service = new AutoCleanService(MemorySnapshot.Take,
+                job => GuiCleanLog.Run(job, powerServices, Cleaner.Clean, AppendLog, () => DateTime.UtcNow),
+                () => DateTime.UtcNow, SystemConditions.AwakeTime, SystemConditions.Read, new GateOptions(), Cleaner.AutoCleanDeadline);
+            // On the tick's worker thread: the append may wait briefly for another writer.
+            service.Rebound += (entry, s) =>
+            {
+                AppendLog(CleanLog.FormatRebound(entry.Id, DateTime.UtcNow, s));
+                Post(ShowHistory);
+            };
             service.Sampled += s => Post(() => OnSampled(s));
             service.CleanStarted += r => Post(() => OnCleanStarted(r));
             service.CleanCompleted += (report, r) => Post(() => OnCleanCompleted(report, r));
@@ -238,6 +263,10 @@ namespace RamOptimiser.App
             // A pause outlasts a restart, cut to an hour from now: settings.ini is user-writable.
             if (elevated && settings.AutoCleanEnabled) service.RestorePause(settings.AutoCleanPausedUntilUtc);
             RefreshAutoRow();
+            string logPath = CleanLog.DefaultPath;
+            activityPath.Text = logPath ?? "This account has no local data folder, so nothing is saved.";
+            ShowHistory();
+            ShowActivity();
             // Before service.Start, so a Power Clean of this run is never mistaken for an earlier run's leftover.
             if (elevated) StartServiceRecovery();
 
@@ -475,6 +504,9 @@ namespace RamOptimiser.App
             startupReason = F<TextBlock>("StartupReason");
             closeToTrayCheck = F<CheckBox>("CloseToTrayCheck");
             trayPercentCheck = F<CheckBox>("TrayPercentCheck");
+            recentCleanRows = F<StackPanel>("RecentCleanRows");
+            activityRows = F<StackPanel>("ActivityRows");
+            activityPath = F<TextBox>("ActivityPath");
 
             areaBoxes.Add(new KeyValuePair<CheckBox, Areas>(F<CheckBox>("AreaWorkingSets"), Areas.WorkingSets));
             areaBoxes.Add(new KeyValuePair<CheckBox, Areas>(F<CheckBox>("AreaFileCache"), Areas.SystemFileCache));
@@ -1215,6 +1247,11 @@ namespace RamOptimiser.App
             lastSnapshot = s;
             MemoryViewState before = memView.State;
             memView.Sampled(DateTime.Now);
+            if (readFailing)
+            {
+                readFailing = false;
+                AddActivity(ActivityEvents.ReadRecovered());
+            }
             if (before != MemoryViewState.Live)
             {
                 lastReadNote.Visibility = Visibility.Collapsed;
@@ -1329,6 +1366,15 @@ namespace RamOptimiser.App
         void OnServiceError(Exception ex, ServiceErrorSource source)
         {
             if (ServiceErrorRoute.IsCleanFailure(source, cleaningUi)) { cleanError = ex; return; }
+            readFailing = true;
+            // Once per new message, or the same one every 10 minutes: a failure every 2 s must not fill the list.
+            DateTime nowUtc = DateTime.UtcNow;
+            if (ErrorGate.ShouldLog(loggedReadError, loggedReadErrorUtc, ex.Message, nowUtc))
+            {
+                loggedReadError = ex.Message;
+                loggedReadErrorUtc = nowUtc;
+                AddActivity(ActivityEvents.ReadFailed(ex.Message));
+            }
             memView.SampleFailed();
             sampleErrorText.Text = AppText.SampleErrorText(ex.Message, (int)SampleInterval.TotalSeconds, memView.HasData);
             sampleError.Visibility = Visibility.Visible;
@@ -1443,9 +1489,12 @@ namespace RamOptimiser.App
 
         void OnCleanCompleted(CleanReport report, CleanReason reason)
         {
+            // Before SetCleaning, whose tray update shows it.
+            lastClean = new LastCleanInfo { Utc = DateTime.UtcNow, Reason = reason, Report = report, Error = cleanError };
             SetCleaning(false);
             ShowResult(report, cleanError, reason != CleanReason.Manual);
             cleanError = null;
+            ShowHistory();
             if (report != null && report.After != null) OnSampled(report.After);
             if (report != null && report.Services.Count > 0 && settingsTab.IsSelected) RefreshServices();
             UpdateRestoreUi();
@@ -1507,7 +1556,8 @@ namespace RamOptimiser.App
         string SpokenResult(string line)
         {
             CleanReport r = resultReport;
-            return r != null && r.Before != null && r.After != null ? line + " " + AppText.Summary(r) : line;
+            // A busy skip ran nothing: its figures would only repeat the load.
+            return r != null && r.Before != null && r.After != null && r.Stopped != CleanStop.Busy ? line + " " + AppText.Summary(r) : line;
         }
 
         /// <summary>
@@ -1635,6 +1685,7 @@ namespace RamOptimiser.App
         {
             if (exiting || service == null) return;
             service.Resume();
+            userResumed = true; // the activity list says "resumed", not "ended"
             RefreshAutoRow();
         }
 
@@ -1995,6 +2046,17 @@ namespace RamOptimiser.App
             string trayKey = state + "|" + AppText.TrayAutoLabel(state, autoInfo, culture);
             if (trayKey != trayAutoKey) UpdateTray();
             PersistPause();
+            LogStatusChanges(culture);
+        }
+
+        /// <summary>A pause starting or ending and the back-off starting or ending go in Recent activity and cleans.log.</summary>
+        void LogStatusChanges(CultureInfo culture)
+        {
+            if (autoInfo == null) return;
+            List<ActivityEvent> events = ActivityEvents.FromStatus(loggedStatus, autoInfo, userResumed, settings.ThresholdPercent, culture);
+            loggedStatus = autoInfo;
+            userResumed = false;
+            foreach (ActivityEvent e in events) AddActivity(e);
         }
 
         int Streak { get { return autoInfo == null ? 0 : autoInfo.FutileStreak; } }
@@ -2273,10 +2335,88 @@ namespace RamOptimiser.App
             if (tray == null) return;
             TrayMenuState menuState = TrayMenuState.For(elevated, cleaningUi, settings.AutoCleanEnabled, memView.State != MemoryViewState.FailedNoData);
             AutoCleanState auto = AppText.AutoState(settings.AutoCleanEnabled, elevated, autoInfo);
-            menuState.AutoText = AppText.TrayAutoLabel(auto, autoInfo, CultureInfo.CurrentCulture);
+            CultureInfo culture = CultureInfo.CurrentCulture;
+            DateTime localNow = DateTime.Now;
+            menuState.AutoText = AppText.TrayAutoLabel(auto, autoInfo, culture);
             trayAutoKey = auto + "|" + menuState.AutoText;
             tray.SetMenuState(menuState, syncState == SettingsSyncState.SaveFailed, AppText.CanPause(auto), auto == AutoCleanState.Paused);
-            tray.Update(lastSnapshot, settings.ShowTrayPercent, taskbarLight);
+            tray.SetStatusLine(TrayStatus.MenuLine(lastClean, localNow, culture));
+            tray.Update(lastSnapshot, settings.ShowTrayPercent, taskbarLight, TrayStatus.TooltipLine(auto, autoInfo, lastClean, localNow, culture));
+        }
+
+        /// <summary>The tray's status item: the window, on the Memory tab, where the result line and its areas are.</summary>
+        void ShowMemoryTab()
+        {
+            ShowWindow();
+            if (exiting) return;
+            memoryTab.IsSelected = true;
+        }
+
+        // ------------------------------------------------------------------ activity (P7, R4)
+
+        /// <summary>
+        /// One record into cleans.log, in the data folder of the account the app runs as. Never throws. May wait up to
+        /// about 150 ms for another writer, so it is called off the UI thread (the clean and tick threads, a pool thread).
+        /// </summary>
+        static void AppendLog(string line)
+        {
+            try
+            {
+                string folder = AppPaths.DataFolder;
+                if (folder != null) CleanLog.TryAppend(folder, line);
+            }
+            catch (Exception) { }
+        }
+
+        /// <summary>Adds an event to Recent activity and, off the UI thread, to cleans.log.</summary>
+        void AddActivity(ActivityEvent e)
+        {
+            if (e == null) return;
+            DateTime now = DateTime.Now;
+            activity.Add(ActivityLog.Row(now, now, e.Text, CultureInfo.CurrentCulture));
+            string record = ActivityLog.EventRecord(DateTime.UtcNow, e);
+            ThreadPool.QueueUserWorkItem(delegate { AppendLog(record); });
+            ShowActivity();
+        }
+
+        void ShowActivity()
+        {
+            IList<string> rows = activity.Newest();
+            activityRows.Children.Clear();
+            if (rows.Count == 0) activityRows.Children.Add(ActivityRow("Nothing yet this session.", true));
+            foreach (string row in rows) activityRows.Children.Add(ActivityRow(row, false));
+        }
+
+        /// <summary>Recent cleans, from the service's in-memory history (with the load five minutes later once read).</summary>
+        void ShowHistory()
+        {
+            if (service == null) return;
+            List<CleanHistoryEntry> history = service.History;
+            recentCleanRows.Children.Clear();
+            if (history.Count == 0) recentCleanRows.Children.Add(ActivityRow("No cleans yet this session.", true));
+            DateTime now = DateTime.Now;
+            foreach (CleanHistoryEntry e in history)
+                recentCleanRows.Children.Add(ActivityRow(ActivityLog.CleanRow(e, now, CultureInfo.CurrentCulture), false));
+        }
+
+        /// <summary>A wrapping row: the time muted, two spaces, then the text; the whole row is its accessible name.</summary>
+        static TextBlock ActivityRow(string row, bool empty)
+        {
+            var text = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 13, Margin = new Thickness(0, 3, 0, 3) };
+            AutomationProperties.SetName(text, row);
+            int gap = empty ? -1 : row.IndexOf("  ", StringComparison.Ordinal);
+            if (gap <= 0)
+            {
+                text.Text = row;
+                text.SetResourceReference(TextBlock.ForegroundProperty, empty ? "MutedText" : "Text");
+                return text;
+            }
+            var time = new Run(row.Substring(0, gap + 2));
+            time.SetResourceReference(TextElement.ForegroundProperty, "MutedText");
+            text.Inlines.Add(time);
+            text.Inlines.Add(new Run(row.Substring(gap + 2)));
+            text.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+            return text;
         }
     }
 }

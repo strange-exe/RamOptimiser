@@ -75,6 +75,16 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3):
   start as administrator starts them again and says so under **Clean memory**. Only names from Power Clean's own
   list are read from that file; anything else in it is ignored.
 - Hidden in the tray, the app updates only the tray icon and hands back the memory its window was using.
+- The tray tooltip gets a second line when there is something to know: auto-clean is paused or needs admin, the
+  last clean failed or hit its time limit, auto-clean is waiting longer, or what the last clean freed. The tray menu
+  shows the last clean's result under **Clean memory**; choosing it opens the window on the Memory tab.
+- An automatic clean stops after 2 minutes, at the next step boundary, and says how far it got; a manual clean has no
+  limit. If `ramopt` is cleaning at that moment, the app's clean is skipped and the result line says so (the two
+  never clean at once).
+- Every clean the app runs is added to `cleans.log` in the same folder (see Clean log below).
+  **Settings > Activity** lists this session's cleans, with the load five minutes after each, and auto-clean events
+  (pauses, the back-off, memory status that could not be read). Those lists come from memory: the app never reads
+  the file back. The file's path is shown there as text to copy; the app never opens it.
 
 #### Before you turn on Start with Windows
 
@@ -123,7 +133,25 @@ working checks between them), stop it.
 `--areas volumes` skips drives that are not ready (for example locked or offline) instead of failing on them.
 
 Exit codes: 0 ok, 1 bad arguments, 2 some area failed or only partly worked (for example one drive refused the
-flush), 3 not elevated, 4 `watch` stopped after 5 errors in a row.
+flush), 3 not elevated, 4 `watch` stopped after 5 errors in a row, 5 another clean is running (`ramopt` or the app;
+`clean` waits up to 2 s for it first, `watch` skips that turn).
+
+### Clean log
+
+`%LOCALAPPDATA%\RamOptimiser\cleans.log` gets one JSON object per line (UTF-8, `\n`), format version 1:
+
+- `"type":"clean"`: `id`, `time` (UTC), `source` (`gui` for the app), `reason` (`manual`, `threshold` or
+  `interval`), `stopped` (`none`, `cancelled`, `timed-out` or `busy`), `ms`, `passes`, `before` and
+  `after` (load, in use, commit percent, condition), `freed`, `combinedBytes`, `areas` (name, outcome, ms, message)
+  and `services`.
+- `"type":"rebound"`: `ref` (the clean's `id`), `time`, `load`, `inUse`: the load about five minutes after an app
+  clean.
+- `"type":"event"` (the app): `time`, `source`, `event` (`paused`, `resumed`, `pause-ended`, `backoff-started`,
+  `backoff-ended`, `read-failed`, `read-recovered`) and `text`, the line shown under Recent activity.
+
+Fields are only ever added; a breaking change bumps `v`. Text is cut to 200 characters and escaped, so a message
+can't start a new line. The file is kept under 256 KB, with one older copy in `cleans.log.old`, and is written only
+after the same folder checks as `settings.ini`.
 
 ## How it works
 

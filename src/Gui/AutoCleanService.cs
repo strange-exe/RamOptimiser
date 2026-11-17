@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 
 namespace RamOptimiser.Gui
@@ -8,17 +9,29 @@ namespace RamOptimiser.Gui
     /// <summary>Where a failure came from: reading memory, the clean itself, or anything else (an event handler).</summary>
     public enum ServiceErrorSource { Sample, Clean, Other }
 
+    /// <summary>One clean as the service asks for it: the areas, why, its time limit and the id its log record carries.</summary>
+    public sealed class CleanJob
+    {
+        public Areas Areas;
+        public CleanReason Reason;
+        /// <summary>The automatic deadline for threshold and interval cleans; null for a manual clean (no limit).</summary>
+        public TimeSpan? Deadline;
+        public string Id;
+    }
+
     /// <summary>
     /// Samples memory on a thread-pool timer and cleans when the settings say so. Never touches the UI thread:
     /// every event is raised on a worker thread, so a GUI must marshal to its dispatcher. At most one clean
     /// runs at a time, whoever asks for it. Exceptions from the sample or clean functions, or from event
     /// handlers, are reported through Error and never stop the timer. The user can pause automatic cleans for up to
-    /// an hour (Pause, Resume); manual cleans always run.
+    /// an hour (Pause, Resume); manual cleans always run. Automatic cleans run under a time limit, manual ones under
+    /// none. This session's cleans are kept in History, with the load five minutes later (Rebound).
     /// </summary>
     public sealed class AutoCleanService : IDisposable
     {
         readonly Func<MemorySnapshot> sample;
-        readonly Func<Areas, CleanReport> clean;
+        readonly Func<CleanJob, CleanReport> clean;
+        readonly TimeSpan autoDeadline;
         readonly Func<DateTime> clock;
         readonly Func<TimeSpan> awakeClock;     // null: no sleep-gap detection
         readonly Func<Conditions> conditions;   // null: presence and power always Unknown
@@ -43,6 +56,7 @@ namespace RamOptimiser.Gui
         bool haveLastTick;       // false until a tick after Start, so the first tick never measures a gap; guarded by gate
         HoldReason shownReason;  // the reason HoldChanged last carried; guarded by gate
         volatile bool awakeBroken; // the awake clock failed once: gap detection is off for the service's life
+        readonly CleanHistory history = new CleanHistory(); // this session's cleans; guarded by gate
 
         /// <summary>Each clean in a row that leaves load at or above the threshold doubles the wait, up to this many times.</summary>
         public const int MaxBackoffSteps = AutoCleanPolicy.MaxBackoffSteps;
@@ -71,6 +85,11 @@ namespace RamOptimiser.Gui
         public event Action<Exception, ServiceErrorSource> Failed;
         /// <summary>Why automatic cleans wait changed (raised on the tick's worker thread, once per change).</summary>
         public event Action<HoldReason> HoldChanged;
+        /// <summary>
+        /// The first sample about five minutes after a clean (CleanHistory.ReboundDelay): the entry, with LoadLater set,
+        /// and that sample. Raised on the tick's worker thread, after Sampled, at most once per clean.
+        /// </summary>
+        public event Action<CleanHistoryEntry, MemorySnapshot> Rebound;
 
         /// <summary>No sleep-gap detection, presence or power: nothing is ever held except by the suspend and resume calls.</summary>
         /// <param name="clock">Use () => DateTime.UtcNow in the app: local time jumps at DST changes.</param>
@@ -86,18 +105,41 @@ namespace RamOptimiser.Gui
         /// <param name="options">Hold timings and policy, or null for the defaults.</param>
         public AutoCleanService(Func<MemorySnapshot> sample, Func<Areas, CleanReport> clean, Func<DateTime> clock,
             Func<TimeSpan> awakeClock, Func<Conditions> conditions, GateOptions options)
+            : this(sample, AreasOnly(clean), clock, awakeClock, conditions, options, Cleaner.AutoCleanDeadline)
+        {
+        }
+
+        /// <summary>
+        /// As above, with the clean given the whole job: its areas, reason, id and time limit. Threshold and interval
+        /// cleans get autoDeadline (Cleaner.AutoCleanDeadline in the app), so an automatic clean can't run on and on;
+        /// a manual clean gets none: the user asked for it and the app offers no way to stop it (owner decision).
+        /// </summary>
+        public AutoCleanService(Func<MemorySnapshot> sample, Func<CleanJob, CleanReport> clean, Func<DateTime> clock,
+            Func<TimeSpan> awakeClock, Func<Conditions> conditions, GateOptions options, TimeSpan autoDeadline)
         {
             if (sample == null) throw new ArgumentNullException("sample");
             if (clean == null) throw new ArgumentNullException("clean");
             if (clock == null) throw new ArgumentNullException("clock");
+            if (autoDeadline <= TimeSpan.Zero) throw new ArgumentOutOfRangeException("autoDeadline");
             this.sample = sample;
             this.clean = clean;
+            this.autoDeadline = autoDeadline;
             this.clock = clock;
             this.awakeClock = awakeClock;
             this.conditions = conditions;
             this.options = options ?? new GateOptions();
             intervalFrom = clock();
         }
+
+        /// <summary>The old clean function, which takes the areas alone; null stays null so the constructor refuses it.</summary>
+        static Func<CleanJob, CleanReport> AreasOnly(Func<Areas, CleanReport> clean)
+        {
+            if (clean == null) return null;
+            return job => clean(job.Areas);
+        }
+
+        /// <summary>This session's cleans, newest first (copies, at most CleanHistory.Capacity).</summary>
+        public List<CleanHistoryEntry> History { get { lock (gate) return history.Snapshot(); } }
 
         /// <summary>Why automatic cleans wait, as of the last tick (the value HoldChanged last carried).</summary>
         public HoldReason Hold { get { lock (gate) return shownReason; } }
@@ -495,6 +537,7 @@ namespace RamOptimiser.Gui
                 }
             }
             Raise(Sampled, snap);
+            RaiseRebounds(now, snap);
 
             TimeSpan awakeNow;
             bool haveAwake = TryAwake(out awakeNow);
@@ -552,12 +595,27 @@ namespace RamOptimiser.Gui
                 // cooldown instead of retrying on every tick.
                 lock (gate) { lastClean = clock(); intervalFrom = lastClean.Value; }
                 Raise(CleanStarted, reason);
-                CleanReport report = null;
-                try { report = clean(areas); }
-                catch (Exception ex) { RaiseError(ex, ServiceErrorSource.Clean); }
-                if (report != null && report.After != null)
+                var job = new CleanJob
                 {
-                    lock (gate) futileStreak = StreakAfter(reason, futileStreak, report.After.LoadPercent, s.ThresholdPercent);
+                    Areas = areas,
+                    Reason = reason,
+                    Deadline = reason == CleanReason.Manual ? (TimeSpan?)null : autoDeadline,
+                    Id = CleanLog.NewId()
+                };
+                CleanReport report = null;
+                string error = null;
+                try { report = clean(job); }
+                catch (Exception ex)
+                {
+                    error = ex.Message;
+                    RaiseError(ex, ServiceErrorSource.Clean);
+                }
+                lock (gate)
+                {
+                    // A busy skip ran nothing (before equals after): counting it as futile would wrongly double the wait.
+                    if (report != null && report.After != null && report.Stopped != CleanStop.Busy)
+                        futileStreak = StreakAfter(reason, futileStreak, report.After.LoadPercent, s.ThresholdPercent);
+                    history.Add(new CleanHistoryEntry { Id = job.Id, EndUtc = clock(), Reason = reason, Report = report, Error = error });
                 }
                 var completed = CleanCompleted;
                 if (completed != null)
@@ -588,6 +646,20 @@ namespace RamOptimiser.Gui
             if (Interlocked.CompareExchange(ref cleaning, 1, 0) != 0) return false;
             RunCleanHoldingGuard(CleanReason.Manual, s);
             return true;
+        }
+
+        /// <summary>Records this sample as the rebound of a clean about five minutes old, and raises Rebound for it.</summary>
+        void RaiseRebounds(DateTime now, MemorySnapshot snap)
+        {
+            List<CleanHistoryEntry> due;
+            lock (gate) due = history.DueRebound(now, snap.LoadPercent);
+            var handler = Rebound;
+            if (handler == null) return;
+            foreach (CleanHistoryEntry e in due)
+            {
+                try { handler(e, snap); }
+                catch (Exception ex) { RaiseError(ex, ServiceErrorSource.Other); }
+            }
         }
 
         void Raise<T>(Action<T> handler, T arg)
