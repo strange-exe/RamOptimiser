@@ -2,6 +2,7 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 
 namespace RamOptimiser.Gui
 {
@@ -21,12 +22,25 @@ namespace RamOptimiser.Gui
         /// </summary>
         public static bool TryRelaunchElevated(string exePath, string args)
         {
+            return TryRelaunchElevated(exePath, args, IntPtr.Zero);
+        }
+
+        /// <summary>
+        /// As above, naming the window that asked. ErrorDialog stays off, so no shell error box appears. Note:
+        /// .NET Framework copies ErrorDialogParentHandle into SHELLEXECUTEINFO.hwnd only when ErrorDialog is on
+        /// (reference source, Process.StartWithShellExecuteEx), so with it off the handle does not own the UAC
+        /// prompt; it is kept so a later change of that rule needs no caller change.
+        /// </summary>
+        public static bool TryRelaunchElevated(string exePath, string args, IntPtr ownerWindow)
+        {
             if (string.IsNullOrEmpty(exePath)) throw new ArgumentException("exePath is required.", "exePath");
             var psi = new ProcessStartInfo(exePath, args ?? "")
             {
                 UseShellExecute = true,
                 Verb = "runas",
-                WorkingDirectory = Path.GetDirectoryName(exePath) ?? ""
+                WorkingDirectory = Path.GetDirectoryName(exePath) ?? "",
+                ErrorDialog = false,
+                ErrorDialogParentHandle = ownerWindow
             };
             try
             {
@@ -43,6 +57,48 @@ namespace RamOptimiser.Gui
         internal static bool IsUacCancel(Win32Exception ex)
         {
             return ex != null && ex.NativeErrorCode == ErrorCancelled;
+        }
+
+        /// <summary>
+        /// Runs TryRelaunchElevated on its own STA thread (ShellExecuteEx expects COM initialised; the thread pool
+        /// is MTA), so the window keeps painting while the UAC prompt is up. done runs on that worker thread with
+        /// (true, null) after a launch, (false, null) after a cancel, or (false, ex) after a failure.
+        /// </summary>
+        public static void RelaunchAsync(string exePath, string args, IntPtr ownerWindow, Action<bool, Exception> done)
+        {
+            RelaunchAsync(() => TryRelaunchElevated(exePath, args, ownerWindow), done);
+        }
+
+        /// <summary>The worker itself, with the launch passed in so tests never reach UAC. Returns the started thread.</summary>
+        internal static Thread RelaunchAsync(Func<bool> launch, Action<bool, Exception> done)
+        {
+            if (launch == null) throw new ArgumentNullException("launch");
+            if (done == null) throw new ArgumentNullException("done");
+            var t = new Thread(() =>
+            {
+                bool launched = false;
+                Exception error = null;
+                try { launched = launch(); }
+                catch (Exception ex) { error = ex; }
+                // An exception here would end the process: the caller's report is best effort.
+                try { done(launched, error); }
+                catch (Exception ex) { Trace.WriteLine("Elevation result handler failed: " + ex.GetType().Name); }
+            }) { IsBackground = true, Name = "elevate" };
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            return t;
+        }
+
+        /// <summary>
+        /// Tells the elevated copy which process asked for it, so it waits for that copy to exit before taking
+        /// the single-instance lock. The value only ever selects a pid to wait for, for at most 10 s.
+        /// </summary>
+        public const string HandoffArgument = "--handoff=";
+
+        public static string HandoffArgs(int pid)
+        {
+            if (pid <= 0) throw new ArgumentOutOfRangeException("pid");
+            return HandoffArgument + pid.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
         /// <summary>

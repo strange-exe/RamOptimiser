@@ -36,6 +36,29 @@ namespace RamOptimiser.App
         public const string LastAreaReason = "At least one area must stay selected.";
         public const string StartupNeedsAdmin = "Needs administrator rights: restart as administrator to change this.";
 
+        /// <summary>The Restart as administrator link while the UAC prompt is up (its accessible name stays the same).</summary>
+        public const string WaitingForApproval = "Waiting for approval...";
+        public const string WaitingForApprovalHelp = "Waiting for the administrator prompt.";
+        /// <summary>The tray menu's disabled item while settings.ini could not be written.</summary>
+        public const string SettingsNotSaved = "Settings not saved";
+
+        public static string RestartFailed(string reason)
+        {
+            return "Could not restart as administrator: " + Plain(reason, "unknown error") + ".";
+        }
+
+        /// <summary>Says what a failed save means: the change holds only for this run.</summary>
+        public static string SaveFailedText(string reason)
+        {
+            return "Settings could not be saved: " + Plain(reason, "unknown error") + ". They apply until RAM Optimiser closes.";
+        }
+
+        /// <summary>A startup row the app may not change, read as one piece of text that always states on or off.</summary>
+        public static string LockedRowName(string label, string lockText, bool on)
+        {
+            return label + ": " + lockText + (on ? ", starts with Windows" : ", does not start with Windows");
+        }
+
         /// <summary>
         /// The line under Start with Windows for a task that exists but is not this program's (stale), or that
         /// could not be read. Null when there is no task or it is ours: the switch alone says that.
@@ -843,10 +866,14 @@ namespace RamOptimiser.App
         public bool StartInTray;
         /// <summary>The SID of the account that restarted the app as administrator, when it was well formed.</summary>
         public string LauncherSid;
+        /// <summary>The pid of the copy that asked for elevation (P10), or 0. Only selects a process to wait for.</summary>
+        public int HandoffFrom;
 
         /// <summary>
         /// "--tray" starts hidden in the notification area. "--launched-by SID" names the account that asked
-        /// for elevation; a value that is not a strict SID is dropped (and not consumed). Anything else is ignored.
+        /// for elevation; a value that is not a strict SID is dropped (and not consumed). "--handoff=PID" (one
+        /// token, plain digits, above 0; the first valid one counts) names the copy to wait for. Anything else is
+        /// ignored.
         /// </summary>
         public static LaunchOptions Parse(string[] args)
         {
@@ -860,8 +887,18 @@ namespace RamOptimiser.App
                     o.StartInTray = true;
                 else if (a == Elevation.LauncherArgument && i + 1 < args.Length && Elevation.IsWellFormedSid(args[i + 1]))
                     o.LauncherSid = args[++i];
+                else if (o.HandoffFrom == 0)
+                    o.HandoffFrom = ParseHandoff(a);
             }
             return o;
+        }
+
+        static int ParseHandoff(string a)
+        {
+            if (!a.StartsWith(Elevation.HandoffArgument, StringComparison.OrdinalIgnoreCase)) return 0;
+            int pid;
+            if (!int.TryParse(a.Substring(Elevation.HandoffArgument.Length), NumberStyles.None, CultureInfo.InvariantCulture, out pid)) return 0;
+            return pid > 0 ? pid : 0;
         }
     }
 

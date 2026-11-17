@@ -17,7 +17,7 @@ namespace RamOptimiser.App
     {
         readonly NotifyIcon icon;
         readonly ContextMenuStrip menu;
-        readonly ToolStripMenuItem openItem, cleanItem, autoItem, restartItem, exitItem;
+        readonly ToolStripMenuItem openItem, cleanItem, autoItem, restartItem, unsavedItem, exitItem;
         readonly Font boldFont;
         Icon appIcon;          // static icon at the current small-icon size
         Icon percentIcon;      // last rendered percent icon (owned)
@@ -36,13 +36,15 @@ namespace RamOptimiser.App
             cleanItem = new ToolStripMenuItem("Clean memory");
             autoItem = new ToolStripMenuItem("Auto-clean") { CheckOnClick = false };
             restartItem = new ToolStripMenuItem(TrayMenuState.RestartText) { Visible = false };
+            // Shown only while settings.ini could not be written; the Settings tab gives the reason.
+            unsavedItem = new ToolStripMenuItem(AppText.SettingsNotSaved) { Enabled = false, Visible = false };
             exitItem = new ToolStripMenuItem("Exit");
             openItem.Click += delegate { Raise(OpenRequested); };
             cleanItem.Click += delegate { Raise(CleanRequested); };
             autoItem.Click += delegate { Raise(AutoCleanToggled); };
             restartItem.Click += delegate { Raise(RestartRequested); };
             exitItem.Click += delegate { Raise(ExitRequested); };
-            menu.Items.AddRange(new ToolStripItem[] { openItem, cleanItem, autoItem, restartItem, new ToolStripSeparator(), exitItem });
+            menu.Items.AddRange(new ToolStripItem[] { openItem, cleanItem, autoItem, restartItem, unsavedItem, new ToolStripSeparator(), exitItem });
 
             shownSize = SmallIconSize();
             appIcon = LoadAppIcon(shownSize);
@@ -74,12 +76,19 @@ namespace RamOptimiser.App
         /// <summary>Words, not only a grey item: "Clean memory (needs admin)", "Auto-clean (paused: needs admin)".</summary>
         public void SetMenuState(TrayMenuState state)
         {
+            SetMenuState(state, false);
+        }
+
+        /// <param name="settingsUnsaved">True while the last settings save failed: a disabled "Settings not saved" item shows.</param>
+        public void SetMenuState(TrayMenuState state, bool settingsUnsaved)
+        {
             if (disposed) return;
             cleanItem.Enabled = state.CleanEnabled;
             cleanItem.Text = state.CleanText;
             autoItem.Checked = state.AutoChecked;
             autoItem.Text = state.AutoText;
             restartItem.Visible = state.ShowRestart;
+            unsavedItem.Visible = settingsUnsaved;
         }
 
         /// <summary>snapshot null = status unavailable (static icon, plain tooltip).</summary>

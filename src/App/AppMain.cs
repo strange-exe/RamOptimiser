@@ -1,5 +1,7 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
+using Microsoft.Win32.SafeHandles;
 using System.Windows;
 using System.Windows.Threading;
 using RamOptimiser.Gui;
@@ -34,6 +36,20 @@ namespace RamOptimiser.App
             }
             catch (Exception ex) { ErrorLog.TryWrite(ErrorLog.DefaultPath, "single-instance lock unavailable", ex); }
 
+            // Started by Restart as administrator: the copy that asked still holds the lock until it has seen the
+            // launch succeed. Wait (at most 10 s) for it to exit, then take the lock instead of handing over to it.
+            if (instance != null && !instance.IsFirstInstance && options.HandoffFrom > 0 && options.HandoffFrom != CurrentPid())
+            {
+                instance.Dispose();
+                instance = null;
+                try { instance = TakeOverFrom(options.HandoffFrom); }
+                catch (SingleInstanceNameTakenException ex)
+                {
+                    ErrorLog.TryWrite(ErrorLog.DefaultPath, "single-instance name held by another program; running without single-instance", ex);
+                }
+                catch (Exception ex) { ErrorLog.TryWrite(ErrorLog.DefaultPath, "single-instance lock unavailable", ex); }
+            }
+
             if (instance != null && !instance.IsFirstInstance)
             {
                 // Let the running copy bring its window to the front (this launch holds the foreground right).
@@ -59,6 +75,48 @@ namespace RamOptimiser.App
                 return 1;
             }
             return app.Run();
+        }
+
+        static readonly TimeSpan HandoffWait = TimeSpan.FromSeconds(10);
+
+        static int CurrentPid()
+        {
+            using (Process self = Process.GetCurrentProcess()) return self.Id;
+        }
+
+        /// <summary>
+        /// Waits for process pid to exit (bounded) and takes the lock. A pid that is already gone retries at once;
+        /// one whose handle cannot be opened waits the full 10 s. A reused pid only delays start-up.
+        /// </summary>
+        static SingleInstance TakeOverFrom(int pid)
+        {
+            Process parent = null;
+            try { parent = Process.GetProcessById(pid); }
+            catch (ArgumentException) { }          // already exited
+            catch (InvalidOperationException) { }
+            try
+            {
+                using (WaitHandle released = ExitHandle(parent))
+                    return SingleInstance.AcquireAfter(() => new SingleInstance(), released, HandoffWait);
+            }
+            finally { if (parent != null) parent.Dispose(); }
+        }
+
+        static WaitHandle ExitHandle(Process parent)
+        {
+            if (parent == null) return new ManualResetEvent(true);
+            try { return new ProcessExitHandle(parent.Handle); }
+            catch (InvalidOperationException) { return new ManualResetEvent(true); }  // exited meanwhile
+            catch (System.ComponentModel.Win32Exception) { return new ManualResetEvent(false); } // cannot wait on it: full timeout
+        }
+
+        /// <summary>Lets WaitOne wait on a process handle without owning it (the Process object closes it).</summary>
+        sealed class ProcessExitHandle : WaitHandle
+        {
+            public ProcessExitHandle(IntPtr handle)
+            {
+                SafeWaitHandle = new SafeWaitHandle(handle, false);
+            }
         }
 
         static void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

@@ -42,6 +42,12 @@ namespace RamOptimiser.App
         readonly bool elevated;
         SingleInstance instance;
         AppSettings settings;
+        /// <summary>Restart as administrator: idle, waiting on the UAC prompt, or exiting (P10).</summary>
+        ElevationState elevationState = ElevationState.Idle;
+        /// <summary>The settings as last loaded or saved, and the file's stamp then: the merge's common ancestor (P12).</summary>
+        AppSettings baseline;
+        FileStamp stamp;
+        SettingsSyncState syncState = SettingsSyncState.InSync;
 
         ThemeManager theme;
         Window window;
@@ -143,6 +149,8 @@ namespace RamOptimiser.App
             dispatcher = app.Dispatcher;
             settingsPath = SettingsStore.DefaultPath;
             settings = SettingsStore.Load(settingsPath).Normalized();
+            baseline = settings.Clone();
+            stamp = SettingsStore.Stamp(settingsPath);
             elevated = Elevation.IsElevated();
             // Over-the-shoulder UAC runs this copy as the administrator who typed the password. Only the name
             // of this account is shown; the launching user's own settings are never read from here.
@@ -218,6 +226,8 @@ namespace RamOptimiser.App
             // Before anything is torn down: a threshold set in the last 400 ms is saved, not dropped.
             try { FlushThreshold(); }
             catch (Exception ex) { ErrorLog.TryWrite(ErrorLog.DefaultPath, "could not save the threshold on exit", ex); }
+            // A prompt still up when the user exits: its result arrives later and is ignored.
+            elevationState = ElevationFlow.Next(elevationState, ElevationEvent.ExitRequested).State;
             exiting = true;
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
             SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged;
@@ -436,6 +446,7 @@ namespace RamOptimiser.App
                 theme.ApplyWindowFrame(window);
             };
             window.Closing += OnClosing;
+            window.Activated += delegate { CheckSettingsFile(); };
             window.PreviewKeyDown += OnKeyDown;
             window.IsVisibleChanged += delegate { OnShowingChanged(); };
             window.StateChanged += delegate { OnShowingChanged(); };
@@ -916,7 +927,7 @@ namespace RamOptimiser.App
             }
             else
             {
-                var state = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 2, 0, 0) };
+                var state = new StackPanel { Orientation = Orientation.Horizontal };
                 if (it.LockGlyph != null)
                 {
                     var lockPath = new Path { Data = it.LockGlyph, Margin = new Thickness(0, 0, 4, 0) };
@@ -927,9 +938,12 @@ namespace RamOptimiser.App
                 TextBlock lockText = SmallText(it.LockText);
                 lockText.VerticalAlignment = VerticalAlignment.Center;
                 state.Children.Add(lockText);
-                AutomationProperties.SetName(state, it.Label + ": " + it.LockText + (it.On ? ", starts with Windows" : ""));
-                Grid.SetColumn(state, 1);
-                grid.Children.Add(state);
+                // U10: one Text element (a plain StackPanel has no peer, so its name was never exposed) that always
+                // says whether the item starts with Windows; the glyph and words inside are hidden from UIA.
+                var lockedRow = new SummaryPanel { Child = state, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 2, 0, 0) };
+                AutomationProperties.SetName(lockedRow, AppText.LockedRowName(it.Label, it.LockText, it.On));
+                Grid.SetColumn(lockedRow, 1);
+                grid.Children.Add(lockedRow);
             }
 
             KeyValuePair<string, string> error;
@@ -1049,54 +1063,77 @@ namespace RamOptimiser.App
         }
 
         /// <summary>
-        /// The single-instance lock is released first so the elevated copy can take it; on success this copy
-        /// exits, and when the UAC prompt is cancelled it takes the lock back and carries on.
+        /// P10: the UAC prompt runs on its own thread (ElevationFlow), so the window keeps painting and a second
+        /// click is ignored. This copy keeps the single-instance lock while the prompt is up, so a launch in the
+        /// meantime hands over to this copy rather than taking the lock; after a successful launch this copy exits,
+        /// and the elevated copy (told this pid) waits for that exit before taking the lock.
         /// </summary>
         void RestartElevated()
         {
+            ElevationStep step = ElevationFlow.Next(elevationState, ElevationEvent.Requested);
+            if (step.Action != ElevationAction.StartPrompt) return;
             // The elevated copy reads settings.ini at start: a threshold still waiting for its save goes in first.
             FlushThreshold();
+            elevationState = step.State;
             restartError.Visibility = Visibility.Collapsed;
-            if (instance != null)
-            {
-                instance.ActivationRequested -= OnActivationRequested;
-                instance.Dispose();
-                instance = null;
-            }
-            bool started = false;
+            ShowRestartLink();
+            string args;
+            int pid;
+            using (System.Diagnostics.Process self = System.Diagnostics.Process.GetCurrentProcess()) pid = self.Id;
             try
             {
                 // The elevated copy compares this SID with its own to notice it runs as another account.
                 string sid = StartupTask.CurrentUserSid();
-                started = Elevation.TryRelaunchElevated(ExePath, Elevation.IsWellFormedSid(sid) ? Elevation.RelaunchArgs(sid) : "");
+                args = (Elevation.IsWellFormedSid(sid) ? Elevation.RelaunchArgs(sid) + " " : "") + Elevation.HandoffArgs(pid);
             }
             catch (Exception ex)
             {
-                restartError.Text = "Could not restart as administrator: " + AppText.Plain(ex.Message, "unknown error") + ".";
-                restartError.Visibility = Visibility.Visible;
-                // Asked from the tray, the window may be hidden or on another tab: bring the error line into view.
-                memoryTab.IsSelected = true;
-                ShowWindow();
+                OnElevationResult(false, ex);
+                return;
             }
-            if (started) { Exit(); return; }
+            Elevation.RelaunchAsync(ExePath, args, new System.Windows.Interop.WindowInteropHelper(window).Handle,
+                (ok, ex) => Post(() => OnElevationResult(ok, ex)));
+        }
 
-            try
+        /// <summary>The prompt's outcome, back on the UI thread. Dropped by Post once the app is exiting.</summary>
+        void OnElevationResult(bool launched, Exception error)
+        {
+            ElevationEvent e = launched ? ElevationEvent.Launched : error == null ? ElevationEvent.Cancelled : ElevationEvent.Failed;
+            ElevationStep step = ElevationFlow.Next(elevationState, e);
+            if (step.Action == ElevationAction.Ignore) return;
+            elevationState = step.State;
+            switch (step.Action)
             {
-                var again = new SingleInstance();
-                if (again.IsFirstInstance)
-                {
-                    instance = again;
-                    instance.ActivationRequested += OnActivationRequested;
-                }
-                else
-                {
-                    // Another copy took the lock while it was free: hand over to it.
-                    again.SignalFirstInstance();
-                    again.Dispose();
+                case ElevationAction.ExitApp:
                     Exit();
-                }
+                    return;
+                case ElevationAction.ShowError:
+                    ShowRestartLink();
+                    restartError.Text = AppText.RestartFailed(error == null ? null : error.Message);
+                    restartError.Visibility = Visibility.Visible;
+                    // Asked from the tray, the window may be hidden or on another tab: bring the error line into view.
+                    memoryTab.IsSelected = true;
+                    ShowWindow();
+                    return;
+                default:
+                    // Cancelled: the link comes back, with no message, as before.
+                    ShowRestartLink();
+                    return;
             }
-            catch (Win32Exception) { } // keep running without the lock rather than not at all
+        }
+
+        /// <summary>
+        /// The link reads "Waiting for approval..." and is disabled while the prompt is up. Its accessible name
+        /// stays "Restart as administrator"; the help text says what it waits for.
+        /// </summary>
+        void ShowRestartLink()
+        {
+            bool prompting = elevationState == ElevationState.Prompting;
+            restartButton.IsEnabled = !prompting;
+            restartButton.Content = prompting ? AppText.WaitingForApproval : TrayMenuState.RestartText;
+            AutomationProperties.SetName(restartButton, TrayMenuState.RestartText);
+            AutomationProperties.SetHelpText(restartButton, prompting ? AppText.WaitingForApprovalHelp
+                : lastSnapshot == null ? "" : AppText.ElevationNotice(lastSnapshot.HasLists));
         }
 
         // ------------------------------------------------------------------ sampling
@@ -1155,8 +1192,9 @@ namespace RamOptimiser.App
         {
             viewStale = false;
             sampleError.Visibility = Visibility.Collapsed;
-            // The admin line stays one short line; its longer reason is the link's help text.
-            AutomationProperties.SetHelpText(restartButton, AppText.ElevationNotice(s.HasLists));
+            // The admin line stays one short line; its longer reason is the link's help text (not while prompting).
+            if (elevationState != ElevationState.Prompting)
+                AutomationProperties.SetHelpText(restartButton, AppText.ElevationNotice(s.HasLists));
 
             double load = Math.Min(100, s.LoadPercent);
             Motion.To(loadNumber, Figure.WholeProperty, load, Motion.MapDuration, Motion.Enter, animate);
@@ -1687,26 +1725,106 @@ namespace RamOptimiser.App
             powerStatus.Text = elevated ? AppText.RestoreStatus(stopped) : AppText.ServicesNeedAdmin;
         }
 
+        /// <summary>
+        /// P12: keys edited in settings.ini by hand since the last load or save are kept (three-way merge); the
+        /// app's own change wins for the key it changed. A failed save keeps the baseline, so a later merge still
+        /// knows what the app changed, and the app runs on the new values until it closes (and says so).
+        /// </summary>
         void SaveAndApply()
         {
+            AppSettings before = settings.Clone();
+            FileStamp now = SettingsStore.Stamp(settingsPath);
+            // Only a file that was read and exists is merged: an unreadable one must not reset other settings.
+            if (now.Exists && !now.Equals(stamp))
+                settings = SettingsMerge.Merge(baseline, settings, SettingsStore.Load(settingsPath).Normalized());
             try
             {
                 SettingsStore.Save(settings, settingsPath);
+                baseline = settings.Clone();
+                stamp = SettingsStore.Stamp(settingsPath);
+                syncState = SettingsSync.Next(syncState, SettingsSyncEvent.SaveOk);
                 saveError.Visibility = Visibility.Collapsed;
             }
-            catch (IOException ex) { ShowSaveError(ex); }
-            catch (UnauthorizedAccessException ex) { ShowSaveError(ex); }
-            powerServices = ServiceCatalog.Filter(settings.PowerServices);
-            if (service != null) service.Update(ServiceSettings());
-            SyncSettingsUi(false);
-            RefreshAutoRow();
-            UpdateTray();
+            catch (IOException ex) { SaveFailed(ex); }
+            catch (UnauthorizedAccessException ex) { SaveFailed(ex); }
+            ApplySettings(before);
+        }
+
+        void SaveFailed(Exception ex)
+        {
+            syncState = SettingsSync.Next(syncState, SettingsSyncEvent.SaveFailed);
+            ShowSaveError(ex);
         }
 
         void ShowSaveError(Exception ex)
         {
-            saveError.Text = "Settings could not be saved: " + AppText.Plain(ex.Message, "unknown error") + ".";
+            saveError.Text = AppText.SaveFailedText(ex.Message);
             saveError.Visibility = Visibility.Visible;
+        }
+
+        /// <summary>
+        /// Puts the current settings to work: auto-clean, the Power Clean list, the UI, the tray and the theme.
+        /// before is the settings ahead of the change, so values that came from the file (a merge or reload) also
+        /// move the slider, the service checkboxes and the theme, which a change made in the UI already shows.
+        /// </summary>
+        void ApplySettings(AppSettings before)
+        {
+            powerServices = ServiceCatalog.Filter(settings.PowerServices);
+            if (service != null) service.Update(ServiceSettings());
+            EnsureIntervalChoice();
+            // A new threshold moves the slider too, unless a slider value of the user's own still waits.
+            SyncSettingsUi(settings.ThresholdPercent != before.ThresholdPercent && !thresholdPending.Pending);
+            // A chosen area behind the disclosure is shown, so the list never hides what will be cleaned.
+            if ((settings.Areas & HiddenAreas) != 0) moreAreas.IsExpanded = true;
+            RefreshAutoRow();
+            UpdateTray();
+            if (settings.Theme != before.Theme) ReapplyTheme();
+            bool servicesChanged = string.Join(",", settings.PowerServices.ToArray()) != string.Join(",", before.PowerServices.ToArray());
+            if (servicesChanged && powerRows.Count > 0) RefreshServices();
+        }
+
+        /// <summary>An interval read from the file that the box does not list yet (a hand-edited 7 minutes) gets its own choice.</summary>
+        void EnsureIntervalChoice()
+        {
+            foreach (object o in intervalBox.Items)
+            {
+                var item = o as ComboBoxItem;
+                if (item != null && Equals(item.Tag, settings.IntervalMinutes)) return;
+            }
+            bool wasSyncing = syncing;
+            syncing = true;
+            try
+            {
+                intervalBox.Items.Clear();
+                foreach (int minutes in AppText.IntervalChoices(settings.IntervalMinutes))
+                    intervalBox.Items.Add(new ComboBoxItem { Content = AppText.IntervalLabel(minutes), Tag = minutes });
+            }
+            finally { syncing = wasSyncing; }
+        }
+
+        /// <summary>
+        /// On window activation (P12, owner decision b): retries a failed save, else reloads settings.ini when its
+        /// stamp changed. One stat per activation; no FileSystemWatcher. Everything still goes through Parse and
+        /// Normalized, and Start with Windows never follows the file (the logon task is its source of truth).
+        /// </summary>
+        void CheckSettingsFile()
+        {
+            if (exiting) return;
+            if (syncState == SettingsSyncState.SaveFailed) { SaveAndApply(); return; }
+            // A slider value still waiting for its save would be overwritten: check on a later activation.
+            if (thresholdTimer != null && thresholdTimer.IsEnabled) return;
+            FileStamp now = SettingsStore.Stamp(settingsPath);
+            // Unchanged, unreadable or deleted: nothing to apply (the next save writes the file again).
+            if (!now.Exists || now.Equals(stamp)) return;
+            syncState = SettingsSync.Next(syncState, SettingsSyncEvent.DiskChanged);
+            AppSettings disk = SettingsStore.Load(settingsPath).Normalized();
+            disk.StartWithWindows = settings.StartWithWindows;
+            AppSettings before = settings;
+            settings = disk;
+            baseline = disk.Clone();
+            stamp = now;
+            syncState = SettingsSync.Next(syncState, SettingsSyncEvent.ReloadOk);
+            ApplySettings(before);
         }
 
         void RefreshAutoRow()
@@ -1889,7 +2007,8 @@ namespace RamOptimiser.App
         void UpdateTray()
         {
             if (tray == null) return;
-            tray.SetMenuState(TrayMenuState.For(elevated, cleaningUi, settings.AutoCleanEnabled, memView.State != MemoryViewState.FailedNoData));
+            tray.SetMenuState(TrayMenuState.For(elevated, cleaningUi, settings.AutoCleanEnabled, memView.State != MemoryViewState.FailedNoData),
+                syncState == SettingsSyncState.SaveFailed);
             tray.Update(lastSnapshot, settings.ShowTrayPercent, taskbarLight);
         }
     }

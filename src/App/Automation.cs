@@ -29,6 +29,27 @@ namespace RamOptimiser.App
     }
 
     /// <summary>
+    /// A StackPanel exposed to UI Automation as a named Group. A plain Panel has no automation peer, so its
+    /// AutomationProperties.Name never reaches screen readers. Children stay exposed (the default
+    /// GetChildrenCore walks the visual children), and FindName lookups as StackPanel keep working.
+    /// </summary>
+    public class GroupPanel : StackPanel
+    {
+        protected override AutomationPeer OnCreateAutomationPeer()
+        {
+            return new GroupPanelPeer(this);
+        }
+
+        sealed class GroupPanelPeer : FrameworkElementAutomationPeer
+        {
+            public GroupPanelPeer(FrameworkElement owner) : base(owner) { }
+            protected override AutomationControlType GetAutomationControlTypeCore() { return AutomationControlType.Group; }
+            protected override string GetClassNameCore() { return "GroupPanel"; }
+            protected override bool IsControlElementCore() { return true; }
+        }
+    }
+
+    /// <summary>
     /// A group whose changes are announced politely (AutomationProperties.LiveSetting, .NET Framework 4.7.1+).
     /// Call Announce after updating its Name and content.
     /// </summary>
