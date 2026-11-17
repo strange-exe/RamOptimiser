@@ -16,6 +16,8 @@ namespace RamOptimiser
         public int ThresholdPercent = 85;
         public int IntervalSeconds = 30;
         public int CooldownSeconds = 300;
+        /// <summary>clean --dry-run: show what a clean would do, change nothing, need no admin.</summary>
+        public bool DryRun;
 
         public static Options Parse(string[] args)
         {
@@ -39,9 +41,12 @@ namespace RamOptimiser
                     case "--threshold": o.ThresholdPercent = Int(args, ref i, 1, 100); break;
                     case "--interval": o.IntervalSeconds = Int(args, ref i, 1, 86400); break;
                     case "--cooldown": o.CooldownSeconds = Int(args, ref i, 0, 86400); break;
+                    case "--dry-run": o.DryRun = true; break;
                     default: throw new ArgumentException("Unknown option '" + args[i] + "'.");
                 }
             }
+            if (o.DryRun && o.Command != Command.Clean)
+                throw new ArgumentException("--dry-run works only with 'clean'.");
             if (o.Command == Command.Status && args.Length > 1)
                 throw new ArgumentException("'status' takes no options.");
             return o;
@@ -64,6 +69,25 @@ namespace RamOptimiser
         }
     }
 
+    /// <summary>Why a watch wait ended.</summary>
+    public enum WakeReason { Interval, Stop, LowMemory }
+
+    /// <summary>When watch also listens for Windows' low-memory signal. Pure.</summary>
+    public static class WatchSchedule
+    {
+        /// <summary>
+        /// True only when (a) there has been no clean, or the effective cooldown has passed, since inside it a low wake
+        /// cannot lead to a clean; and (b) the last wake was not a low wake that did not clean. The signal stays set for
+        /// as long as memory is low, so without (b) watch would wake again at once, in a hot loop.
+        /// </summary>
+        public static bool IncludeLowSignal(TimeSpan? sinceLastClean, TimeSpan effectiveCooldown, WakeReason lastWake, bool cleanedThisTick)
+        {
+            bool cooled = sinceLastClean == null || sinceLastClean.Value >= effectiveCooldown;
+            bool mutedAfterIdleWake = lastWake == WakeReason.LowMemory && !cleanedThisTick;
+            return cooled && !mutedAfterIdleWake;
+        }
+    }
+
     /// <summary>The watch loop. Its sampler, cleaner, clocks and wait are fields, so tests can drive it.</summary>
     public sealed class Watcher
     {
@@ -79,13 +103,25 @@ namespace RamOptimiser
         public Func<TimeSpan> Elapsed;
         /// <summary>Wall-clock time, for the log lines only.</summary>
         public Func<DateTime> Now = () => DateTime.Now;
-        /// <summary>Waits one interval; returns true when watching should stop.</summary>
+        /// <summary>Waits one interval; returns true when watching should stop. Used when Wait is null.</summary>
         public Func<TimeSpan, bool> WaitStop;
+        /// <summary>
+        /// Waits one interval, and also for Windows' low-memory signal when the flag is true; says why it woke.
+        /// Null falls back to WaitStop, which never reports a low wake.
+        /// </summary>
+        public Func<TimeSpan, bool, WakeReason> Wait;
+
+        WakeReason DoWait(TimeSpan interval, bool includeLow)
+        {
+            if (Wait != null) return Wait(interval, includeLow);
+            return WaitStop(interval) ? WakeReason.Stop : WakeReason.Interval;
+        }
 
         /// <summary>
-        /// Samples, cleans when AutoCleanPolicy says so, and waits, until WaitStop says stop (ExitOk). A failed sample
-        /// or clean is logged with a timestamp and watching goes on; MaxConsecutiveErrors failed iterations, or failed
-        /// cleans, in a row end it (ExitWatchFailed).
+        /// Samples, cleans when AutoCleanPolicy says so, and waits, until the wait says stop (ExitOk). The wait also
+        /// ends early on Windows' low-memory signal when WatchSchedule allows it; the clean decision is unchanged. A
+        /// failed sample or clean is logged with a timestamp and watching goes on; MaxConsecutiveErrors failed
+        /// iterations, or failed cleans, in a row end it (ExitWatchFailed).
         /// </summary>
         public int Run(Options o, TextWriter output, TextWriter errors)
         {
@@ -93,9 +129,10 @@ namespace RamOptimiser
             TimeSpan cooldown = TimeSpan.FromSeconds(o.CooldownSeconds);
             TimeSpan interval = TimeSpan.FromSeconds(o.IntervalSeconds);
             int futileStreak = 0, errorsInARow = 0, failedCleans = 0;
-            do
+            WakeReason wake = WakeReason.Interval;
+            while (true)
             {
-                bool cleaning = false;
+                bool cleaning = false, cleanedThisTick = false;
                 try
                 {
                     MemorySnapshot s = Sample();
@@ -108,11 +145,14 @@ namespace RamOptimiser
                         output.WriteLine("[{0:HH:mm:ss}] load {1}% >= {2}%: cleaning", Now(), s.LoadPercent, o.ThresholdPercent);
                         // Recorded before cleaning, so a clean that keeps failing still waits the cooldown.
                         last = now;
-                        cleaning = true;
+                        cleaning = cleanedThisTick = true;
                         CleanReport report = Clean(o.Areas);
                         cleaning = false;
                         failedCleans = 0;
                         Program.PrintReport(output, report);
+                        if (CleanEstimate.Advise(s) == CleanAdvice.CommitBound)
+                            output.WriteLine("  note: committed memory is {0}% of the limit; cleaning does not lower it. Close programs you are not using.",
+                                s.CommitPercent);
                         futileStreak = AutoCleanPolicy.NextStreak(futileStreak, report.After.LoadPercent, o.ThresholdPercent);
                     }
                     errorsInARow = 0;
@@ -133,7 +173,14 @@ namespace RamOptimiser
                         return Program.ExitWatchFailed;
                     }
                 }
-            } while (!WaitStop(TimeSpan.FromSeconds(o.IntervalSeconds)));
+                TimeSpan? since = last == null ? (TimeSpan?)null : Elapsed() - last.Value;
+                bool includeLow = WatchSchedule.IncludeLowSignal(since,
+                    AutoCleanPolicy.ThresholdCooldown(cooldown, interval, futileStreak), wake, cleanedThisTick);
+                wake = DoWait(interval, includeLow);
+                if (wake == WakeReason.Stop) break;
+                if (wake == WakeReason.LowMemory)
+                    output.WriteLine("[{0:HH:mm:ss}] Windows reports low memory: checking now", Now());
+            }
             output.WriteLine("Stopped.");
             return Program.ExitOk;
         }
@@ -158,7 +205,10 @@ namespace RamOptimiser
             switch (o.Command)
             {
                 case Command.Status: PrintStatus(Console.Out, MemorySnapshot.Take()); return ExitOk;
-                case Command.Clean: return RunClean(o.Areas);
+                case Command.Clean:
+                    // Before the elevation check: a dry run only reads, needs no admin and never reaches the cleaner.
+                    if (o.DryRun) { PrintDryRun(Console.Out, MemorySnapshot.Take(), o.Areas); return ExitOk; }
+                    return RunClean(o.Areas);
                 case Command.Watch: return RunWatch(o);
                 default: PrintHelp(); return ExitOk;
             }
@@ -189,7 +239,16 @@ namespace RamOptimiser
                 Console.WriteLine("Watching memory: clean when load >= {0}%, check every {1}s, wait {2}s between cleans. Ctrl+C stops.",
                     o.ThresholdPercent, o.IntervalSeconds, o.CooldownSeconds);
                 Stopwatch clock = Stopwatch.StartNew();
-                var watch = new Watcher { Elapsed = () => clock.Elapsed, WaitStop = t => stop.WaitOne(t) };
+                // Windows' low-memory signal can end a wait early; the interval poll stays, because the signal fires at
+                // a fixed kernel level, not at --threshold. Null when the signal is unavailable.
+                WaitHandle low = MemoryPressure.LowWaitHandle();
+                var watch = new Watcher { Elapsed = () => clock.Elapsed };
+                watch.Wait = (t, includeLow) =>
+                {
+                    WaitHandle[] handles = includeLow && low != null ? new WaitHandle[] { stop, low } : new WaitHandle[] { stop };
+                    int i = WaitHandle.WaitAny(handles, t);
+                    return i == WaitHandle.WaitTimeout ? WakeReason.Interval : i == 0 ? WakeReason.Stop : WakeReason.LowMemory;
+                };
                 return watch.Run(o, Console.Out, Console.Error);
             }
         }
@@ -202,14 +261,89 @@ namespace RamOptimiser
             if (s.HasLists)
             {
                 w.WriteLine("    Free/zero    {0}", Format.Bytes(s.FreeAndZero));
-                w.WriteLine("    Standby      {0}  (cache, given back on demand)", Format.Bytes(s.Standby));
-                w.WriteLine("  Modified       {0}  (waiting to be written to disk)", Format.Bytes(s.Modified));
+                w.WriteLine("    Standby      {0}  (cache, given back on demand; {1} low priority)",
+                    Format.Bytes(s.Standby), Format.Bytes(s.StandbyLowPriority));
+                w.WriteLine("  Modified       {0}  (waiting to be written to disk; {1} can be written now)",
+                    Format.Bytes(s.Modified), Format.Bytes(s.Modified - Math.Min(s.ModifiedNoWrite, s.Modified)));
             }
             else
             {
                 w.WriteLine("  (standby/modified breakdown needs administrator rights)");
             }
             w.WriteLine("  File cache     {0}", Format.Bytes(s.SystemCache));
+            if (s.CommitLimit == 0) w.WriteLine("  Committed      unknown");
+            else
+                w.WriteLine("  Committed      {0} of {1} ({2}% of the limit; cleaning does not lower this)",
+                    Format.Bytes(s.CommitTotal), Format.Bytes(s.CommitLimit), s.CommitPercent);
+            w.WriteLine("  Windows says   {0}", ConditionText(s.Condition));
+        }
+
+        /// <summary>Windows' own memory signal in words, for the status line.</summary>
+        internal static string ConditionText(MemoryCondition c)
+        {
+            switch (c)
+            {
+                case MemoryCondition.Low: return "memory is low";
+                case MemoryCondition.Neutral: return "memory is not low";
+                case MemoryCondition.High: return "memory is plentiful";
+                default: return "unknown";
+            }
+        }
+
+        /// <summary>
+        /// What a clean of these areas would likely do, from one snapshot. Reads only: changes nothing and needs no
+        /// admin (without it, the list-based figures can't be estimated, and a line says so).
+        /// </summary>
+        public static void PrintDryRun(TextWriter w, MemorySnapshot s, Areas areas)
+        {
+            w.WriteLine("Dry run: nothing was cleaned.");
+            List<AreaEstimate> rows = CleanEstimate.For(s, areas);
+            bool needsLists = false, unknown = false;
+            foreach (AreaEstimate e in rows)
+            {
+                w.WriteLine("  {0,-13} {1}", AreaNames.NameOf(e.Area), EstimateText(e));
+                if (e.Kind == EstimateKind.Unknown) unknown = true;
+                if (e.Note == CleanEstimate.NeedsAdmin) needsLists = true;
+            }
+            if (needsLists) w.WriteLine("(the standby and modified figures need an elevated terminal)");
+            ulong drop = CleanEstimate.InUseDropAtLeast(rows);
+            bool trims = (areas & Areas.WorkingSets) != 0;
+            if (drop > 0)
+                w.WriteLine("In use could drop by about {0}{1}", Format.Bytes(drop), trims ? ", plus whatever trimming releases." : ".");
+            else if (trims)
+                w.WriteLine("In use could drop by whatever trimming releases; that can't be estimated.");
+            else if (unknown)
+                w.WriteLine("How much In use could drop can't be estimated.");
+            else
+                w.WriteLine("In use is not likely to drop: these areas work on cache that already counts as available, or write to disk.");
+            string advice = AdviceText(CleanEstimate.Advise(s), s);
+            if (advice != null) w.WriteLine(advice);
+        }
+
+        /// <summary>One dry-run row: "about 560.0 MB written to disk, ...", "can't be estimated: why" or "no memory figure: why".</summary>
+        internal static string EstimateText(AreaEstimate e)
+        {
+            switch (e.Kind)
+            {
+                case EstimateKind.Bytes: return (e.UpperBound ? "up to " : "about ") + Format.Bytes(e.Bytes) + " " + e.Note;
+                case EstimateKind.NoMemoryFigure: return "no memory figure: " + e.Note;
+                default: return "can't be estimated: " + e.Note;
+            }
+        }
+
+        /// <summary>The advice as one terminal line, or null when Windows gave no signal.</summary>
+        internal static string AdviceText(CleanAdvice a, MemorySnapshot s)
+        {
+            switch (a)
+            {
+                case CleanAdvice.CommitBound:
+                    return "Committed memory is " + (s == null ? 0 : s.CommitPercent)
+                        + "% of the limit; cleaning does not lower it. Close programs you are not using.";
+                case CleanAdvice.WillHelp: return "Windows reports low memory: a clean can make room now.";
+                case CleanAdvice.Mixed: return "Windows is not short of memory. A clean frees some now, and programs read part of it back.";
+                case CleanAdvice.NotNeeded: return "Windows has plenty of free memory. Cleaning now mostly empties cache and slows the next few minutes.";
+                default: return null;
+            }
         }
 
         public static void PrintReport(TextWriter w, CleanReport r)
@@ -219,7 +353,9 @@ namespace RamOptimiser
                 AreaOutcome outcome = a.Outcome;
                 string state = outcome == AreaOutcome.Skipped ? "skipped" : outcome == AreaOutcome.Partial ? "partial"
                     : outcome == AreaOutcome.Ok ? "ok" : "FAILED";
-                w.WriteLine("  {0,-12} {1}{2}", AreaNames.NameOf(a.Area), state, a.Message == null ? "" : ": " + a.Message);
+                // Skipped areas did no work, so they show no time.
+                string time = outcome == AreaOutcome.Skipped ? "" : " (" + Format.Seconds(a.Duration) + ")";
+                w.WriteLine("  {0,-12} {1}{2}{3}", AreaNames.NameOf(a.Area), state, a.Message == null ? "" : ": " + a.Message, time);
             }
             w.WriteLine("In use: {0} -> {1} ({2} freed)",
                 Format.Bytes(r.Before.InUse), Format.Bytes(r.After.InUse), Format.Bytes(r.InUseFreed));
@@ -227,6 +363,7 @@ namespace RamOptimiser
                 w.WriteLine("Free/zero: {0} -> {1}   Standby: {2} -> {3}",
                     Format.Bytes(r.Before.FreeAndZero), Format.Bytes(r.After.FreeAndZero),
                     Format.Bytes(r.Before.Standby), Format.Bytes(r.After.Standby));
+            w.WriteLine("Took {0}.", Format.Seconds(r.Duration));
         }
 
         private static void PrintHelp()
@@ -243,6 +380,7 @@ namespace RamOptimiser
             w.WriteLine("Usage:");
             w.WriteLine("  ramopt status                          show memory use (no admin needed)");
             w.WriteLine("  ramopt clean [--areas LIST | --all]    clean once");
+            w.WriteLine("  ramopt clean --dry-run [--areas LIST | --all]   show what a clean would do; changes nothing (no admin needed)");
             w.WriteLine("  ramopt watch [--threshold N] [--interval S] [--cooldown S] [--areas LIST | --all]");
             w.WriteLine("                                         clean whenever load reaches N% (default 85, every 30s, 300s apart);");
             w.WriteLine("                                         a clean that leaves load at N% or more doubles the wait (up to {0}x)",
