@@ -58,5 +58,30 @@ namespace RamOptimiser.Gui
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr minimum, IntPtr maximum);
+
+        /// <summary>Awake time in 100 ns units, excluding sleep and hibernation.</summary>
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool QueryUnbiasedInterruptTime(out ulong unbiasedTime);
+
+        /// <summary>Returns an HRESULT; state is a QUERY_USER_NOTIFICATION_STATE value (1 to 7).</summary>
+        [DllImport("shell32.dll")]
+        public static extern int SHQueryUserNotificationState(out int state);
+
+        /// <summary>BYTE ACLineStatus, BatteryFlag, BatteryLifePercent, SystemStatusFlag; DWORD BatteryLifeTime, BatteryFullLifeTime.</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SYSTEM_POWER_STATUS
+        {
+            public byte ACLineStatus;
+            public byte BatteryFlag;
+            public byte BatteryLifePercent;
+            public byte SystemStatusFlag;
+            public int BatteryLifeTime;
+            public int BatteryFullLifeTime;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS status);
     }
 }
