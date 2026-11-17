@@ -11,6 +11,10 @@
         Background="{DynamicResource Surface}" Foreground="{DynamicResource Text}"
         FontFamily="{DynamicResource BodyFont}" FontSize="14"
         AutomationProperties.Name="RAM Optimiser">
+  <Window.Resources>
+    <!-- Auto-clean paused (P6): two bars, drawn like the icons in Styles.xaml. -->
+    <Geometry x:Key="IconPause">M5.5,3.5 V12.5 M10.5,3.5 V12.5</Geometry>
+  </Window.Resources>
   <TabControl x:Name="Tabs" AutomationProperties.Name="Sections">
 
     <!-- ============================== Memory ============================== -->
@@ -37,6 +41,36 @@
                          Text="Memory status could not be read."/>
             </Grid>
           </Border>
+
+          <!-- Auto-clean paused or waiting longer (P6, R2): seen without scrolling to the auto-clean card. Shares the
+               slot with the bar above, which wins while memory cannot be read. Glyph plus words, never colour alone. -->
+          <app:LiveRegion x:Name="AutoBar" Margin="0,0,0,8" Padding="10,8,4,8" CornerRadius="4" BorderThickness="1"
+                          BorderBrush="{DynamicResource ControlBorder}" Background="{DynamicResource Card}" Visibility="Collapsed"
+                          AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Auto-clean">
+            <app:LiveRegion.RenderTransform>
+              <TranslateTransform/>
+            </app:LiveRegion.RenderTransform>
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <Path x:Name="AutoBarGlyph" Style="{StaticResource IconPath}" VerticalAlignment="Top" Margin="0,1,8,0"/>
+              <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                <TextBlock x:Name="AutoBarTitle" TextWrapping="Wrap" FontSize="13"/>
+                <TextBlock x:Name="AutoBarDetail" Style="{StaticResource Small}" Visibility="Collapsed"/>
+              </StackPanel>
+              <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Top">
+                <Button x:Name="AutoBarResume" Style="{StaticResource OutlineButton}" Content="Resume" Margin="8,0,4,0"
+                        Visibility="Collapsed" AutomationProperties.Name="Resume auto-clean"/>
+                <Button x:Name="AutoBarDismiss" Style="{StaticResource SubtleButton}" Margin="4,-4,0,0" Visibility="Collapsed"
+                        AutomationProperties.Name="Dismiss the auto-clean wait message">
+                  <Path Style="{StaticResource IconPath}" Data="{StaticResource IconClose}" Stroke="{DynamicResource Text}"/>
+                </Button>
+              </StackPanel>
+            </Grid>
+          </app:LiveRegion>
 
           <!-- 1. Load, memory map, legend, commit charge -->
           <Border Style="{StaticResource CardBorder}" Padding="16,12,16,14">
@@ -192,8 +226,18 @@
               <StackPanel VerticalAlignment="Center">
                 <TextBlock Text="Auto-clean" FontWeight="SemiBold"/>
                 <TextBlock x:Name="AutoDescription" Style="{StaticResource Small}" Text="When load reaches 85%"/>
-                <TextBlock x:Name="AutoPaused" Style="{StaticResource Small}" Visibility="Collapsed"
-                           Text="Paused: needs administrator rights"/>
+                <!-- Why automatic cleans wait: admin rights, the user's pause (with Resume), the system (P5) or the
+                     back-off (R2, two lines with a warning glyph). -->
+                <StackPanel x:Name="AutoStatusLine" Margin="0,2,0,0" Visibility="Collapsed">
+                  <DockPanel>
+                    <Path x:Name="AutoStatusGlyph" DockPanel.Dock="Left" Style="{StaticResource IconPath}" VerticalAlignment="Top"
+                          Margin="0,0,6,0" Visibility="Collapsed"/>
+                    <Button x:Name="AutoResumeButton" DockPanel.Dock="Right" Style="{StaticResource LinkButton}" Content="Resume"
+                            Margin="8,-4,0,0" VerticalAlignment="Top" Visibility="Collapsed" AutomationProperties.Name="Resume auto-clean"/>
+                    <TextBlock x:Name="AutoStatus" Style="{StaticResource Small}" VerticalAlignment="Center"/>
+                  </DockPanel>
+                  <TextBlock x:Name="AutoStatusDetail" Style="{StaticResource Small}" Visibility="Collapsed"/>
+                </StackPanel>
               </StackPanel>
               <CheckBox x:Name="AutoSwitch" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
                         VerticalAlignment="Center" AutomationProperties.Name="Auto-clean"/>
@@ -311,6 +355,18 @@
                 <CheckBox x:Name="SettingsAutoSwitch" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
                           VerticalAlignment="Center" AutomationProperties.Name="Clean automatically"/>
               </Grid>
+              <!-- Pause (P6): collapsed while auto-clean is off or needs admin, so there is never a disabled button. One
+                   button that reads Pause or Resume, so keyboard focus stays on it across the swap. -->
+              <Border x:Name="PauseRow" Style="{StaticResource RowDivider}" Padding="16,10" Visibility="Collapsed">
+                <DockPanel>
+                  <Button x:Name="PauseButton" DockPanel.Dock="Right" Style="{StaticResource OutlineButton}" Content="Pause for 1 hour"
+                          Margin="12,0,0,0" VerticalAlignment="Center" AutomationProperties.Name="Pause auto-clean for 1 hour"/>
+                  <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="Pause automatic cleans" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="PauseNote" Style="{StaticResource Small}" Text="Manual cleans still work."/>
+                  </StackPanel>
+                </DockPanel>
+              </Border>
               <Border Style="{StaticResource RowDivider}" Padding="16,10">
                 <StackPanel>
                   <TextBlock Text="When memory load reaches"/>

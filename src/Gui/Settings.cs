@@ -33,6 +33,11 @@ namespace RamOptimiser.Gui
         public bool PowerClean { get; set; }
         /// <summary>Services Power Clean stops. Always a subset of ServiceCatalog, whatever settings.ini says.</summary>
         public List<string> PowerServices { get; set; }
+        /// <summary>
+        /// When the user's pause of automatic cleans ends (UTC), saved so it outlasts a restart; null when not paused.
+        /// The file is user-writable, so AutoCleanService.RestorePause cuts it to an hour from the time it is read.
+        /// </summary>
+        public DateTime? AutoCleanPausedUntilUtc { get; set; }
 
         /// <summary>What a clean actually runs: the chosen areas, or everything plus services under Power Clean.</summary>
         public Areas CleanAreas
@@ -217,6 +222,8 @@ namespace RamOptimiser.Gui
             Line(sb, "ShowTrayPercent", Bool(s.ShowTrayPercent));
             Line(sb, "PowerClean", Bool(s.PowerClean));
             Line(sb, "PowerServices", string.Join(",", s.PowerServices.ToArray()));
+            if (s.AutoCleanPausedUntilUtc.HasValue)
+                Line(sb, "AutoCleanPausedUntil", s.AutoCleanPausedUntilUtc.Value.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture));
             return sb.ToString();
         }
 
@@ -263,6 +270,13 @@ namespace RamOptimiser.Gui
                 case "powerclean": if (TryBool(value, out b)) s.PowerClean = b; break;
                 // Names outside the catalog are dropped here: the file is user-writable, the clean is elevated.
                 case "powerservices": s.PowerServices = ServiceCatalog.Filter(value.Split(',')); break;
+                case "autocleanpauseduntil":
+                    // Only a round-trip UTC time ("o", ending in Z); a local or offset time is ambiguous and dropped.
+                    DateTime until;
+                    if (DateTime.TryParseExact(value, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out until)
+                        && until.Kind == DateTimeKind.Utc)
+                        s.AutoCleanPausedUntilUtc = until;
+                    break;
             }
         }
 

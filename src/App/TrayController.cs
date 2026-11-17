@@ -12,12 +12,15 @@ namespace RamOptimiser.App
     /// in the taskbar's text colour) or the static app icon. The icon is redrawn only when the percent, the
     /// taskbar colour or the size changes, and every replaced icon is disposed. Never shows balloons.
     /// Lives on the UI thread: WPF's dispatcher pumps the messages NotifyIcon needs.
+    /// Menu: Open, Clean memory, Auto-clean (ticked when on, "(paused until 15:41)" while paused), then either
+    /// Pause auto-clean for 1 hour or Resume auto-clean (both hidden, never greyed, when auto-clean is off or needs
+    /// admin), Restart as administrator (not elevated), Settings not saved (a failed save), and Exit.
     /// </summary>
     internal sealed class TrayController : IDisposable
     {
         readonly NotifyIcon icon;
         readonly ContextMenuStrip menu;
-        readonly ToolStripMenuItem openItem, cleanItem, autoItem, restartItem, unsavedItem, exitItem;
+        readonly ToolStripMenuItem openItem, cleanItem, autoItem, pauseItem, resumeItem, restartItem, unsavedItem, exitItem;
         readonly Font boldFont;
         Icon appIcon;          // static icon at the current small-icon size
         Icon percentIcon;      // last rendered percent icon (owned)
@@ -25,7 +28,7 @@ namespace RamOptimiser.App
         bool shownLight, showingPercent;
         bool disposed;
 
-        public event EventHandler OpenRequested, CleanRequested, AutoCleanToggled, RestartRequested, ExitRequested;
+        public event EventHandler OpenRequested, CleanRequested, AutoCleanToggled, PauseRequested, ResumeRequested, RestartRequested, ExitRequested;
 
         public TrayController()
         {
@@ -35,6 +38,8 @@ namespace RamOptimiser.App
             openItem.Font = boldFont;
             cleanItem = new ToolStripMenuItem("Clean memory");
             autoItem = new ToolStripMenuItem("Auto-clean") { CheckOnClick = false };
+            pauseItem = new ToolStripMenuItem(AppText.PauseMenuText) { Visible = false };
+            resumeItem = new ToolStripMenuItem(AppText.ResumeMenuText) { Visible = false };
             restartItem = new ToolStripMenuItem(TrayMenuState.RestartText) { Visible = false };
             // Shown only while settings.ini could not be written; the Settings tab gives the reason.
             unsavedItem = new ToolStripMenuItem(AppText.SettingsNotSaved) { Enabled = false, Visible = false };
@@ -42,9 +47,14 @@ namespace RamOptimiser.App
             openItem.Click += delegate { Raise(OpenRequested); };
             cleanItem.Click += delegate { Raise(CleanRequested); };
             autoItem.Click += delegate { Raise(AutoCleanToggled); };
+            pauseItem.Click += delegate { Raise(PauseRequested); };
+            resumeItem.Click += delegate { Raise(ResumeRequested); };
             restartItem.Click += delegate { Raise(RestartRequested); };
             exitItem.Click += delegate { Raise(ExitRequested); };
-            menu.Items.AddRange(new ToolStripItem[] { openItem, cleanItem, autoItem, restartItem, unsavedItem, new ToolStripSeparator(), exitItem });
+            menu.Items.AddRange(new ToolStripItem[]
+            {
+                openItem, cleanItem, autoItem, pauseItem, resumeItem, restartItem, unsavedItem, new ToolStripSeparator(), exitItem
+            });
 
             shownSize = SmallIconSize();
             appIcon = LoadAppIcon(shownSize);
@@ -82,11 +92,20 @@ namespace RamOptimiser.App
         /// <param name="settingsUnsaved">True while the last settings save failed: a disabled "Settings not saved" item shows.</param>
         public void SetMenuState(TrayMenuState state, bool settingsUnsaved)
         {
+            SetMenuState(state, settingsUnsaved, false, false);
+        }
+
+        /// <param name="canPause">Auto-clean is on, elevated and not paused: "Pause auto-clean for 1 hour" shows.</param>
+        /// <param name="paused">The user paused it: "Resume auto-clean" shows instead.</param>
+        public void SetMenuState(TrayMenuState state, bool settingsUnsaved, bool canPause, bool paused)
+        {
             if (disposed) return;
             cleanItem.Enabled = state.CleanEnabled;
             cleanItem.Text = state.CleanText;
             autoItem.Checked = state.AutoChecked;
             autoItem.Text = state.AutoText;
+            pauseItem.Visible = canPause && !paused;
+            resumeItem.Visible = paused;
             restartItem.Visible = state.ShowRestart;
             unsavedItem.Visible = settingsUnsaved;
         }
