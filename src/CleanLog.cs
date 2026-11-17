@@ -1,8 +1,10 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using Microsoft.Win32.SafeHandles;
 
 namespace RamOptimiser
 {
@@ -31,9 +33,14 @@ namespace RamOptimiser
         const int ErrorSharingViolation = 32, ErrorLockViolation = 33;
         static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
 
+        /// <summary>The log in AppPaths.DataFolder, or null when the account has no data folder (nothing is written then).</summary>
         public static string DefaultPath
         {
-            get { return Path.Combine(AppPaths.DataFolder, FileName); }
+            get
+            {
+                string data = AppPaths.DataFolder;
+                return data == null ? null : Path.Combine(data, FileName);
+            }
         }
 
         /// <summary>8 lower-case hex characters, unique enough to pair a rebound line with its clean.</summary>
@@ -215,27 +222,84 @@ namespace RamOptimiser
             }
         }
 
+        /// <summary>
+        /// One append. The folder is held open for the whole call without delete sharing, so while it is open it can't
+        /// be renamed away and replaced by a junction. The log is opened without following a link and checked by
+        /// handle: not a link, one hard link, and really inside the held folder (its final path). The size that
+        /// decides a rotation comes from that handle, which other writers can't share, and the rotation is one
+        /// rename that replaces cleans.log.old (MoveFileEx), never a delete then a move. A reader holding the log
+        /// without delete sharing blocks the rename: the line is written anyway, a little past the cap, rather than
+        /// lost. Out of reach: a link in a parent of the data folder made before the call starts.
+        /// </summary>
         static void AppendOnce(string folder, string line)
         {
             string file = Path.Combine(folder, FileName), old = file + ".old";
             byte[] bytes = Utf8NoBom.GetBytes(line + "\n");
             Directory.CreateDirectory(folder);
-            SafeUserFolder.Check(folder, file, old);
-            var info = new FileInfo(file);
-            if (info.Exists && info.Length + bytes.Length > MaxBytes)
+            using (SafeFileHandle dir = SecurityNative.CreateFileW(folder, SecurityNative.FILE_LIST_DIRECTORY,
+                SecurityNative.FILE_SHARE_READ | SecurityNative.FILE_SHARE_WRITE, IntPtr.Zero, SecurityNative.OPEN_EXISTING,
+                SecurityNative.FILE_FLAG_BACKUP_SEMANTICS | SecurityNative.FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero))
             {
+                if (dir.IsInvalid) throw new IOException("Could not open " + folder + ".", Marshal.GetHRForLastWin32Error());
+                SecurityNative.BY_HANDLE_FILE_INFORMATION dirInfo;
+                if (!SecurityNative.GetFileInformationByHandle(dir, out dirInfo)
+                    || (dirInfo.FileAttributes & (uint)FileAttributes.ReparsePoint) != 0 || (dirInfo.FileAttributes & (uint)FileAttributes.Directory) == 0)
+                    throw new UnauthorizedAccessException("Refusing to write in " + folder + ": it is a link or not a folder.");
+                string folderFinal = SecurityNative.FinalPath(dir);
+                if (folderFinal == null) throw new IOException("Could not resolve " + folder + ".");
                 SafeUserFolder.Check(folder, file, old);
-                if (File.Exists(old)) File.Delete(old);
-                File.Move(file, old);
+                using (FileStream fs = OpenLog(file, folderFinal))
+                {
+                    bool rotated = fs.Length > 0 && fs.Length + bytes.Length > MaxBytes
+                        && SecurityNative.MoveFileExW(file, old, SecurityNative.MOVEFILE_REPLACE_EXISTING);
+                    if (!rotated)
+                    {
+                        fs.Seek(0, SeekOrigin.End);
+                        fs.Write(bytes, 0, bytes.Length);
+                        return;
+                    }
+                }
+                // The handle above now names cleans.log.old: the line goes into a new cleans.log.
                 SafeUserFolder.Check(folder, file);
+                using (FileStream fs = OpenLog(file, folderFinal))
+                {
+                    fs.Seek(0, SeekOrigin.End);
+                    fs.Write(bytes, 0, bytes.Length);
+                }
             }
-            using (var fs = new FileStream(file, FileMode.Append, FileAccess.Write, FileShare.Read))
+        }
+
+        /// <summary>
+        /// Opens (creating it if needed) the log for writing, other writers shut out until it closes; a link opens as
+        /// itself and is refused. Throws when the handle is a link, has another hard link, or is not folderFinal\cleans.log.
+        /// </summary>
+        static FileStream OpenLog(string file, string folderFinal)
+        {
+            SafeFileHandle h = SecurityNative.CreateFileW(file, SecurityNative.GENERIC_WRITE | SecurityNative.FILE_READ_ATTRIBUTES,
+                SecurityNative.FILE_SHARE_READ | SecurityNative.FILE_SHARE_DELETE, IntPtr.Zero, SecurityNative.OPEN_ALWAYS,
+                SecurityNative.FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
+            if (h.IsInvalid)
             {
-                // The path check above can lose a race; the handle cannot. A hard link made in between is refused here.
-                SecurityNative.BY_HANDLE_FILE_INFORMATION handleInfo;
-                if (!SecurityNative.GetFileInformationByHandle(fs.SafeFileHandle, out handleInfo) || handleInfo.NumberOfLinks > 1)
-                    throw new UnauthorizedAccessException("Refusing to write " + file + ": it has more than one hard link.");
-                fs.Write(bytes, 0, bytes.Length);
+                int hr = Marshal.GetHRForLastWin32Error();
+                h.Dispose();
+                throw new IOException("Could not open " + file + ".", hr);
+            }
+            try
+            {
+                SecurityNative.BY_HANDLE_FILE_INFORMATION info;
+                if (!SecurityNative.GetFileInformationByHandle(h, out info)) throw new IOException("Could not read " + file + ".");
+                const uint refused = (uint)(FileAttributes.ReparsePoint | FileAttributes.Directory | FileAttributes.Device);
+                if ((info.FileAttributes & refused) != 0) throw new UnauthorizedAccessException("Refusing to write " + file + ": it is a link.");
+                if (info.NumberOfLinks > 1) throw new UnauthorizedAccessException("Refusing to write " + file + ": it has more than one hard link.");
+                string final = SecurityNative.FinalPath(h);
+                if (final == null || !string.Equals(final, folderFinal + "\\" + FileName, StringComparison.OrdinalIgnoreCase))
+                    throw new UnauthorizedAccessException("Refusing to write " + file + ": it is not in the checked folder.");
+                return new FileStream(h, FileAccess.Write);
+            }
+            catch
+            {
+                h.Dispose();
+                throw;
             }
         }
 

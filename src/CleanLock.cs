@@ -105,7 +105,7 @@ namespace RamOptimiser
         }
 
         /// <summary>Only Administrators and SYSTEM may open the mutex; Administrators own it.</summary>
-        static MutexSecurity AdminOnly()
+        internal static MutexSecurity AdminOnly()
         {
             var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
             var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);

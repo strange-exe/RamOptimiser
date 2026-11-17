@@ -106,7 +106,8 @@ namespace RamOptimiser.Gui
 
         public static string DefaultPath
         {
-            get { return Path.Combine(AppPaths.DataFolder, "settings.ini"); }
+            // An account with no profile folder keeps the earlier relative path rather than failing at start-up.
+            get { return Path.Combine(AppPaths.DataFolder ?? AppPaths.FolderName, "settings.ini"); }
         }
 
         /// <summary>

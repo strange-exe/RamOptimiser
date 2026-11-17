@@ -118,9 +118,61 @@ namespace RamOptimiser.Tests
                 AppText.PublisherLine(row, win) == "Not signed; the file says Microsoft Corporation");
 
             var sys = new StartupApp { Source = StartupSource.MachineRun, Name = "s", ExePath = @"C:\Windows\System32\s.exe" };
-            StartupApps.ApplyPublisher(sys, "Microsoft Corporation", new SignatureInfo(SignatureState.Unsigned, null));
-            Check("app text: an unsigned row under the Windows folder is not checked",
+            StartupApps.ApplyPublisher(sys, "Microsoft Corporation", new SignatureInfo(SignatureState.Unsigned, null, 0, true));
+            Check("app text: an unsigned Windows file owned by Windows is not checked",
                 AppText.PublisherLine(sys, win) == "In the Windows folder; signature not checked");
+            // C:\Windows\Tasks, Temp, Tracing and spool\drivers\color are writable by standard users: a file put there
+            // is owned by whoever put it, and its missing signature is real.
+            var planted = new StartupApp { Source = StartupSource.UserRun, Name = "p", ExePath = @"C:\Windows\Tasks\p.exe" };
+            StartupApps.ApplyPublisher(planted, "Microsoft Corporation", new SignatureInfo(SignatureState.Unsigned, null, 0, false));
+            Check("app text: an unsigned file a user put in the Windows folder is not signed",
+                AppText.PublisherLine(planted, win) == "Not signed; the file says Microsoft Corporation", AppText.PublisherLine(planted, win));
+            Check("row: the owner fact is copied", sys.SystemOwned && !planted.SystemOwned);
+
+            // A host that runs another file: the host's signature says nothing about that file.
+            Check("host: rundll32 with a DLL runs another file", StartupApps.RunsOtherFile(@"C:\Windows\System32\rundll32.exe C:\Users\a\x.dll,Start"));
+            Check("host: wscript with a script runs another file", StartupApps.RunsOtherFile("wscript.exe \"C:\\Users\\a\\x.vbs\""));
+            Check("host: quoted powershell with a script runs another file",
+                StartupApps.RunsOtherFile("\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -File C:\\a.ps1"));
+            Check("host: a host with no argument runs nothing else", !StartupApps.RunsOtherFile(@"C:\Windows\System32\rundll32.exe"));
+            Check("host: an ordinary program with flags is not a host", !StartupApps.RunsOtherFile("\"C:\\Program Files\\App\\app.exe\" --minimized")
+                && !StartupApps.RunsOtherFile(null));
+            var host = new StartupApp { Source = StartupSource.UserRun, Name = "h", ExePath = @"C:\Tools\node.exe", RunsFile = true };
+            StartupApps.ApplyPublisher(host, "OpenJS Foundation", new SignatureInfo(SignatureState.Signed, "OpenJS Foundation"));
+            Check("app text: a signed host says the file it runs is not checked",
+                AppText.PublisherLine(host, win) == "Signed by OpenJS Foundation; it runs another file, which is not checked", AppText.PublisherLine(host, win));
+            var sysHost = new StartupApp { Source = StartupSource.UserRun, Name = "r", ExePath = @"C:\Windows\System32\rundll32.exe", RunsFile = true };
+            StartupApps.ApplyPublisher(sysHost, "Microsoft Corporation", new SignatureInfo(SignatureState.Unsigned, null, 0, true));
+            Check("app text: a Windows host running another file says neither is checked",
+                AppText.PublisherLine(sysHost, win) == "In the Windows folder; it runs another file; neither is checked", AppText.PublisherLine(sysHost, win));
+
+            // Names come from the file and its certificate: control, format and line-separator characters go, the
+            // rest is cut to one short line.
+            string rlo = ((char)0x202E).ToString(), lsep = ((char)0x2028).ToString(), zw = ((char)0x200B).ToString();
+            var odd = new StartupApp { Source = StartupSource.UserRun, Name = "o", ExePath = @"C:\Users\a\o.exe" };
+            StartupApps.ApplyPublisher(odd, "Micro" + rlo + "soft" + lsep + "Corp\t\n  Ltd" + zw, new SignatureInfo(SignatureState.Signed, "Con" + rlo + "toso" + new string('x', 300)));
+            Check("row: a claimed name loses control and format characters", odd.ClaimedCompany == "Microsoft Corp Ltd" && odd.Publisher == odd.ClaimedCompany,
+                odd.ClaimedCompany);
+            Check("row: a signer name is cleaned and capped", odd.Signer != null && odd.Signer.StartsWith("Contosox", StringComparison.Ordinal)
+                && odd.Signer.Length <= StartupApps.MaxNameChars, odd.Signer == null ? "null" : odd.Signer.Length.ToString());
+            string pair = char.ConvertFromUtf32(0x1F600);
+            var cut = new StartupApp();
+            StartupApps.ApplyPublisher(cut, new string('a', StartupApps.MaxNameChars - 1) + pair, null);
+            Check("row: the cap never splits a surrogate pair", cut.ClaimedCompany.Length == StartupApps.MaxNameChars - 1
+                && !char.IsHighSurrogate(cut.ClaimedCompany[cut.ClaimedCompany.Length - 1]), cut.ClaimedCompany.Length.ToString());
+            var blank = new StartupApp();
+            StartupApps.ApplyPublisher(blank, rlo + " " + zw, null);
+            Check("row: a name of nothing but hidden characters is no name", blank.ClaimedCompany == null);
+
+            // The version resource is read only after the same attribute gate as the signature check.
+            bool read = false;
+            string claim = StartupApps.PublisherOf(@"C:\Users\a\OneDrive\x.exe", p => FileAttributes.Archive | (FileAttributes)0x400000,
+                p => { read = true; return "Contoso"; });
+            Check("claim: a cloud placeholder's version info is never read", claim == null && !read);
+            claim = StartupApps.PublisherOf(@"C:\Users\a\link.exe", p => FileAttributes.ReparsePoint, p => { read = true; return "Contoso"; });
+            Check("claim: a link's version info is never read", claim == null && !read);
+            claim = StartupApps.PublisherOf(@"C:\Users\a\x.exe", p => FileAttributes.Archive, p => "  Contoso  ");
+            Check("claim: an ordinary file's company is read", claim == "Contoso", claim);
             var near = new StartupApp { Source = StartupSource.UserRun, Name = "n", ExePath = @"C:\WindowsApps2\n.exe" };
             StartupApps.ApplyPublisher(near, null, new SignatureInfo(SignatureState.Unsigned, null));
             Check("app text: a folder that only starts with the Windows name is not the Windows folder",
@@ -135,6 +187,15 @@ namespace RamOptimiser.Tests
                 !StartupApps.ChecksSignature(new StartupApp { Source = StartupSource.Packaged, ExePath = @"C:\Program Files\WindowsApps\p\a.exe" }));
             Check("row: a row with no program is not checked", !StartupApps.ChecksSignature(new StartupApp { Source = StartupSource.UserFolder, Name = "x.url" })
                 && !StartupApps.ChecksSignature(null));
+            // A shortcut in the user's own Startup folder can name one program in LinkInfo and run another: its target
+            // is not what runs, so naming its signer would vouch for an unverified path.
+            Check("row: a user Startup-folder shortcut's target is not checked",
+                !StartupApps.ChecksSignature(new StartupApp { Source = StartupSource.UserFolder, Name = "Teams.lnk", ExePath = @"C:\Program Files\T\t.exe" })
+                && !StartupApps.ChecksSignature(new StartupApp { Source = StartupSource.UserFolder, Name = "TEAMS.LNK", ExePath = @"C:\Program Files\T\t.exe" }));
+            Check("row: a program file in the user's Startup folder is checked",
+                StartupApps.ChecksSignature(new StartupApp { Source = StartupSource.UserFolder, Name = "x.exe", ExePath = @"C:\Users\a\Startup\x.exe" }));
+            Check("row: an all-users Startup shortcut (administrators only) is checked",
+                StartupApps.ChecksSignature(new StartupApp { Source = StartupSource.CommonFolder, Name = "a.lnk", ExePath = @"C:\Program Files\A\a.exe" }));
 
             // Owner decision E26 (3): a valid signature never relaxes the location-based Keep lock.
             KnownItem keep = null;
@@ -181,6 +242,15 @@ namespace RamOptimiser.Tests
                 SignatureInfo unsigned = Signature.Inspect(copy);
                 Check("signature: an unsigned copy reads as unsigned", unsigned.State == SignatureState.Unsigned, unsigned.State + " 0x" + unsigned.Status.ToString("X8"));
                 Check("signature: an unsigned file has no signer", unsigned.Signer == null);
+                Check("signature: a file the user made is not owned by Windows", !unsigned.SystemOwned);
+
+                string winFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "notepad.exe");
+                if (File.Exists(winFile))
+                {
+                    SignatureInfo sys = Signature.Inspect(winFile);
+                    Check("signature: a Windows file is owned by Windows", sys.State != SignatureState.NotChecked && sys.SystemOwned,
+                        sys.State + " owned " + sys.SystemOwned);
+                }
 
                 string signed = SignedCandidate();
                 if (signed == null)
@@ -197,11 +267,14 @@ namespace RamOptimiser.Tests
                 File.Copy(signed, tampered);
                 SignatureInfo before = Signature.Inspect(tampered);
                 Check("signature: an untouched copy of a signed file is signed", before.State == SignatureState.Signed, before.State.ToString());
+                // Same length, and every time stamp put back the way a program that wants to hide the change would:
+                // a result kept from the first check must not answer for the new bytes.
+                DateTime written = File.GetLastWriteTimeUtc(tampered), created = File.GetCreationTimeUtc(tampered);
                 byte[] bytes = File.ReadAllBytes(tampered);
                 bytes[bytes.Length / 2] ^= 0xFF;
                 File.WriteAllBytes(tampered, bytes);
-                // The cache is keyed on the write time too; make sure it moves even on a coarse clock.
-                File.SetLastWriteTimeUtc(tampered, File.GetLastWriteTimeUtc(signed).AddMinutes(-5));
+                File.SetLastWriteTimeUtc(tampered, written);
+                File.SetCreationTimeUtc(tampered, created);
                 SignatureInfo after = Signature.Inspect(tampered);
                 Check("signature: a tampered signed file reads as invalid", after.State == SignatureState.Invalid,
                     after.State + " 0x" + after.Status.ToString("X8"));

@@ -53,7 +53,8 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3):
   restart of the app, but it never lasts more than an hour from the time it is read back.
 - When automatic cleans keep leaving load at or above the threshold, auto-clean waits longer between cleans for
   high load (up to 16 times the cooldown). The Memory tab says so, with the time of the next one; Settings shows
-  the current wait. A manual clean never lengthens this wait. Automatic cleans also wait in the first 2 minutes
+  the current wait. A manual clean never adds to this back-off, but like any clean it starts the wait again.
+  Automatic cleans also wait in the first 2 minutes
   after the PC wakes and while a full-screen app runs; scheduled ones wait while the PC is locked or on battery.
   The auto-clean card says why.
 - **Settings** has these options:

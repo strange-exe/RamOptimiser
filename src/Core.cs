@@ -766,6 +766,15 @@ namespace RamOptimiser
             });
         }
 
+        /// <summary>Drives whose flush, left to finish by an earlier clean, has not returned yet.</summary>
+        static readonly HashSet<string> flushesRunning = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>True while a flush of this drive, left to finish by an earlier clean, is still running.</summary>
+        internal static bool FlushStillRunning(string letter)
+        {
+            lock (flushesRunning) return flushesRunning.Contains(letter);
+        }
+
         /// <summary>As below, with no stop and each flush run inline (no time limit).</summary>
         internal static void FlushVolumes(AreaResult r, IEnumerable<KeyValuePair<string, bool>> drives, Func<string, int> flush)
         {
@@ -797,8 +806,30 @@ namespace RamOptimiser
                 if (flushLimit == null) err = flush(letter);
                 else
                 {
+                    // Read once: the deadline can pass between the stop check and here, and a zero wait would start a
+                    // thread only to give up on it and call a healthy drive hung.
+                    TimeSpan limit = flushLimit();
+                    if (limit <= TimeSpan.Zero) { notRun.Add(letter + " not flushed: " + StopReason(CleanStop.TimedOut)); continue; }
+                    // A drive still hung from an earlier clean gets no second thread: each one holds a volume handle,
+                    // and a long-running watch or app would pile them up while the disk sleeps.
+                    lock (flushesRunning)
+                    {
+                        if (!flushesRunning.Add(letter)) { failed.Add(letter + " still writing from an earlier clean"); continue; }
+                    }
                     bool hung;
-                    err = RunWithTimeout(() => flush(letter), flushLimit(), out hung);
+                    try
+                    {
+                        err = RunWithTimeout(() =>
+                        {
+                            try { return flush(letter); }
+                            finally { lock (flushesRunning) flushesRunning.Remove(letter); }
+                        }, limit, out hung);
+                    }
+                    catch (Exception)
+                    {
+                        lock (flushesRunning) flushesRunning.Remove(letter); // the thread could not start
+                        throw;
+                    }
                     if (hung) { failed.Add(letter + " still writing; left to finish"); continue; }
                 }
                 if (err == 0) flushed.Add(letter);
@@ -828,8 +859,8 @@ namespace RamOptimiser
         /// <summary>
         /// Runs work on a background thread of its own and waits up to limit. On time it returns work's result (or
         /// throws its exception); late, it sets timedOut and returns 0, and the work is left to finish by itself.
-        /// That is the price of not blocking the clean on a drive that will not answer: at most one thread is left
-        /// behind per hung drive per clean. The thread holds its own volume handle and closes it when the call
+        /// That is the price of not blocking the clean on a drive that will not answer; FlushVolumes keeps it to one
+        /// thread per hung drive across cleans. The thread holds its own volume handle and closes it when the call
         /// returns; as a background thread it never keeps the process alive. The event is not disposed here when the
         /// work is late, because the thread still sets it.
         /// </summary>

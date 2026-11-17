@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 using ComFileTime = System.Runtime.InteropServices.ComTypes.FILETIME;
 
 namespace RamOptimiser
@@ -14,7 +15,7 @@ namespace RamOptimiser
     /// </summary>
     public enum SignatureState { NotChecked, Signed, Unsigned, Invalid, Distrusted }
 
-    /// <summary>One file's signature check. Immutable, so the session cache can hand the same object out.</summary>
+    /// <summary>One file's signature check. Immutable.</summary>
     public sealed class SignatureInfo
     {
         public readonly SignatureState State;
@@ -22,12 +23,19 @@ namespace RamOptimiser
         public readonly string Signer;
         /// <summary>WinVerifyTrust's raw LONG (0 when not checked), kept for diagnostics.</summary>
         public readonly int Status;
+        /// <summary>
+        /// The file's owner is TrustedInstaller or SYSTEM, as Windows' own files are. A file someone put in a
+        /// user-writable corner of the Windows folder (Tasks, Temp, Tracing) is owned by whoever put it there.
+        /// </summary>
+        public readonly bool SystemOwned;
 
-        public SignatureInfo(SignatureState state, string signer) : this(state, signer, 0) { }
+        public SignatureInfo(SignatureState state, string signer) : this(state, signer, 0, false) { }
 
-        public SignatureInfo(SignatureState state, string signer, int status)
+        public SignatureInfo(SignatureState state, string signer, int status) : this(state, signer, status, false) { }
+
+        public SignatureInfo(SignatureState state, string signer, int status, bool systemOwned)
         {
-            State = state; Signer = signer; Status = status;
+            State = state; Signer = signer; Status = status; SystemOwned = systemOwned;
         }
     }
 
@@ -105,16 +113,16 @@ namespace RamOptimiser
             return (attributes & (FileAttributes.ReparsePoint | FileAttributes.Offline | RecallOnOpen | RecallOnDataAccess)) != 0;
         }
 
-        const int MaxCached = 512;
-        static readonly object cacheGate = new object();
-        static readonly Dictionary<string, SignatureInfo> cache = new Dictionary<string, SignatureInfo>(StringComparer.OrdinalIgnoreCase);
         static readonly SignatureInfo NotChecked = new SignatureInfo(SignatureState.NotChecked, null, 0);
 
         /// <summary>
         /// Checks one file's embedded signature. Only a fully qualified path on a lettered local drive is opened (no
         /// share, device or relative path) and never a link or placeholder; anything else, a missing file or any failure
-        /// is NotChecked. Results are cached for the session by full path, length and last write time, because hashing
-        /// a big exe can take a few hundred milliseconds. Never throws. Runs on the caller's (worker) thread.
+        /// is NotChecked. The file is opened once, without following a link, and everything after that (its attributes,
+        /// where it really is, its owner and the signature) is read through that handle, so it can't be swapped between
+        /// checks. No result is kept between calls: every fact a cache could be keyed on (size, every time stamp) can be
+        /// put back by whoever can write the file, so each check costs a hash of the file (tens of milliseconds for a
+        /// few MB). Never throws. Runs on the caller's (worker) thread.
         /// </summary>
         public static SignatureInfo Inspect(string path)
         {
@@ -123,21 +131,23 @@ namespace RamOptimiser
             {
                 string full = Path.GetFullPath(path);
                 if (!StartupApps.IsLocalDrivePath(full)) return NotChecked;
+                // By path first: opening a cloud placeholder, even to look at it, can download it.
                 var info = new FileInfo(full);
                 if (!info.Exists || SkipForAttributes(info.Attributes)) return NotChecked;
-                string key = full + "|" + info.Length + "|" + info.LastWriteTimeUtc.Ticks;
-                lock (cacheGate)
+                using (SafeFileHandle h = SecurityNative.CreateFileW(full, GenericRead, SecurityNative.FILE_SHARE_READ, IntPtr.Zero,
+                    SecurityNative.OPEN_EXISTING, SecurityNative.FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero))
                 {
-                    SignatureInfo hit;
-                    if (cache.TryGetValue(key, out hit)) return hit;
+                    if (h.IsInvalid || GetFileType(h) != FileTypeDisk) return NotChecked;
+                    SecurityNative.BY_HANDLE_FILE_INFORMATION byHandle;
+                    if (!SecurityNative.GetFileInformationByHandle(h, out byHandle)) return NotChecked;
+                    var attributes = (FileAttributes)byHandle.FileAttributes;
+                    // Again by handle: a link swapped in after the path check opens as the link itself, and is refused.
+                    if (SkipForAttributes(attributes) || (attributes & FileAttributes.Directory) != 0) return NotChecked;
+                    // A link in a parent folder can lead to a share: the handle says where the file really is.
+                    if (!IsLocalFinalPath(SecurityNative.FinalPath(h))) return NotChecked;
+                    using (var stream = new FileStream(h, FileAccess.Read))
+                        return Verify(full, stream, IsSystemOwner(OwnerOf(stream)));
                 }
-                SignatureInfo result = Verify(full);
-                lock (cacheGate)
-                {
-                    if (cache.Count >= MaxCached) cache.Clear();
-                    cache[key] = result;
-                }
-                return result;
             }
             catch (ArgumentException) { return NotChecked; }
             catch (NotSupportedException) { return NotChecked; }
@@ -157,11 +167,44 @@ namespace RamOptimiser
         const uint CERT_NAME_SIMPLE_DISPLAY_TYPE = 4;
         const int MaxNameChars = 1024;
 
-        static SignatureInfo Verify(string full)
+        /// <summary>TrustedInstaller (NT SERVICE\TrustedInstaller) and SYSTEM: the owners of Windows' own files. Pure.</summary>
+        public static bool IsSystemOwner(string sid)
         {
-            // Hold the file open (others may still read it) so it can't be swapped between the check and the name;
-            // WinVerifyTrust reads through this handle.
-            using (var stream = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read))
+            return sid == "S-1-5-18" || sid == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+        }
+
+        /// <summary>
+        /// Whether GetFinalPathNameByHandle's answer is on a lettered local volume ("\\?\C:\..."), not a share
+        /// ("\\?\UNC\...") or a volume with no letter. Pure.
+        /// </summary>
+        public static bool IsLocalFinalPath(string finalPath)
+        {
+            const string prefix = @"\\?\";
+            if (finalPath == null || !finalPath.StartsWith(prefix, StringComparison.Ordinal)) return false;
+            return StartupApps.IsLocalDrivePath(finalPath.Substring(prefix.Length));
+        }
+
+        /// <summary>The owner's SID read through the handle, or null.</summary>
+        static string OwnerOf(FileStream stream)
+        {
+            try
+            {
+                var owner = stream.GetAccessControl().GetOwner(typeof(System.Security.Principal.SecurityIdentifier));
+                return owner == null ? null : owner.Value;
+            }
+            catch (UnauthorizedAccessException) { return null; }
+            catch (InvalidOperationException) { return null; }
+            catch (System.Security.Principal.IdentityNotMappedException) { return null; }
+        }
+
+        const uint GenericRead = 0x80000000, FileTypeDisk = 1;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern uint GetFileType(SafeFileHandle file);
+
+        /// <summary>WinVerifyTrust on the open file (held so others may only read it), the signer read from the same state.</summary>
+        static SignatureInfo Verify(string full, FileStream stream, bool systemOwned)
+        {
             {
                 IntPtr filePath = Marshal.StringToHGlobalUni(full);
                 IntPtr fileInfo = IntPtr.Zero;
@@ -190,7 +233,7 @@ namespace RamOptimiser
                     opened = true;
                     SignatureState state = Classify(status, lastError);
                     string signer = state == SignatureState.Signed ? SignerName(data.hWVTStateData) : null;
-                    return new SignatureInfo(state, signer, status);
+                    return new SignatureInfo(state, signer, status, systemOwned);
                 }
                 finally
                 {

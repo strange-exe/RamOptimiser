@@ -360,7 +360,8 @@
               <Border x:Name="PauseRow" Style="{StaticResource RowDivider}" Padding="16,10" Visibility="Collapsed">
                 <DockPanel>
                   <Button x:Name="PauseButton" DockPanel.Dock="Right" Style="{StaticResource OutlineButton}" Content="Pause for 1 hour"
-                          Margin="12,0,0,0" VerticalAlignment="Center" AutomationProperties.Name="Pause auto-clean for 1 hour"/>
+                          Margin="12,0,0,0" VerticalAlignment="Center" AutomationProperties.Name="Pause for 1 hour"
+                          AutomationProperties.HelpText="Pause automatic cleans. Manual cleans still work."/>
                   <StackPanel VerticalAlignment="Center">
                     <TextBlock Text="Pause automatic cleans" TextWrapping="Wrap"/>
                     <TextBlock x:Name="PauseNote" Style="{StaticResource Small}" Text="Manual cleans still work."/>

@@ -266,8 +266,17 @@ namespace RamOptimiser
         /// </summary>
         internal static bool OnCancelKey(CancellationTokenSource cancel, TextWriter output)
         {
+            return OnCancelKey(cancel, output, () => true);
+        }
+
+        /// <summary>
+        /// As above; cleaning says whether a clean is running. Watch spends most of its time waiting between checks,
+        /// and then Ctrl+C just ends the wait, with no "Stopping after the current step" for a step that isn't there.
+        /// </summary>
+        internal static bool OnCancelKey(CancellationTokenSource cancel, TextWriter output, Func<bool> cleaning)
+        {
             if (cancel.IsCancellationRequested) return false;
-            output.WriteLine("Stopping after the current step...");
+            if (cleaning()) output.WriteLine("Stopping after the current step...");
             cancel.Cancel();
             return true;
         }
@@ -324,7 +333,7 @@ namespace RamOptimiser
             {
                 string limit = r.Deadline == null ? "time"
                     : Math.Round(r.Deadline.Value.TotalSeconds).ToString(CultureInfo.InvariantCulture) + " s";
-                return "Hit the " + limit + " limit after " + r.AreasRun + " of " + r.AreasTotal + " areas" + rest;
+                return "Hit the " + limit + " limit after " + r.AreasRun + " of " + r.AreasTotal + (r.AreasTotal == 1 ? " area" : " areas") + rest;
             }
             return (lastRan == null ? "Stopped before any area ran" : "Stopped after " + lastRan) + rest;
         }
@@ -340,7 +349,8 @@ namespace RamOptimiser
             // the Ctrl+C handler runs on a thread of its own.
             var cancel = new CancellationTokenSource();
             WaitHandle stop = cancel.Token.WaitHandle;
-            Console.CancelKeyPress += (s, e) => { e.Cancel = OnCancelKey(cancel, Console.Out); };
+            int inClean = 0; // 1 while a clean runs, read by the Ctrl+C handler on its own thread
+            Console.CancelKeyPress += (s, e) => { e.Cancel = OnCancelKey(cancel, Console.Out, () => Volatile.Read(ref inClean) == 1); };
             Console.WriteLine("Watching memory: clean when load >= {0}%, check every {1}s, wait {2}s between cleans. Ctrl+C stops.",
                 o.ThresholdPercent, o.IntervalSeconds, o.CooldownSeconds);
             Stopwatch clock = Stopwatch.StartNew();
@@ -351,7 +361,12 @@ namespace RamOptimiser
             var watch = new Watcher
             {
                 Elapsed = () => clock.Elapsed,
-                Clean = areas => Cleaner.Clean(RequestFor(o, areas, cancel.Token, TimeSpan.Zero))
+                Clean = areas =>
+                {
+                    Volatile.Write(ref inClean, 1);
+                    try { return Cleaner.Clean(RequestFor(o, areas, cancel.Token, TimeSpan.Zero)); }
+                    finally { Volatile.Write(ref inClean, 0); }
+                }
             };
             watch.Wait = (t, includeLow) =>
             {

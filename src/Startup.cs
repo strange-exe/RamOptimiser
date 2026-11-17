@@ -7,6 +7,7 @@ using System.IO;
 using System.Management;
 using System.Runtime.InteropServices;
 using System.ServiceProcess;
+using System.Text;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
@@ -105,6 +106,13 @@ namespace RamOptimiser
         public string Signer;
         /// <summary>The company the file names, which anyone can write into a file: the same value as Publisher.</summary>
         public string ClaimedCompany;
+        /// <summary>The checked file is owned by TrustedInstaller or SYSTEM (SignatureInfo.SystemOwned).</summary>
+        public bool SystemOwned;
+        /// <summary>
+        /// The program is a host that runs another file named in its command (rundll32 x.dll, wscript x.vbs,
+        /// node x.js): the host's signature says nothing about that file.
+        /// </summary>
+        public bool RunsFile;
         public bool Enabled;
         public KnownItem Known;
         /// <summary>Packaged rows: the package family name (e.g. 5319275A.WhatsAppDesktop_cv1g1gvanyjgm).</summary>
@@ -193,7 +201,8 @@ namespace RamOptimiser
                 else a.Enabled = IsApprovedEnabled(ReadApproved(a));
                 a.Known = KnownFor(a, roots);
                 // After Known, which a signature never changes. Inspect opens only local-drive files, no network.
-                ApplyPublisher(a, PublisherOf(a.ExePath), ChecksSignature(a) ? Signature.Inspect(a.ExePath) : null);
+                // A user shortcut's target is not known to be what runs: neither its claim nor its signature is shown.
+                ApplyPublisher(a, IsUserShortcut(a) ? null : PublisherOf(a.ExePath), ChecksSignature(a) ? Signature.Inspect(a.ExePath) : null);
             }
             return list;
         }
@@ -235,20 +244,63 @@ namespace RamOptimiser
         /// </summary>
         public static bool ChecksSignature(StartupApp a)
         {
-            return a != null && !string.IsNullOrEmpty(a.ExePath) && a.Source != StartupSource.Packaged;
+            return a != null && !string.IsNullOrEmpty(a.ExePath) && a.Source != StartupSource.Packaged && !IsUserShortcut(a);
         }
 
         /// <summary>
+        /// A shortcut in the user's own Startup folder: its target comes from LinkInfo or the environment block, which
+        /// the user can write to disagree with what the shell really runs (the same reason KnownFor gives it no Keep).
+        /// The all-users folder needs administrator rights to write, so its shortcuts are taken at their word. Pure.
+        /// </summary>
+        public static bool IsUserShortcut(StartupApp a)
+        {
+            return a != null && a.Source == StartupSource.UserFolder && a.Name != null
+                && a.Name.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>The longest company or signer name kept: one short line in the Startup tab.</summary>
+        public const int MaxNameChars = 100;
+
+        /// <summary>
         /// Fills a row's publisher facts: the company the file claims and what its signature says (NotChecked when
-        /// there is no result). Touches nothing else, so Known, Keep and the switch stay as the location decided. Pure.
+        /// there is no result). Both names come from the file and its certificate, so they are cleaned to one short
+        /// line (CleanName). Touches nothing else, so Known, Keep and the switch stay as the location decided. Pure.
         /// </summary>
         public static void ApplyPublisher(StartupApp a, string claimed, SignatureInfo signature)
         {
             if (a == null) return;
-            a.ClaimedCompany = claimed;
-            a.Publisher = claimed;
+            a.ClaimedCompany = CleanName(claimed);
+            a.Publisher = a.ClaimedCompany;
             a.Signature = signature == null ? SignatureState.NotChecked : signature.State;
-            a.Signer = signature == null ? null : signature.Signer;
+            a.Signer = signature == null ? null : CleanName(signature.Signer);
+            a.SystemOwned = signature != null && signature.SystemOwned;
+        }
+
+        /// <summary>
+        /// A name fit for one line: format characters (bidi overrides, zero-width marks) are dropped; control
+        /// characters and line or paragraph separators become spaces; runs of white space become one; the result is
+        /// cut to MaxNameChars without splitting a surrogate pair. Null when nothing is left. Pure.
+        /// </summary>
+        public static string CleanName(string name)
+        {
+            if (name == null) return null;
+            var sb = new StringBuilder(Math.Min(name.Length, MaxNameChars * 2));
+            bool space = false;
+            foreach (char c in name)
+            {
+                UnicodeCategory cat = char.GetUnicodeCategory(c);
+                if (cat == UnicodeCategory.Format) continue;
+                bool blank = char.IsWhiteSpace(c) || cat == UnicodeCategory.Control
+                    || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator;
+                if (blank) { space = sb.Length > 0; continue; }
+                if (space) { sb.Append(' '); space = false; }
+                sb.Append(c);
+                if (sb.Length > MaxNameChars) break;
+            }
+            int n = Math.Min(sb.Length, MaxNameChars);
+            if (n < sb.Length && char.IsHighSurrogate(sb[n - 1])) n--;
+            string s = sb.ToString(0, n).TrimEnd();
+            return s.Length == 0 ? null : s;
         }
 
         public static bool IsRunOnce(StartupSource s)
@@ -287,7 +339,9 @@ namespace RamOptimiser
                 return;
             }
             a.ExePath = target;
-            a.ExeName = LaunchedExe("\"" + target + "\" " + (arguments ?? "")) ?? SafeFileName(target);
+            string command = "\"" + target + "\" " + (arguments ?? "");
+            a.ExeName = LaunchedExe(command) ?? SafeFileName(target);
+            a.RunsFile = RunsOtherFile(command);
         }
 
         /// <summary>A fully qualified path on a lettered drive ("C:\..."): no share, device or \\?\ prefix. Pure.</summary>
@@ -348,7 +402,7 @@ namespace RamOptimiser
                     string command = key.GetValue(name) as string;
                     string exe = ExePathOf(command);
                     list.Add(new StartupApp { Source = source, Name = IsRunOnce(source) ? RunOnceDisplayName(name) : name, ExePath = exe,
-                        ExeName = LaunchedExe(command) ?? SafeFileName(exe) });
+                        ExeName = LaunchedExe(command) ?? SafeFileName(exe), RunsFile = RunsOtherFile(command) });
                 }
             }
         }
@@ -477,17 +531,49 @@ namespace RamOptimiser
             catch (ArgumentException) { return null; }
         }
 
+        /// <summary>Programs whose job is to run another file named in their command line.</summary>
+        static readonly HashSet<string> ScriptHosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+            "rundll32.exe", "regsvr32.exe", "wscript.exe", "cscript.exe", "mshta.exe", "powershell.exe", "pwsh.exe",
+            "cmd.exe", "node.exe", "python.exe", "pythonw.exe", "java.exe", "javaw.exe" };
+
+        /// <summary>
+        /// Whether a command runs a script or DLL host with something after it (rundll32 x.dll,Entry; wscript x.vbs;
+        /// powershell -File x.ps1): the host is what gets checked, not the file it runs. Pure.
+        /// </summary>
+        public static bool RunsOtherFile(string command)
+        {
+            string exe = ExePathOf(command);
+            if (exe == null || !ScriptHosts.Contains(SafeFileName(exe) ?? "")) return false;
+            string c = Environment.ExpandEnvironmentVariables(command.Trim());
+            int at = c.IndexOf(exe, StringComparison.OrdinalIgnoreCase);
+            if (at < 0) return false;
+            int after = at + exe.Length;
+            if (after < c.Length && c[after] == '"') after++;
+            return c.Substring(after).Trim().Length > 0;
+        }
+
         static string PublisherOf(string exePath)
+        {
+            return PublisherOf(exePath, File.GetAttributes, p => FileVersionInfo.GetVersionInfo(p).CompanyName);
+        }
+
+        /// <summary>
+        /// The company the file names, through the same gate as the signature check: a link (it could lead to a
+        /// share) or an offline or cloud placeholder (reading its version resource would download it) is not read.
+        /// attributes and company are the file system's; tests pass fakes.
+        /// </summary>
+        internal static string PublisherOf(string exePath, Func<string, FileAttributes> attributes, Func<string, string> company)
         {
             // Local drives only: a share in a user-writable Run value would make the elevated app connect to it.
             if (!IsLocalDrivePath(exePath)) return null;
             try
             {
-                if (!File.Exists(exePath)) return null;
-                string company = FileVersionInfo.GetVersionInfo(exePath).CompanyName;
-                return string.IsNullOrWhiteSpace(company) ? null : company.Trim();
+                if (Signature.SkipForAttributes(attributes(exePath))) return null;
+                string name = company(exePath);
+                return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
             }
             catch (ArgumentException) { return null; }
+            catch (NotSupportedException) { return null; }
             catch (IOException) { return null; }
             catch (UnauthorizedAccessException) { return null; }
         }

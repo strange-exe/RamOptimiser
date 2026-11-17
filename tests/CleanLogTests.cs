@@ -130,6 +130,13 @@ namespace RamOptimiser.Tests
                 data, StringComparison.OrdinalIgnoreCase), Gui.SettingsStore.DefaultPath);
             Check("paths: cleans.log sits in the data folder", CleanLog.FileName == "cleans.log"
                 && string.Equals(CleanLog.DefaultPath, Path.Combine(data, "cleans.log"), StringComparison.OrdinalIgnoreCase), CleanLog.DefaultPath);
+
+            // An account with no profile folder gets "" from Windows: never a path relative to the current directory
+            // (often C:\Windows\System32 for an elevated or scheduled process).
+            Check("paths: no local app data means no data folder", AppPaths.DataFolderFor("") == null && AppPaths.DataFolderFor(null) == null);
+            Check("paths: a relative base is refused", AppPaths.DataFolderFor("Local") == null && AppPaths.DataFolderFor(@"\Users\a") == null
+                && AppPaths.DataFolderFor("C:Local") == null);
+            Check("paths: a full base gets the folder", AppPaths.DataFolderFor(@"C:\Users\a\AppData\Local") == @"C:\Users\a\AppData\Local\RamOptimiser");
         }
 
         // ---------------------------------------------------------------- record format
@@ -312,6 +319,35 @@ namespace RamOptimiser.Tests
             File.WriteAllBytes(log, Filler(CleanLog.MaxBytes - 100));
             Check("log: a line that fits does not rotate", CleanLog.TryAppend(rot, "{}") && new FileInfo(log).Length == CleanLog.MaxBytes - 97
                 && new FileInfo(old).Length == CleanLog.MaxBytes - 10);
+
+            // A reader holding cleans.log without delete sharing (a tail tool, an editor) blocks the rename: the older
+            // generation must survive and the line must still be written, a little past the cap.
+            string held = Path.Combine(dir, "rotate-held");
+            Directory.CreateDirectory(held);
+            string heldLog = Path.Combine(held, CleanLog.FileName), heldOld = heldLog + ".old";
+            File.WriteAllBytes(heldLog, Filler(CleanLog.MaxBytes - 10));
+            File.WriteAllText(heldOld, "older");
+            bool heldAppended;
+            using (new FileStream(heldLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                heldAppended = CleanLog.TryAppend(held, line);
+            string heldText = File.ReadAllText(heldLog);
+            string oldText = File.Exists(heldOld) ? File.ReadAllText(heldOld) : "(deleted)";
+            Check("log: a reader blocking rotation keeps the old file and still writes the line", heldAppended
+                && oldText == "older" && heldText.EndsWith(line + "\n", StringComparison.Ordinal)
+                && new FileInfo(heldLog).Length == CleanLog.MaxBytes - 10 + line.Length + 1,
+                heldAppended + " old=" + oldText + " log=" + new FileInfo(heldLog).Length);
+            // Once the reader is gone, the next append rotates as usual.
+            Check("log: rotation resumes after the reader closes", CleanLog.TryAppend(held, line) && File.ReadAllText(heldLog) == line + "\n"
+                && new FileInfo(heldOld).Length == CleanLog.MaxBytes - 10 + line.Length + 1);
+
+            // Rotations back to back: the second append finds a small file and leaves the full generation alone.
+            string twice = Path.Combine(dir, "rotate-twice");
+            Directory.CreateDirectory(twice);
+            string twiceLog = Path.Combine(twice, CleanLog.FileName), twiceOld = twiceLog + ".old";
+            File.WriteAllBytes(twiceLog, Filler(CleanLog.MaxBytes));
+            bool a1 = CleanLog.TryAppend(twice, line), a2 = CleanLog.TryAppend(twice, line);
+            Check("log: back-to-back appends rotate once", a1 && a2 && new FileInfo(twiceOld).Length == CleanLog.MaxBytes
+                && File.ReadAllText(twiceLog) == line + "\n" + line + "\n", new FileInfo(twiceOld).Length.ToString());
         }
 
         static byte[] Filler(long n)
@@ -390,6 +426,18 @@ namespace RamOptimiser.Tests
             using (new FileStream(Path.Combine(busy, CleanLog.FileName), FileMode.Create, FileAccess.Write, FileShare.Read))
                 wrote = CleanLog.TryAppend(busy, "{}");
             Check("log: a file another writer holds gives up after the retries", !wrote && DateTime.UtcNow - start < TimeSpan.FromSeconds(5));
+
+            // The other writer (the app or ramopt.exe) finishes during the retries: the line gets written.
+            string brief = Path.Combine(dir, "brief");
+            Directory.CreateDirectory(brief);
+            string briefLog = Path.Combine(brief, CleanLog.FileName);
+            var holder = new FileStream(briefLog, FileMode.Create, FileAccess.Write, FileShare.Read);
+            var release = new System.Threading.Thread(() => { System.Threading.Thread.Sleep(60); holder.Dispose(); });
+            release.Start();
+            bool retried = CleanLog.TryAppend(brief, "{\"r\":1}");
+            release.Join();
+            Check("log: a retry succeeds once the other writer lets go", retried && File.ReadAllText(briefLog) == "{\"r\":1}\n",
+                retried + " " + (File.Exists(briefLog) ? File.ReadAllText(briefLog) : "missing"));
         }
 
         static bool Mklink(string kind, string link, string target)

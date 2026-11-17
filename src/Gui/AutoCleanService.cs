@@ -292,6 +292,17 @@ namespace RamOptimiser.Gui
             return untilUtc.Value > latest ? latest : untilUtc.Value;
         }
 
+        /// <summary>
+        /// A pause's end after the clock jumped back from lastTickUtc to nowUtc: the time that was left at the last
+        /// tick, never a fresh hour (at most PauseLength); null when none was left. Pure.
+        /// </summary>
+        public static DateTime? PauseAfterClockBack(DateTime untilUtc, DateTime lastTickUtc, DateTime nowUtc)
+        {
+            TimeSpan left = untilUtc - lastTickUtc;
+            if (left <= TimeSpan.Zero) return null;
+            return nowUtc + (left > PauseLength ? PauseLength : left);
+        }
+
         /// <summary>Everything the window and tray show about auto-clean, read together under the lock.</summary>
         public AutoCleanStatus GetStatus()
         {
@@ -472,13 +483,15 @@ namespace RamOptimiser.Gui
                 if (snap.LoadPercent < s.ThresholdPercent) futileStreak = 0;
                 if (pauseUntil.HasValue)
                 {
-                    if (now >= pauseUntil.Value)
+                    // Clock set back since the last tick: keep the time that was left, so the pause never restarts.
+                    if (haveLastTick && now < lastTickWall) pauseUntil = PauseAfterClockBack(pauseUntil.Value, lastTickWall, now);
+                    else if (pauseUntil.Value > now + PauseLength) pauseUntil = now + PauseLength; // set back before any tick
+                    if (pauseUntil == null || now >= pauseUntil.Value)
                     {
                         // The pause ended: the schedule restarts now, so no overdue interval clean fires at once.
                         pauseUntil = null;
                         intervalFrom = now;
                     }
-                    else if (pauseUntil.Value > now + PauseLength) pauseUntil = now + PauseLength; // clock set back
                 }
             }
             Raise(Sampled, snap);

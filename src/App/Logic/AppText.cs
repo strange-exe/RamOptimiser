@@ -44,6 +44,13 @@ namespace RamOptimiser.App
         public string Name { get { return Detail == null ? Title : Title + " " + Detail; } }
     }
 
+    /// <summary>The Memory tab bar's decision for one refresh (AppText.NextAutoBar).</summary>
+    public sealed class AutoBarStep
+    {
+        public bool Show, Announce;
+        public string DismissedKey, AnnouncedKind;
+    }
+
     public static partial class AppText
     {
         public const string AppName = "RAM Optimiser";
@@ -683,7 +690,7 @@ namespace RamOptimiser.App
 
         public const string PauseMenuText = "Pause auto-clean for 1 hour";
         public const string ResumeMenuText = "Resume auto-clean";
-        /// <summary>The Settings row's button, beside "Pause automatic cleans"; its accessible name is PauseMenuText.</summary>
+        /// <summary>The Settings row's button, beside "Pause automatic cleans"; PauseRowButtonName gives its accessible name.</summary>
         public const string PauseButtonText = "Pause for 1 hour";
         public const string ResumeButtonText = "Resume";
         public const string ManualStillWorks = "Manual cleans still work.";
@@ -719,6 +726,42 @@ namespace RamOptimiser.App
             if (state == AutoCleanState.NeedsAdmin) return "Auto-clean (paused: needs admin)";
             string paused = state == AutoCleanState.Paused ? PausedLine(st, culture) : null;
             return paused == null ? "Auto-clean" : "Auto-clean (" + char.ToLowerInvariant(paused[0]) + paused.Substring(1) + ")";
+        }
+
+        /// <summary>The Settings pause row's button label.</summary>
+        public static string PauseRowButtonText(bool paused) { return paused ? ResumeButtonText : PauseButtonText; }
+
+        /// <summary>
+        /// Its accessible name, which starts with the visible label (WCAG 2.5.3), so "click Pause for 1 hour" works
+        /// for speech users; the row's own words ("Pause automatic cleans") go in the help text.
+        /// </summary>
+        public static string PauseRowButtonName(bool paused) { return paused ? ResumeMenuText : PauseButtonText; }
+
+        /// <summary>
+        /// The Memory tab bar for one refresh. A dismissal lasts while the same notice stands: once the bar has
+        /// nothing to say, or says something else, it is forgotten, so the next back-off episode shows even at the
+        /// same streak. The sample-error bar takes the slot without forgetting anything. A kind (paused, backoff) is
+        /// read out once when it starts showing, not on every streak step. Pure.
+        /// </summary>
+        /// <summary>Everything a notice shows, so a refresh that would draw the same thing can be skipped. Pure.</summary>
+        public static string RenderKey(AutoNotice n)
+        {
+            if (n == null) return "";
+            return n.Key + "|" + n.Title + "|" + n.Detail + "|" + n.Glyph + "|" + n.Stroke + "|" + n.Resume + "|" + n.Dismiss;
+        }
+
+        public static AutoBarStep NextAutoBar(AutoNotice n, bool errorShown, string dismissedKey, string announcedKind)
+        {
+            string dismissed = n != null && n.Key == dismissedKey ? dismissedKey : null;
+            bool show = n != null && !errorShown && dismissed == null;
+            string kind = n == null ? null : n.Key.Split(':')[0];
+            return new AutoBarStep
+            {
+                Show = show,
+                Announce = show && kind != announcedKind,
+                DismissedKey = dismissed,
+                AnnouncedKind = show ? kind : n == null ? null : announcedKind
+            };
         }
 
         /// <summary>The small line of the Settings pause row.</summary>

@@ -38,5 +38,30 @@ namespace RamOptimiser
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool GetFileInformationByHandle(SafeFileHandle file, out BY_HANDLE_FILE_INFORMATION info);
+
+        public const uint GENERIC_WRITE = 0x40000000, FILE_LIST_DIRECTORY = 0x1, FILE_READ_ATTRIBUTES = 0x80;
+        public const uint FILE_SHARE_READ = 0x1, FILE_SHARE_WRITE = 0x2, FILE_SHARE_DELETE = 0x4;
+        public const uint OPEN_EXISTING = 3, OPEN_ALWAYS = 4;
+        public const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000, FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+        public const uint MOVEFILE_REPLACE_EXISTING = 0x1;
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+        /// <summary>A rename that replaces the target in one step, so the target is never deleted first.</summary>
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool MoveFileExW(string existing, string replacement, uint flags);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, System.Text.StringBuilder path, uint length, uint flags);
+
+        /// <summary>The handle's normalised path with its drive letter ("\\?\C:\..."), or null.</summary>
+        public static string FinalPath(SafeFileHandle h)
+        {
+            var sb = new System.Text.StringBuilder(32768);
+            uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0);
+            return n == 0 || n >= sb.Capacity ? null : sb.ToString();
+        }
     }
 }

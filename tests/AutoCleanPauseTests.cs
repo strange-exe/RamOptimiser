@@ -32,6 +32,9 @@ namespace RamOptimiser.Tests
             StateTests();
             BackoffWordingTests();
             NoticeTests();
+            BarStepTests();
+            LabelInNameTests();
+            ClockBackLateTests();
             return failed;
         }
 
@@ -354,6 +357,71 @@ namespace RamOptimiser.Tests
                 AppText.CooldownText(300, 3), AppText.PauseMenuText, AppText.ResumeMenuText, AppText.PauseButtonText
             };
             foreach (string t in texts) Check("no exclamation: " + t, t != null && t.IndexOf('!') < 0);
+        }
+
+        /// <summary>The bar's per-refresh decision: dismissals last one back-off episode, the error slot wins.</summary>
+        static void BarStepTests()
+        {
+            CultureInfo inv = CultureInfo.InvariantCulture;
+            AppSettings s = new AppSettings { AutoCleanEnabled = true, ThresholdPercent = 85, CooldownSeconds = 300 };
+            AutoNotice back1 = AppText.AutoBar(AutoCleanState.BackingOff, Status(false, 1), s, inv);
+            AutoNotice back2 = AppText.AutoBar(AutoCleanState.BackingOff, Status(false, 2), s, inv);
+            AutoNotice paused = AppText.AutoBar(AutoCleanState.Paused, Status(true, 0), s, inv);
+
+            AutoBarStep first = AppText.NextAutoBar(back1, false, null, null);
+            Check("bar step: a back-off shows and is read out", first.Show && first.Announce && first.AnnouncedKind == "backoff");
+            AutoBarStep dismissed = AppText.NextAutoBar(back1, false, back1.Key, first.AnnouncedKind);
+            Check("bar step: a dismissed back-off stays hidden", !dismissed.Show && dismissed.DismissedKey == back1.Key);
+            AutoBarStep worse = AppText.NextAutoBar(back2, false, dismissed.DismissedKey, dismissed.AnnouncedKind);
+            Check("bar step: a new streak shows again, not read out twice", worse.Show && !worse.Announce && worse.DismissedKey == null);
+
+            // Dismiss at streak 1, load eases (streak 0, nothing to say), a later futile clean makes streak 1 again.
+            AutoBarStep eased = AppText.NextAutoBar(null, false, back1.Key, "backoff");
+            Check("bar step: the episode ending forgets the dismissal", !eased.Show && eased.DismissedKey == null && eased.AnnouncedKind == null);
+            AutoBarStep again = AppText.NextAutoBar(back1, false, eased.DismissedKey, eased.AnnouncedKind);
+            Check("bar step: the next episode shows and is read out", again.Show && again.Announce);
+
+            AutoBarStep errorWins = AppText.NextAutoBar(back1, true, null, "backoff");
+            Check("bar step: the sample error takes the slot", !errorWins.Show && !errorWins.Announce && errorWins.AnnouncedKind == "backoff");
+            AutoBarStep errorKeeps = AppText.NextAutoBar(back1, true, back1.Key, "backoff");
+            Check("bar step: an error does not forget the dismissal", errorKeeps.DismissedKey == back1.Key);
+            AutoBarStep pausedOver = AppText.NextAutoBar(paused, false, back1.Key, "backoff");
+            Check("bar step: a pause over a dismissed back-off shows", pausedOver.Show && pausedOver.Announce
+                && pausedOver.AnnouncedKind == "paused" && pausedOver.DismissedKey == null);
+        }
+
+        /// <summary>WCAG 2.5.3: each auto-clean button's accessible name contains its visible label.</summary>
+        static void LabelInNameTests()
+        {
+            foreach (bool paused in new[] { false, true })
+            {
+                string label = AppText.PauseRowButtonText(paused), name = AppText.PauseRowButtonName(paused);
+                Check("label in name: pause row (paused " + paused + ")", name.StartsWith(label, StringComparison.Ordinal), label + " / " + name);
+            }
+        }
+
+        /// <summary>The clock set back late in a pause keeps the time that was left, never a fresh hour.</summary>
+        static void ClockBackLateTests()
+        {
+            using (var rig = new Rig(Threshold85()))
+            {
+                rig.Load = 95;
+                rig.Svc.Pause(Hour);
+                rig.Now = T0 + TimeSpan.FromMinutes(59);
+                rig.Svc.RunTick();
+                rig.Now = rig.Now - TimeSpan.FromDays(1);
+                rig.Svc.RunTick();
+                AutoCleanStatus st = rig.Svc.GetStatus();
+                Check("pause: clock set back at 59 min keeps 1 minute", st.Paused && st.PausedUntilUtc == rig.Now + TimeSpan.FromMinutes(1),
+                    st.PausedUntilUtc + " vs " + (rig.Now + TimeSpan.FromMinutes(1)));
+                rig.Now = rig.Now + TimeSpan.FromMinutes(1);
+                rig.Svc.RunTick();
+                Check("pause: and then ends on time", !rig.Svc.GetStatus().Paused && rig.Cleans == 1, rig.Cleans + " cleans");
+            }
+            DateTime last = T0 + TimeSpan.FromMinutes(30), back = T0 - TimeSpan.FromDays(1);
+            Check("pause: clock back pure, time left kept", AutoCleanService.PauseAfterClockBack(T0 + Hour, last, back) == back + TimeSpan.FromMinutes(30));
+            Check("pause: clock back pure, ended pause stays ended", AutoCleanService.PauseAfterClockBack(T0, last, back) == null);
+            Check("pause: clock back pure, capped at an hour", AutoCleanService.PauseAfterClockBack(T0 + TimeSpan.FromDays(2), last, back) == back + Hour);
         }
 
         static bool Throws<T>(Action a) where T : Exception

@@ -451,6 +451,18 @@ namespace RamOptimiser
         internal static void StopPlanned(List<ServiceAction> plan, Func<string, int> stopOne, Func<string, TimeSpan, bool> waitStopped,
             CancellationToken cancel, Action<string> accepted)
         {
+            Stopwatch clock = Stopwatch.StartNew();
+            StopPlanned(plan, stopOne, waitStopped, cancel, accepted, () => clock.Elapsed);
+        }
+
+        /// <summary>
+        /// As above, with the monotonic clock the wait is measured on. A real wait overruns its slice
+        /// (ServiceController.WaitForStatus sleeps 250 ms after a check that misses), so the time that passed counts,
+        /// not the slices asked for, and the last slice is cut to what is left of StopTimeout.
+        /// </summary>
+        internal static void StopPlanned(List<ServiceAction> plan, Func<string, int> stopOne, Func<string, TimeSpan, bool> waitStopped,
+            CancellationToken cancel, Action<string> accepted, Func<TimeSpan> elapsed)
+        {
             foreach (ServiceAction a in plan)
             {
                 if (a.Message != null) continue;
@@ -464,12 +476,14 @@ namespace RamOptimiser
                 accepted(a.Name);
                 try
                 {
-                    TimeSpan waited = TimeSpan.Zero;
+                    TimeSpan start = elapsed();
                     while (true)
                     {
-                        if (waitStopped(a.Name, StopSlice)) { a.Stopped = true; break; }
-                        waited += StopSlice;
-                        if (waited >= StopTimeout) { a.Failed = true; a.Message = "still stopping after " + StopTimeout.TotalSeconds + " s"; break; }
+                        TimeSpan left = StopTimeout - (elapsed() - start);
+                        TimeSpan slice = left < StopSlice ? left : StopSlice;
+                        if (slice < TimeSpan.Zero) slice = TimeSpan.Zero;
+                        if (waitStopped(a.Name, slice)) { a.Stopped = true; break; }
+                        if (elapsed() - start >= StopTimeout) { a.Failed = true; a.Message = "still stopping after " + StopTimeout.TotalSeconds + " s"; break; }
                         if (cancel.IsCancellationRequested) { a.Failed = true; a.Message = "still stopping; clean was stopped"; break; }
                     }
                 }

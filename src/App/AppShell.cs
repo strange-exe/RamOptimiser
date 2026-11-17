@@ -108,12 +108,14 @@ namespace RamOptimiser.App
         /// <summary>The service's pause, back-off and hold as last read (null before the service exists).</summary>
         AutoCleanStatus autoInfo;
         AutoNotice barNotice;
-        /// <summary>The back-off message the user dismissed; it comes back when the streak changes.</summary>
+        /// <summary>The back-off message the user dismissed; AppText.NextAutoBar forgets it once that message goes.</summary>
         string dismissedBarKey;
         /// <summary>The kind of bar last read out (paused, backoff), so a streak step or a tick is not announced again.</summary>
         string announcedBarKind;
         bool barShown;
         int barGeneration;
+        /// <summary>What the auto-clean card, bar and Settings rows last showed: a sample that changes none is skipped.</summary>
+        string autoRenderKey;
         /// <summary>What the tray last showed for auto-clean, so the menu is rebuilt only when it changes.</summary>
         string trayAutoKey;
 
@@ -1260,8 +1262,9 @@ namespace RamOptimiser.App
         void RenderSample(MemorySnapshot s, bool animate)
         {
             viewStale = false;
+            bool hadError = sampleError.Visibility == Visibility.Visible;
             sampleError.Visibility = Visibility.Collapsed;
-            ShowAutoBar(); // the slot is free again
+            if (hadError) ShowAutoBar(); // the slot is free again (RefreshAutoRow draws the bar on other samples)
             // The admin line stays one short line; its longer reason is the link's help text (not while prompting).
             if (elevationState != ElevationState.Prompting)
                 AutomationProperties.SetHelpText(restartButton, AppText.ElevationNotice(s.HasLists));
@@ -1969,15 +1972,26 @@ namespace RamOptimiser.App
         /// </summary>
         void RefreshAutoRow()
         {
-            autoDescription.Text = AppText.Sentence(AppText.AutoDescription(settings));
             autoInfo = service == null ? null : service.GetStatus();
             AutoCleanState state = AppText.AutoState(settings.AutoCleanEnabled, elevated, autoInfo);
             CultureInfo culture = CultureInfo.CurrentCulture;
-            ShowAutoCard(AppText.AutoCard(state, autoInfo, settings, DateTime.UtcNow, culture));
+            string description = AppText.Sentence(AppText.AutoDescription(settings));
+            AutoNotice card = AppText.AutoCard(state, autoInfo, settings, DateTime.UtcNow, culture);
             barNotice = AppText.AutoBar(state, autoInfo, settings, culture);
-            ShowAutoBar();
-            ShowPauseRow(state, culture);
-            cooldownText.Text = AppText.Sentence(AppText.CooldownText(settings.CooldownSeconds, Streak));
+            string pauseNote = AppText.PauseNote(autoInfo, culture);
+            string cooldown = AppText.Sentence(AppText.CooldownText(settings.CooldownSeconds, Streak));
+            // Runs on every 2-second sample, tray-hidden too: the visual tree is touched only when something it shows changed.
+            string renderKey = state + "#" + description + "#" + AppText.RenderKey(card) + "#" + AppText.RenderKey(barNotice)
+                + "#" + pauseNote + "#" + cooldown;
+            if (renderKey != autoRenderKey)
+            {
+                autoRenderKey = renderKey;
+                autoDescription.Text = description;
+                ShowAutoCard(card);
+                ShowAutoBar();
+                ShowPauseRow(state, pauseNote);
+                cooldownText.Text = cooldown;
+            }
             string trayKey = state + "|" + AppText.TrayAutoLabel(state, autoInfo, culture);
             if (trayKey != trayAutoKey) UpdateTray();
             PersistPause();
@@ -1993,6 +2007,8 @@ namespace RamOptimiser.App
             if (n != null)
             {
                 autoStatusText.Text = n.Title;
+                // Both back-off sentences in one name, so a screen reader that lands on the line hears the advice too.
+                AutomationProperties.SetName(autoStatusLine, n.Name);
                 autoStatusDetail.Text = n.Detail ?? "";
                 autoStatusDetail.Visibility = n.Detail == null ? Visibility.Collapsed : Visibility.Visible;
                 SetGlyph(autoStatusGlyph, n);
@@ -2019,11 +2035,12 @@ namespace RamOptimiser.App
         void ShowAutoBar()
         {
             AutoNotice n = barNotice;
-            bool show = n != null && sampleError.Visibility != Visibility.Visible && n.Key != dismissedBarKey;
+            AutoBarStep step = AppText.NextAutoBar(n, sampleError.Visibility == Visibility.Visible, dismissedBarKey, announcedBarKind);
+            dismissedBarKey = step.DismissedKey;
+            announcedBarKind = step.AnnouncedKind;
             var drop = (TranslateTransform)autoBar.RenderTransform;
-            if (!show)
+            if (!step.Show)
             {
-                if (n == null) announcedBarKind = null;
                 if (!barShown) return;
                 barShown = false;
                 bool hadFocus = autoBar.IsKeyboardFocusWithin;
@@ -2039,12 +2056,19 @@ namespace RamOptimiser.App
             autoBarDetail.Text = n.Detail ?? "";
             autoBarDetail.Visibility = n.Detail == null ? Visibility.Collapsed : Visibility.Visible;
             SetGlyph(autoBarGlyph, n);
+            // The bar can change in place (Resume ends a pause while a back-off stands): focus on a button that goes
+            // moves to the one that stays, or to the switch, never back to the window.
+            bool lostFocus = (autoBarResume.IsKeyboardFocused && !n.Resume) || (autoBarDismiss.IsKeyboardFocused && !n.Dismiss);
             autoBarResume.Visibility = n.Resume ? Visibility.Visible : Visibility.Collapsed;
             autoBarDismiss.Visibility = n.Dismiss ? Visibility.Visible : Visibility.Collapsed;
+            if (lostFocus)
+            {
+                if (n.Resume) autoBarResume.Focus();
+                else if (n.Dismiss) autoBarDismiss.Focus();
+                else autoSwitch.Focus();
+            }
             AutomationProperties.SetName(autoBar, n.Name);
-            string kind = n.Key.Split(':')[0];
-            bool announce = kind != announcedBarKind;
-            announcedBarKind = kind;
+            bool announce = step.Announce;
             if (!barShown)
             {
                 barShown = true;
@@ -2063,14 +2087,14 @@ namespace RamOptimiser.App
         }
 
         /// <summary>Settings: Pause for 1 hour, or the pause's end and Resume, on one button so focus stays put.</summary>
-        void ShowPauseRow(AutoCleanState state, CultureInfo culture)
+        void ShowPauseRow(AutoCleanState state, string note)
         {
             bool paused = state == AutoCleanState.Paused;
             pauseRow.Visibility = paused || AppText.CanPause(state) ? Visibility.Visible : Visibility.Collapsed;
-            pauseNote.Text = AppText.PauseNote(autoInfo, culture);
-            pauseButton.Content = paused ? AppText.ResumeButtonText : AppText.PauseButtonText;
-            AutomationProperties.SetName(pauseButton, paused ? AppText.ResumeMenuText : AppText.PauseMenuText);
-            AutomationProperties.SetHelpText(pauseButton, pauseNote.Text);
+            pauseNote.Text = note;
+            pauseButton.Content = AppText.PauseRowButtonText(paused);
+            AutomationProperties.SetName(pauseButton, AppText.PauseRowButtonName(paused));
+            AutomationProperties.SetHelpText(pauseButton, "Pause automatic cleans. " + note);
         }
 
         void SyncSettingsUi(bool includeThreshold)

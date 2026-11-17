@@ -251,6 +251,33 @@ namespace RamOptimiser.Tests
             int callerThread = Thread.CurrentThread.ManagedThreadId, flushThread = -1;
             Cleaner.FlushVolumes(vol, Drives("C:"), l => { flushThread = Thread.CurrentThread.ManagedThreadId; return 0; });
             Check("volumes: the old overload flushes inline", vol.Outcome == AreaOutcome.Ok && flushThread == callerThread);
+
+            // A drive still hung from an earlier clean gets no second thread (each holds a volume handle).
+            using (var hang = new ManualResetEvent(false))
+            {
+                int starts = 0;
+                Func<string, int> blocked = l => { Interlocked.Increment(ref starts); hang.WaitOne(); return 0; };
+                var v1 = new AreaResult { Area = Areas.VolumeCache };
+                var v2 = new AreaResult { Area = Areas.VolumeCache };
+                Cleaner.FlushVolumes(v1, Drives("Q:"), blocked, () => CleanStop.None, () => TimeSpan.FromMilliseconds(50));
+                Cleaner.FlushVolumes(v2, Drives("Q:"), blocked, () => CleanStop.None, () => TimeSpan.FromMilliseconds(50));
+                Thread.Sleep(50); // a second worker, if one were started, would have counted by now
+                Check("volumes: a hung drive is not flushed again by the next clean", Volatile.Read(ref starts) == 1
+                    && v2.Message != null && v2.Message.Contains("Q: still writing from an earlier clean"), starts + " starts; " + v2.Message);
+                hang.Set();
+                Stopwatch wait = Stopwatch.StartNew();
+                while (Cleaner.FlushStillRunning("Q:") && wait.Elapsed < TimeSpan.FromSeconds(5)) Thread.Sleep(10);
+                var v3 = new AreaResult { Area = Areas.VolumeCache };
+                Cleaner.FlushVolumes(v3, Drives("Q:"), l => 0, () => CleanStop.None, () => TimeSpan.FromSeconds(5));
+                Check("volumes: once the old flush ends the drive is flushed again", v3.Outcome == AreaOutcome.Ok, v3.Outcome + " " + v3.Message);
+            }
+
+            // The deadline passing between the stop check and the limit: no thread started for a zero wait.
+            bool called = false;
+            vol = new AreaResult { Area = Areas.VolumeCache };
+            Cleaner.FlushVolumes(vol, Drives("C:"), l => { called = true; return 0; }, () => CleanStop.None, () => TimeSpan.Zero);
+            Check("volumes: no time left means not flushed, not a hang", !called && vol.Outcome != AreaOutcome.Failed && vol.Message != null
+                && vol.Message.Contains("C: not flushed: time limit reached") && !vol.Message.Contains("still writing"), vol.Outcome + " " + vol.Message);
         }
 
         // ---------------------------------------------------------------- services
@@ -284,12 +311,31 @@ namespace RamOptimiser.Tests
             Check("services: waits in short slices", slice == ServiceTrimmer.StopSlice && ServiceTrimmer.StopSlice == TimeSpan.FromMilliseconds(250), slice.ToString());
 
             // With no cancel, the slices add up to the old 10 s wait and its message.
+            // A fake clock: each wait takes exactly the slice it was given.
             plan = new List<ServiceAction> { new ServiceAction { Name = "A", Label = "Alpha" } };
             int waits = 0;
+            TimeSpan fake = TimeSpan.Zero;
             accepted.Clear();
-            ServiceTrimmer.StopPlanned(plan, n => 0, (n, t) => { waits++; return false; }, CancellationToken.None, accepted.Add);
+            ServiceTrimmer.StopPlanned(plan, n => 0, (n, t) => { waits++; fake += t; return false; }, CancellationToken.None, accepted.Add,
+                () => fake);
             Check("services: a slow stop still times out at 10 s", plan[0].Failed && plan[0].Message == "still stopping after 10 s"
                 && waits == 40 && accepted.Count == 1, waits + " waits; " + plan[0].Message);
+
+            // Each real wait overruns its slice (WaitForStatus sleeps 250 ms after its check): the time that passed
+            // counts, not the slices asked for, so the whole wait stays near 10 s instead of 20 s.
+            plan = new List<ServiceAction> { new ServiceAction { Name = "A", Label = "Alpha" } };
+            waits = 0;
+            fake = TimeSpan.Zero;
+            TimeSpan longest = TimeSpan.Zero;
+            ServiceTrimmer.StopPlanned(plan, n => 0, (n, t) =>
+            {
+                waits++;
+                if (t > longest) longest = t;
+                fake += t + t;
+                return false;
+            }, CancellationToken.None, n => { }, () => fake);
+            Check("services: the stop wait counts real time, not slices", plan[0].Failed && fake <= ServiceTrimmer.StopTimeout + TimeSpan.FromMilliseconds(500)
+                && waits <= 21 && longest <= ServiceTrimmer.StopSlice, waits + " waits, " + fake + " taken");
 
             // A refused stop is not recorded as stopped.
             plan = new List<ServiceAction> { new ServiceAction { Name = "A", Label = "Alpha" } };
@@ -392,6 +438,21 @@ namespace RamOptimiser.Tests
             bool ok = true;
             try { twice.Dispose(); twice.Dispose(); } catch (Exception) { ok = false; }
             Check("lock: dispose twice is harmless", ok);
+
+            // The real descriptor: owned by Administrators, full control for Administrators and SYSTEM only.
+            MutexSecurity real = CleanLock.AdminOnly();
+            IdentityReference owner = real.GetOwner(typeof(SecurityIdentifier));
+            Check("lock: the real lock is owned by Administrators", owner != null && owner.Value == sidAdmins, owner == null ? "null" : owner.Value);
+            var allowed = new List<string>();
+            bool onlyFullAllow = true;
+            foreach (MutexAccessRule rule in real.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+            {
+                if (rule.AccessControlType != AccessControlType.Allow || rule.MutexRights != MutexRights.FullControl) onlyFullAllow = false;
+                allowed.Add(rule.IdentityReference.Value);
+            }
+            allowed.Sort(StringComparer.Ordinal);
+            Check("lock: only Administrators and SYSTEM may open the real lock", onlyFullAllow
+                && string.Join(",", allowed.ToArray()) == sidSystem + "," + sidAdmins, string.Join(",", allowed.ToArray()));
         }
 
         // ---------------------------------------------------------------- the lock inside a clean
@@ -527,6 +588,21 @@ namespace RamOptimiser.Tests
             Check("cli: the first Ctrl+C stops the clean and keeps the process", firstKeep && cts.IsCancellationRequested
                 && said.ToString().TrimEnd() == "Stopping after the current step...", said.ToString());
             Check("cli: a second Ctrl+C ends the process", !secondKeep);
+
+            // Watch waiting between checks: Ctrl+C ends the wait without claiming a step is running.
+            var idle = new CancellationTokenSource();
+            var idleSaid = new StringWriter();
+            bool idleKeep = Program.OnCancelKey(idle, idleSaid, () => false);
+            Check("cli: Ctrl+C while idle stops without the step line", idleKeep && idle.IsCancellationRequested && idleSaid.ToString() == "", idleSaid.ToString());
+            var busyCts = new CancellationTokenSource();
+            var busySaid = new StringWriter();
+            Program.OnCancelKey(busyCts, busySaid, () => true);
+            Check("cli: Ctrl+C during a watch clean says it stops after the step", busySaid.ToString().TrimEnd() == "Stopping after the current step...", busySaid.ToString());
+
+            // One area: singular, as AppText.StoppedCleanLine says it.
+            var single = new CleanReport { Before = Snap(81), After = Snap(80), Stopped = CleanStop.TimedOut, Deadline = TimeSpan.FromSeconds(30) };
+            single.Results.Add(new AreaResult { Area = Areas.VolumeCache, Ok = true, Partial = true, Message = "flushed 1 of 2 drives; D: not flushed: time limit reached" });
+            Check("cli: time-limit line for one area is singular", Program.StopLine(single) == "Hit the 30 s limit after 1 of 1 area.", Program.StopLine(single));
 
             string help = Program.HelpText();
             Check("help: documents --timeout", help.Contains("--timeout S"));
