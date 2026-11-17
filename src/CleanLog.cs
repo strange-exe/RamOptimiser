@@ -159,6 +159,31 @@ namespace RamOptimiser
             }
         }
 
+        /// <summary>The "stopped" value: none, cancelled, timed-out or busy.</summary>
+        public static string StopName(CleanStop s)
+        {
+            switch (s)
+            {
+                case CleanStop.Cancelled: return "cancelled";
+                case CleanStop.TimedOut: return "timed-out";
+                case CleanStop.Busy: return "busy";
+                default: return "none";
+            }
+        }
+
+        /// <summary>The "advice" value in --json output: commit-bound, will-help, mixed, not-needed or none.</summary>
+        public static string AdviceName(CleanAdvice a)
+        {
+            switch (a)
+            {
+                case CleanAdvice.CommitBound: return "commit-bound";
+                case CleanAdvice.WillHelp: return "will-help";
+                case CleanAdvice.Mixed: return "mixed";
+                case CleanAdvice.NotNeeded: return "not-needed";
+                default: return "none";
+            }
+        }
+
         internal static string OutcomeName(AreaOutcome o)
         {
             switch (o)
@@ -181,7 +206,8 @@ namespace RamOptimiser
             return t <= TimeSpan.Zero ? 0 : (long)Math.Round(t.TotalMilliseconds, MidpointRounding.AwayFromZero);
         }
 
-        static string Time(DateTime utc)
+        /// <summary>A record's "time": UTC to the second, "2026-11-17T14:32:05Z".</summary>
+        internal static string Time(DateTime utc)
         {
             DateTime u = utc.Kind == DateTimeKind.Local ? utc.ToUniversalTime() : utc;
             return u.ToString("yyyy'-'MM'-'dd'T'HH':'mm':'ss'Z'", CultureInfo.InvariantCulture);

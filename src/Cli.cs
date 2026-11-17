@@ -20,6 +20,10 @@ namespace RamOptimiser
         public bool DryRun;
         /// <summary>clean and watch --timeout: each clean stops after this many seconds; 0 means no limit.</summary>
         public int TimeoutSeconds;
+        /// <summary>--json: machine-readable output on stdout (status, clean, clean --dry-run, watch); errors stay text on stderr.</summary>
+        public bool Json;
+        /// <summary>clean and watch --no-log: do not add cleans to the clean log.</summary>
+        public bool NoLog;
 
         public static Options Parse(string[] args)
         {
@@ -30,14 +34,21 @@ namespace RamOptimiser
                 case "status": o.Command = Command.Status; break;
                 case "clean": o.Command = Command.Clean; break;
                 case "watch": o.Command = Command.Watch; break;
-                case "help": case "-h": case "--help": case "/?": o.Command = Command.Help; return o;
+                case "help": case "-h": case "--help": case "/?":
+                    if (args.Length > 1) throw new ArgumentException("'help' takes no options.");
+                    o.Command = Command.Help;
+                    return o;
                 default: throw new ArgumentException("Unknown command '" + args[0] + "'.");
             }
+            bool onlyJson = true;
             for (int i = 1; i < args.Length; i++)
             {
                 string a = args[i].ToLowerInvariant();
+                if (a != "--json") onlyJson = false;
                 switch (a)
                 {
+                    case "--json": o.Json = true; break;
+                    case "--no-log": o.NoLog = true; break;
                     case "--areas": o.Areas = AreaNames.Parse(Value(args, ref i)); break;
                     case "--all": o.Areas = Areas.All; break;
                     case "--threshold": o.ThresholdPercent = Int(args, ref i, 1, 100); break;
@@ -50,8 +61,10 @@ namespace RamOptimiser
             }
             if (o.DryRun && o.Command != Command.Clean)
                 throw new ArgumentException("--dry-run works only with 'clean'.");
-            if (o.Command == Command.Status && args.Length > 1)
-                throw new ArgumentException("'status' takes no options.");
+            if (o.NoLog && o.Command != Command.Clean && o.Command != Command.Watch)
+                throw new ArgumentException("--no-log works only with 'clean' and 'watch'.");
+            if (o.Command == Command.Status && !onlyJson)
+                throw new ArgumentException("'status' takes no options other than --json.");
             return o;
         }
 
@@ -91,6 +104,76 @@ namespace RamOptimiser
         }
     }
 
+    /// <summary>
+    /// Builds each clean's log record and appends it to the clean log unless logging is off (--no-log). Write is the
+    /// CleanRequest.UnderLock step, so a record is appended while the clean lock is still held and appends from
+    /// ramopt and the app never interleave; Finish covers a clean whose UnderLock did not run (a busy one, which never
+    /// took the lock). Never throws: a failed append leaves the clean as it was, and TakeWarning says so once.
+    /// </summary>
+    public sealed class CleanRecorder
+    {
+        public const string CliSource = "cli", WatchSource = "watch";
+        public const string LogFailedNote = "note: could not add this clean to the clean log.";
+
+        readonly string source;
+        readonly bool log;
+        readonly Func<string, bool> append;
+        readonly Func<DateTime> utcNow;
+        CleanReport recorded;
+        string line;
+        bool failed, warned;
+
+        /// <summary>Why the next clean runs: manual, threshold, interval or low-memory.</summary>
+        public string Reason = "manual";
+
+        /// <summary>append gets one record without its line break and says whether it was written; unused when log is false.</summary>
+        public CleanRecorder(string source, bool log, Func<string, bool> append, Func<DateTime> utcNow)
+        {
+            this.source = source;
+            this.log = log && append != null;
+            this.append = append;
+            this.utcNow = utcNow;
+        }
+
+        /// <summary>The real recorder: CleanLog.TryAppend into the data folder (none for an account without one).</summary>
+        public static CleanRecorder ForLog(string source, bool log)
+        {
+            return new CleanRecorder(source, log, l => CleanLog.TryAppend(AppPaths.DataFolder, l), () => DateTime.UtcNow);
+        }
+
+        /// <summary>The last clean's record, or null before the first.</summary>
+        public string Line { get { return line; } }
+
+        /// <summary>Records this clean (once): builds its record and appends it when logging is on.</summary>
+        public void Write(CleanReport r)
+        {
+            if (r == null || ReferenceEquals(r, recorded)) return;
+            recorded = r;
+            line = null;
+            try
+            {
+                line = CleanLog.FormatClean(r, source, Reason, CleanLog.StopName(r.Stopped), CleanLog.NewId(), utcNow());
+                if (log && !append(line)) failed = true;
+            }
+            catch (Exception) { failed = true; }
+        }
+
+        /// <summary>Records the clean if Write has not already, and returns its record (null if it could not be built).</summary>
+        public string Finish(CleanReport r)
+        {
+            Write(r);
+            return line;
+        }
+
+        /// <summary>LogFailedNote the first time an append has failed, then null, so a long watch says it once.</summary>
+        public string TakeWarning()
+        {
+            if (!failed || warned) return null;
+            warned = true;
+            return LogFailedNote;
+        }
+    }
+
     /// <summary>The watch loop. Its sampler, cleaner, clocks and wait are fields, so tests can drive it.</summary>
     public sealed class Watcher
     {
@@ -113,6 +196,11 @@ namespace RamOptimiser
         /// Null falls back to WaitStop, which never reports a low wake.
         /// </summary>
         public Func<TimeSpan, bool, WakeReason> Wait;
+        /// <summary>
+        /// Records each clean (source watch). Null: nothing is logged, and --json builds its records without one. A
+        /// Clean that wires Recorder.Write as its UnderLock gets its record appended under the clean lock.
+        /// </summary>
+        public CleanRecorder Recorder;
 
         WakeReason DoWait(TimeSpan interval, bool includeLow)
         {
@@ -124,10 +212,13 @@ namespace RamOptimiser
         /// Samples, cleans when AutoCleanPolicy says so, and waits, until the wait says stop (ExitOk). The wait also
         /// ends early on Windows' low-memory signal when WatchSchedule allows it; the clean decision is unchanged. A
         /// failed sample or clean is logged with a timestamp and watching goes on; MaxConsecutiveErrors failed
-        /// iterations, or failed cleans, in a row end it (ExitWatchFailed).
+        /// iterations, or failed cleans, in a row end it (ExitWatchFailed). With --json, stdout gets one record per
+        /// clean (busy turns included) and the other lines go to errors.
         /// </summary>
         public int Run(Options o, TextWriter output, TextWriter errors)
         {
+            TextWriter info = Program.InfoWriter(o, output, errors);
+            CleanRecorder recorder = Recorder ?? new CleanRecorder(CleanRecorder.WatchSource, false, null, () => DateTime.UtcNow);
             TimeSpan? last = null;
             TimeSpan cooldown = TimeSpan.FromSeconds(o.CooldownSeconds);
             TimeSpan interval = TimeSpan.FromSeconds(o.IntervalSeconds);
@@ -145,26 +236,32 @@ namespace RamOptimiser
                     if (AutoCleanPolicy.ShouldClean(s.LoadPercent, o.ThresholdPercent, last, now,
                         AutoCleanPolicy.ThresholdCooldown(cooldown, interval, futileStreak)))
                     {
-                        output.WriteLine("[{0:HH:mm:ss}] load {1}% >= {2}%: cleaning", Now(), s.LoadPercent, o.ThresholdPercent);
+                        info.WriteLine("[{0:HH:mm:ss}] load {1}% >= {2}%: cleaning", Now(), s.LoadPercent, o.ThresholdPercent);
                         // Recorded before cleaning, so a clean that keeps failing still waits the cooldown.
                         last = now;
                         cleaning = true;
+                        recorder.Reason = wake == WakeReason.LowMemory ? "low-memory" : "threshold";
                         CleanReport report = Clean(o.Areas);
                         cleaning = false;
+                        string record = recorder.Finish(report);
+                        string warning = recorder.TakeWarning();
+                        if (warning != null) errors.WriteLine(warning);
+                        if (o.Json && record != null) output.WriteLine(record);
                         if (report.Stopped == CleanStop.Busy)
                         {
                             // Another clean (ramopt or the app) was running. Not an error, and not futile: before
                             // equals after only because nothing ran, so it must not double the wait.
-                            output.WriteLine("[{0:HH:mm:ss}] another clean is running: skipped this one", Now());
+                            info.WriteLine("[{0:HH:mm:ss}] another clean is running: skipped this one", Now());
                         }
                         else
                         {
                             // Only a clean that ran counts for the low signal: a failed one must not be retried at once.
                             cleanedThisTick = true;
                             failedCleans = 0;
-                            Program.PrintReport(output, report);
+                            if (!o.Json) Program.PrintReport(output, report);
+                            else if (report.LockNote != null) info.WriteLine("note: " + report.LockNote);
                             if (CleanEstimate.Advise(s) == CleanAdvice.CommitBound)
-                                output.WriteLine("  note: committed memory is {0}% of the limit; cleaning does not lower it. Close programs you are not using.",
+                                info.WriteLine("  note: committed memory is {0}% of the limit; cleaning does not lower it. Close programs you are not using.",
                                     s.CommitPercent);
                             futileStreak = AutoCleanPolicy.NextStreak(futileStreak, report.After.LoadPercent, o.ThresholdPercent);
                         }
@@ -193,9 +290,9 @@ namespace RamOptimiser
                 wake = DoWait(interval, includeLow);
                 if (wake == WakeReason.Stop) break;
                 if (wake == WakeReason.LowMemory)
-                    output.WriteLine("[{0:HH:mm:ss}] Windows reports low memory: checking now", Now());
+                    info.WriteLine("[{0:HH:mm:ss}] Windows reports low memory: checking now", Now());
             }
-            output.WriteLine("Stopped.");
+            info.WriteLine("Stopped.");
             return Program.ExitOk;
         }
     }
@@ -231,16 +328,38 @@ namespace RamOptimiser
         internal static int Dispatch(Options o, TextWriter output, Func<MemorySnapshot> sample, Func<Areas, int> runClean,
             Func<Options, int> runWatch)
         {
+            return Dispatch(o, output, sample, runClean, runWatch, () => DateTime.UtcNow);
+        }
+
+        /// <summary>As above, with the clock for --json status passed in.</summary>
+        internal static int Dispatch(Options o, TextWriter output, Func<MemorySnapshot> sample, Func<Areas, int> runClean,
+            Func<Options, int> runWatch, Func<DateTime> utcNow)
+        {
             switch (o.Command)
             {
-                case Command.Status: PrintStatus(output, sample()); return ExitOk;
+                case Command.Status:
+                    if (o.Json) output.WriteLine(StatusJson(sample(), utcNow()));
+                    else PrintStatus(output, sample());
+                    return ExitOk;
                 case Command.Clean:
-                    // Before the elevation check: a dry run only reads, needs no admin and never reaches the cleaner.
-                    if (o.DryRun) { PrintDryRun(output, sample(), o.Areas); return ExitOk; }
+                    // Before the elevation check: a dry run only reads, needs no admin, never reaches the cleaner and
+                    // never writes the clean log.
+                    if (o.DryRun)
+                    {
+                        if (o.Json) output.WriteLine(DryRunJson(sample(), o.Areas));
+                        else PrintDryRun(output, sample(), o.Areas);
+                        return ExitOk;
+                    }
                     return runClean(o.Areas);
                 case Command.Watch: return runWatch(o);
                 default: PrintHelp(); return ExitOk;
             }
+        }
+
+        /// <summary>Where progress and notes go: stdout, or stderr with --json so stdout carries only JSON.</summary>
+        internal static TextWriter InfoWriter(Options o, TextWriter output, TextWriter errors)
+        {
+            return o.Json ? errors : output;
         }
 
         private static int RunClean(Options o)
@@ -252,12 +371,37 @@ namespace RamOptimiser
             }
             // Not disposed: the Ctrl+C handler runs on a thread of its own and may still touch it as the clean ends.
             var cancel = new CancellationTokenSource();
-            ConsoleCancelEventHandler onKey = (s, e) => { e.Cancel = OnCancelKey(cancel, Console.Out); };
+            TextWriter info = InfoWriter(o, Console.Out, Console.Error);
+            ConsoleCancelEventHandler onKey = (s, e) => { e.Cancel = OnCancelKey(cancel, info); };
             Console.CancelKeyPress += onKey;
-            CleanReport report;
-            try { report = Cleaner.Clean(RequestFor(o, o.Areas, cancel.Token, CliLockWait)); }
+            try
+            {
+                return CleanOnce(o, cancel.Token, Cleaner.Clean, CleanRecorder.ForLog(CleanRecorder.CliSource, !o.NoLog),
+                    Console.Out, Console.Error);
+            }
             finally { Console.CancelKeyPress -= onKey; }
-            return ReportClean(report, Console.Out, Console.Error);
+        }
+
+        /// <summary>
+        /// One ramopt clean with the cleaner and recorder passed in: the record is written under the clean lock (or
+        /// after a busy clean, which never took it), then the text report or, with --json, the record alone is
+        /// printed. Returns ramopt clean's exit code.
+        /// </summary>
+        internal static int CleanOnce(Options o, CancellationToken cancel, Func<CleanRequest, CleanReport> clean, CleanRecorder recorder,
+            TextWriter output, TextWriter errors)
+        {
+            CleanRequest req = RequestFor(o, o.Areas, cancel, CliLockWait);
+            recorder.Reason = "manual";
+            req.UnderLock = recorder.Write;
+            CleanReport report = clean(req);
+            string record = recorder.Finish(report);
+            string warning = recorder.TakeWarning();
+            if (warning != null) errors.WriteLine(warning);
+            if (!o.Json) return ReportClean(report, output, errors);
+            if (record != null) output.WriteLine(record);
+            if (report.Stopped == CleanStop.Busy) errors.WriteLine(BusyMessage);
+            else if (report.LockNote != null) errors.WriteLine("note: " + report.LockNote);
+            return ExitCodeFor(report);
         }
 
         /// <summary>
@@ -350,21 +494,30 @@ namespace RamOptimiser
             var cancel = new CancellationTokenSource();
             WaitHandle stop = cancel.Token.WaitHandle;
             int inClean = 0; // 1 while a clean runs, read by the Ctrl+C handler on its own thread
-            Console.CancelKeyPress += (s, e) => { e.Cancel = OnCancelKey(cancel, Console.Out, () => Volatile.Read(ref inClean) == 1); };
-            Console.WriteLine("Watching memory: clean when load >= {0}%, check every {1}s, wait {2}s between cleans. Ctrl+C stops.",
+            TextWriter info = InfoWriter(o, Console.Out, Console.Error);
+            Console.CancelKeyPress += (s, e) => { e.Cancel = OnCancelKey(cancel, info, () => Volatile.Read(ref inClean) == 1); };
+            info.WriteLine("Watching memory: clean when load >= {0}%, check every {1}s, wait {2}s between cleans. Ctrl+C stops.",
                 o.ThresholdPercent, o.IntervalSeconds, o.CooldownSeconds);
             Stopwatch clock = Stopwatch.StartNew();
             // Windows' low-memory signal can end a wait early; the interval poll stays, because the signal fires at
             // a fixed kernel level, not at --threshold. Null when the signal is unavailable.
             WaitHandle low = MemoryPressure.LowWaitHandle();
-            // No lock wait: a clean that finds another one running skips this turn and tries again later.
+            // No lock wait: a clean that finds another one running skips this turn and tries again later. Each clean's
+            // record is appended under the clean lock, unless --no-log.
+            CleanRecorder recorder = CleanRecorder.ForLog(CleanRecorder.WatchSource, !o.NoLog);
             var watch = new Watcher
             {
                 Elapsed = () => clock.Elapsed,
+                Recorder = recorder,
                 Clean = areas =>
                 {
                     Volatile.Write(ref inClean, 1);
-                    try { return Cleaner.Clean(RequestFor(o, areas, cancel.Token, TimeSpan.Zero)); }
+                    try
+                    {
+                        CleanRequest req = RequestFor(o, areas, cancel.Token, TimeSpan.Zero);
+                        req.UnderLock = recorder.Write;
+                        return Cleaner.Clean(req);
+                    }
                     finally { Volatile.Write(ref inClean, 0); }
                 }
             };
@@ -400,6 +553,91 @@ namespace RamOptimiser
                 w.WriteLine("  Committed      {0} of {1} ({2}% of the limit; cleaning does not lower this)",
                     Format.Bytes(s.CommitTotal), Format.Bytes(s.CommitLimit), s.CommitPercent);
             w.WriteLine("  Windows says   {0}", ConditionText(s.Condition));
+        }
+
+        /// <summary>
+        /// status --json: one object (v1, documented in the README). "lists" is null without the page-list figures
+        /// (they need admin), "commit" null when Windows gave no commit figures. Bytes throughout, except
+        /// repurposedByPriority: Windows' raw page counts, cumulative since boot, as MemorySnapshot keeps them. Pure.
+        /// </summary>
+        internal static string StatusJson(MemorySnapshot s, DateTime utc)
+        {
+            var w = new JsonWriter();
+            w.BeginObject();
+            w.Name("v"); w.Number(1);
+            w.Name("time"); w.String(CleanLog.Time(utc));
+            w.Name("totalPhys"); w.Number(s.TotalPhys);
+            w.Name("availablePhys"); w.Number(s.AvailablePhys);
+            w.Name("inUse"); w.Number(s.InUse);
+            w.Name("loadPercent"); w.Number((long)s.LoadPercent);
+            w.Name("systemCache"); w.Number(s.SystemCache);
+            w.Name("lists");
+            if (!s.HasLists) w.Null();
+            else
+            {
+                w.BeginObject();
+                w.Name("freeAndZero"); w.Number(s.FreeAndZero);
+                w.Name("standby"); w.Number(s.Standby);
+                w.Name("standbyByPriority"); Numbers(w, s.StandbyByPriority);
+                w.Name("modified"); w.Number(s.Modified);
+                w.Name("modifiedNoWrite"); w.Number(s.ModifiedNoWrite);
+                w.Name("repurposedByPriority"); Numbers(w, s.RepurposedByPriority);
+                w.EndObject();
+            }
+            w.Name("commit");
+            if (s.CommitLimit == 0) w.Null();
+            else
+            {
+                w.BeginObject();
+                w.Name("total"); w.Number(s.CommitTotal);
+                w.Name("limit"); w.Number(s.CommitLimit);
+                w.Name("percent"); w.Number((long)s.CommitPercent);
+                w.EndObject();
+            }
+            w.Name("condition"); w.String(CleanLog.ConditionName(s.Condition));
+            w.Name("advice"); w.String(CleanLog.AdviceName(CleanEstimate.Advise(s)));
+            w.EndObject();
+            return w.ToString();
+        }
+
+        static void Numbers(JsonWriter w, ulong[] values)
+        {
+            if (values == null) { w.Null(); return; }
+            w.BeginArray();
+            foreach (ulong v in values) w.Number(v);
+            w.EndArray();
+        }
+
+        /// <summary>
+        /// clean --dry-run --json: {"v":1,"type":"estimate","areas":[...],"inUseDropAtLeast":..,"fileCacheDropUpTo":..,
+        /// "advice":..}. Each area has name, kind (bytes, unknown or none), bytes (null unless kind is bytes),
+        /// upperBound (true when bytes is a ceiling) and note. The same figures as the text dry run. Pure.
+        /// </summary>
+        internal static string DryRunJson(MemorySnapshot s, Areas areas)
+        {
+            List<AreaEstimate> rows = CleanEstimate.For(s, areas);
+            var w = new JsonWriter();
+            w.BeginObject();
+            w.Name("v"); w.Number(1);
+            w.Name("type"); w.String("estimate");
+            w.Name("areas");
+            w.BeginArray();
+            foreach (AreaEstimate e in rows)
+            {
+                w.BeginObject();
+                w.Name("name"); w.String(AreaNames.NameOf(e.Area));
+                w.Name("kind"); w.String(e.Kind == EstimateKind.Bytes ? "bytes" : e.Kind == EstimateKind.Unknown ? "unknown" : "none");
+                w.Name("bytes"); if (e.Kind == EstimateKind.Bytes) w.Number(e.Bytes); else w.Null();
+                w.Name("upperBound"); w.Bool(e.UpperBound);
+                w.Name("note"); w.String(e.Note);
+                w.EndObject();
+            }
+            w.EndArray();
+            w.Name("inUseDropAtLeast"); w.Number(CleanEstimate.InUseDropAtLeast(rows));
+            w.Name("fileCacheDropUpTo"); w.Number(CleanEstimate.FileCacheDropUpTo(rows));
+            w.Name("advice"); w.String(CleanLog.AdviceName(CleanEstimate.Advise(s)));
+            w.EndObject();
+            return w.ToString();
         }
 
         /// <summary>Windows' own memory signal in words, for the status line.</summary>
@@ -502,6 +740,9 @@ namespace RamOptimiser
             Console.WriteLine(HelpText());
         }
 
+        /// <summary>Where the clean log lives, as help shows it.</summary>
+        internal static readonly string LogPathText = Path.Combine(Path.Combine("%LOCALAPPDATA%", "RamOptimiser"), CleanLog.FileName);
+
         /// <summary>The help text. The area list and the default set come from AreaNames.Known, so they cannot drift.</summary>
         public static string HelpText()
         {
@@ -509,8 +750,8 @@ namespace RamOptimiser
             w.WriteLine("ramopt - trims Windows memory working sets and caches (cleaning needs an elevated terminal)");
             w.WriteLine();
             w.WriteLine("Usage:");
-            w.WriteLine("  ramopt status                          show memory use (no admin needed)");
-            w.WriteLine("  ramopt clean [--areas LIST | --all] [--timeout S]");
+            w.WriteLine("  ramopt status [--json]                 show memory use (no admin needed)");
+            w.WriteLine("  ramopt clean [--areas LIST | --all] [--timeout S] [--no-log] [--json]");
             w.WriteLine("                                         clean once; Ctrl+C stops it after the current step");
             w.WriteLine("  ramopt clean --dry-run [--areas LIST | --all]   show what a clean would do; changes nothing (no admin needed)");
             w.WriteLine("  ramopt watch [--threshold N] [--interval S] [--cooldown S] [--timeout S] [--areas LIST | --all]");
@@ -518,6 +759,10 @@ namespace RamOptimiser
             w.WriteLine("                                         a clean that leaves load at N% or more doubles the wait (up to {0}x)",
                 1 << AutoCleanPolicy.MaxBackoffSteps);
             w.WriteLine("  --timeout S                            end each clean after S seconds (1-3600), once the step under way finishes");
+            w.WriteLine("  --no-log                               clean and watch: don't add cleans to the clean log");
+            w.WriteLine("  --json                                 print JSON on stdout: one object (status, clean, clean --dry-run),");
+            w.WriteLine("                                         or one line per clean (watch); messages and errors go to stderr");
+            w.WriteLine("clean and watch add one line per clean to {0} unless --no-log; a dry run never does.", LogPathText);
             w.WriteLine("If another clean is running, clean waits up to {0} s for it and then gives up; watch skips that turn.",
                 CliLockWait.TotalSeconds.ToString(CultureInfo.InvariantCulture));
             w.WriteLine();
