@@ -23,6 +23,27 @@ namespace RamOptimiser.App
         public string Status;
     }
 
+    /// <summary>
+    /// Auto-clean as the user sees it, derived each time and never stored. First match wins: Off, NeedsAdmin,
+    /// Paused (the user's pause), BackingOff (recent cleans did not help, so the threshold wait is longer), Armed.
+    /// </summary>
+    public enum AutoCleanState { Off, NeedsAdmin, Paused, BackingOff, Armed }
+
+    /// <summary>One status message about auto-clean: a line, an optional second line, a glyph and its colour.</summary>
+    public sealed class AutoNotice
+    {
+        public string Title, Detail;
+        /// <summary>Styles.xaml / MainWindow.xaml geometry key and its stroke brush key; Glyph null for words alone.</summary>
+        public string Glyph, Stroke;
+        /// <summary>Offers Resume (a pause), or a dismiss button (back-off; it comes back when the streak changes).</summary>
+        public bool Resume, Dismiss;
+        /// <summary>Changes when the message does, so a dismissed one stays hidden only until there is news.</summary>
+        public string Key;
+
+        /// <summary>Both lines, for the accessible name.</summary>
+        public string Name { get { return Detail == null ? Title : Title + " " + Detail; } }
+    }
+
     public static partial class AppText
     {
         public const string AppName = "RAM Optimiser";
@@ -656,6 +677,163 @@ namespace RamOptimiser.App
             if (seconds % 60 != 0) return "at most every " + seconds.ToString(CultureInfo.InvariantCulture) + " seconds";
             int minutes = seconds / 60;
             return minutes == 1 ? "at most once a minute" : "at most every " + minutes.ToString(CultureInfo.InvariantCulture) + " minutes";
+        }
+
+        // ------------------------------------------------------------------ auto-clean state (P6, R2+U6, P5)
+
+        public const string PauseMenuText = "Pause auto-clean for 1 hour";
+        public const string ResumeMenuText = "Resume auto-clean";
+        /// <summary>The Settings row's button, beside "Pause automatic cleans"; its accessible name is PauseMenuText.</summary>
+        public const string PauseButtonText = "Pause for 1 hour";
+        public const string ResumeButtonText = "Resume";
+        public const string ManualStillWorks = "Manual cleans still work.";
+        public const string DismissBackoffName = "Dismiss the auto-clean wait message";
+        const string ClosingAdvice = "Closing an app frees more memory than cleaning.";
+
+        /// <summary>st may be null (not read yet): then not paused and not backing off.</summary>
+        public static AutoCleanState AutoState(bool enabled, bool elevated, AutoCleanStatus st)
+        {
+            if (!enabled) return AutoCleanState.Off;
+            if (!elevated) return AutoCleanState.NeedsAdmin;
+            if (st != null && st.Paused) return AutoCleanState.Paused;
+            if (st != null && st.FutileStreak > 0) return AutoCleanState.BackingOff;
+            return AutoCleanState.Armed;
+        }
+
+        /// <summary>Pause is offered only where it would change something: auto-clean on, elevated and not paused.</summary>
+        public static bool CanPause(AutoCleanState state)
+        {
+            return state == AutoCleanState.Armed || state == AutoCleanState.BackingOff;
+        }
+
+        /// <summary>"Paused until 15:30", or null when not paused. A pause lasts at most an hour, so no date.</summary>
+        public static string PausedLine(AutoCleanStatus st, CultureInfo culture)
+        {
+            if (st == null || !st.Paused || !st.PausedUntilUtc.HasValue) return null;
+            return "Paused until " + st.PausedUntilUtc.Value.ToLocalTime().ToString("t", culture);
+        }
+
+        /// <summary>The tray's Auto-clean item: the tick is the setting, the words say what holds it.</summary>
+        public static string TrayAutoLabel(AutoCleanState state, AutoCleanStatus st, CultureInfo culture)
+        {
+            if (state == AutoCleanState.NeedsAdmin) return "Auto-clean (paused: needs admin)";
+            string paused = state == AutoCleanState.Paused ? PausedLine(st, culture) : null;
+            return paused == null ? "Auto-clean" : "Auto-clean (" + char.ToLowerInvariant(paused[0]) + paused.Substring(1) + ")";
+        }
+
+        /// <summary>The small line of the Settings pause row.</summary>
+        public static string PauseNote(AutoCleanStatus st, CultureInfo culture)
+        {
+            string paused = PausedLine(st, culture);
+            return paused == null ? ManualStillWorks : paused + ". " + ManualStillWorks;
+        }
+
+        /// <summary>"Waiting longer: the last 2 cleans left load at 85% or more." Null for a streak of 0.</summary>
+        public static string BackoffLine(int streak, int thresholdPercent)
+        {
+            if (streak <= 0) return null;
+            string cleans = streak == 1 ? "the last clean" : "the last " + streak.ToString(CultureInfo.InvariantCulture) + " cleans";
+            return "Waiting longer: " + cleans + " left load at " + thresholdPercent.ToString(CultureInfo.InvariantCulture) + "% or more.";
+        }
+
+        /// <summary>When the next clean for high load can run, if still ahead, then the honest advice.</summary>
+        public static string BackoffAdvice(DateTime? nextUtc, DateTime nowUtc, CultureInfo culture)
+        {
+            if (!nextUtc.HasValue || nextUtc.Value <= nowUtc) return ClosingAdvice;
+            return "Next clean for high load after " + nextUtc.Value.ToLocalTime().ToString("t", culture) + ". " + ClosingAdvice;
+        }
+
+        /// <summary>The Memory tab's bar while backing off. Interval cleans still run, hence "for high load".</summary>
+        public static string BackoffTitle(TimeSpan wait)
+        {
+            return "Auto-clean now waits " + DurationPhrase(wait) + " between cleans for high load, because recent cleans did not help.";
+        }
+
+        /// <summary>The Settings line under Clean automatically; streak 0 gives the plain CooldownText.</summary>
+        public static string CooldownText(int seconds, int streak)
+        {
+            string plain = CooldownText(seconds);
+            if (streak <= 0 || seconds <= 0) return plain;
+            TimeSpan wait = AutoCleanPolicy.ThresholdCooldown(TimeSpan.FromSeconds(seconds), streak);
+            return plain + "; now every " + DurationPhrase(wait) + " because recent cleans did not help";
+        }
+
+        /// <summary>"1 minute", "20 minutes", "1 hour", "1 hour 20 minutes"; "90 seconds" when not whole minutes.</summary>
+        public static string DurationPhrase(TimeSpan t)
+        {
+            long seconds = (long)Math.Round(Math.Max(0, t.TotalSeconds));
+            if (seconds % 60 != 0) return Count(seconds, "second");
+            long minutes = seconds / 60, hours = minutes / 60, rest = minutes % 60;
+            if (hours == 0) return Count(minutes, "minute");
+            return rest == 0 ? Count(hours, "hour") : Count(hours, "hour") + " " + Count(rest, "minute");
+        }
+
+        static string Count(long n, string unit)
+        {
+            return n.ToString(CultureInfo.InvariantCulture) + " " + unit + (n == 1 ? "" : "s");
+        }
+
+        /// <summary>
+        /// The bar at the top of the Memory tab, so a pause or a back-off is seen without scrolling to the auto-clean
+        /// card. Null when there is nothing to say (armed, off, or needing admin, which has its own line).
+        /// </summary>
+        public static AutoNotice AutoBar(AutoCleanState state, AutoCleanStatus st, AppSettings s, CultureInfo culture)
+        {
+            if (s == null) throw new ArgumentNullException("s");
+            if (state == AutoCleanState.Paused)
+            {
+                string paused = PausedLine(st, culture);
+                if (paused == null) return null;
+                return new AutoNotice
+                {
+                    Title = "Auto-clean is p" + paused.Substring(1) + ".",
+                    Detail = ManualStillWorks,
+                    Glyph = "IconPause", Stroke = "Accent", Resume = true, Key = "paused"
+                };
+            }
+            if (state == AutoCleanState.BackingOff && st != null)
+            {
+                return new AutoNotice
+                {
+                    Title = BackoffTitle(AutoCleanService.ThresholdCooldown(s, st.FutileStreak)),
+                    Glyph = "IconWarn", Stroke = "Caution", Dismiss = true,
+                    Key = "backoff:" + st.FutileStreak.ToString(CultureInfo.InvariantCulture)
+                };
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// The line under the auto-clean card's description: the admin reason, the pause with Resume, why the system
+        /// holds cleans (P5), or the back-off in two lines. Null when auto-clean is off or simply armed.
+        /// </summary>
+        public static AutoNotice AutoCard(AutoCleanState state, AutoCleanStatus st, AppSettings s, DateTime nowUtc, CultureInfo culture)
+        {
+            if (s == null) throw new ArgumentNullException("s");
+            switch (state)
+            {
+                case AutoCleanState.Off:
+                    return null;
+                case AutoCleanState.NeedsAdmin:
+                    return new AutoNotice { Title = "Paused: needs administrator rights", Key = "admin" };
+                case AutoCleanState.Paused:
+                    string paused = PausedLine(st, culture);
+                    if (paused == null) return null;
+                    return new AutoNotice { Title = paused + ".", Glyph = "IconPause", Stroke = "MutedText", Resume = true, Key = "paused" };
+            }
+            string hold = st == null ? null : AutoHoldText(st.Hold, s);
+            if (hold != null) return new AutoNotice { Title = hold, Key = "hold:" + st.Hold };
+            if (state == AutoCleanState.BackingOff && st != null)
+            {
+                return new AutoNotice
+                {
+                    Title = BackoffLine(st.FutileStreak, s.ThresholdPercent),
+                    Detail = BackoffAdvice(st.NextThresholdCleanUtc, nowUtc, culture),
+                    Glyph = "IconWarn", Stroke = "Caution",
+                    Key = "backoff:" + st.FutileStreak.ToString(CultureInfo.InvariantCulture)
+                };
+            }
+            return null;
         }
 
         /// <summary>"every 30 minutes", "every hour", "every 2 hours".</summary>

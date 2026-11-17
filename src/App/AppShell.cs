@@ -95,8 +95,27 @@ namespace RamOptimiser.App
         Expander resultDetails;
         StackPanel resultRows;
         TextBlock valInUse, valModified, valStandby, valFree;
-        TextBlock autoDescription, autoPaused;
+        TextBlock autoDescription, autoStatusText, autoStatusDetail;
+        StackPanel autoStatusLine;
+        Path autoStatusGlyph;
+        Button autoResumeButton;
         CheckBox autoSwitch;
+        // The bar at the top of the Memory tab while auto-clean is paused or waiting longer (P6, R2).
+        LiveRegion autoBar;
+        Path autoBarGlyph;
+        TextBlock autoBarTitle, autoBarDetail;
+        Button autoBarResume, autoBarDismiss;
+        /// <summary>The service's pause, back-off and hold as last read (null before the service exists).</summary>
+        AutoCleanStatus autoInfo;
+        AutoNotice barNotice;
+        /// <summary>The back-off message the user dismissed; it comes back when the streak changes.</summary>
+        string dismissedBarKey;
+        /// <summary>The kind of bar last read out (paused, backoff), so a streak step or a tick is not announced again.</summary>
+        string announcedBarKind;
+        bool barShown;
+        int barGeneration;
+        /// <summary>What the tray last showed for auto-clean, so the menu is rebuilt only when it changes.</summary>
+        string trayAutoKey;
 
         // Power Clean (settings tab)
         CheckBox settingsPowerSwitch;
@@ -132,7 +151,9 @@ namespace RamOptimiser.App
 
         // Settings tab
         CheckBox settingsAutoSwitch, startupCheck, closeToTrayCheck, trayPercentCheck;
-        TextBlock saveError, cooldownText, areaReason, startupReason, thresholdValue, themeNote;
+        TextBlock saveError, cooldownText, areaReason, startupReason, thresholdValue, themeNote, pauseNote;
+        Border pauseRow;
+        Button pauseButton;
         Slider thresholdSlider;
         DispatcherTimer thresholdTimer;
         /// <summary>A slider value waiting for its 400 ms pause; flushed on exit and before an elevated restart.</summary>
@@ -194,22 +215,32 @@ namespace RamOptimiser.App
             tray.OpenRequested += delegate { ShowWindow(); };
             tray.CleanRequested += delegate { RequestClean(); };
             tray.AutoCleanToggled += delegate { SetAutoClean(!settings.AutoCleanEnabled); };
+            tray.PauseRequested += delegate { PauseAutoClean(); };
+            tray.ResumeRequested += delegate { ResumeAutoClean(); };
             tray.RestartRequested += delegate { RestartElevated(); };
             tray.ExitRequested += delegate { Exit(); };
             UpdateTray();
 
             powerServices = new List<string>(settings.PowerServices);
-            // Services are stopped only when the areas include Areas.Services, i.e. under Power Clean.
-            service = new AutoCleanService(MemorySnapshot.Take, areas => Cleaner.Clean(areas, powerServices), () => DateTime.UtcNow);
+            // Services are stopped only when the areas include Areas.Services, i.e. under Power Clean. Automatic cleans
+            // wait while the PC sleeps or has just woken, a full-screen app runs, and (scheduled ones) while locked or
+            // on battery (P5).
+            service = new AutoCleanService(MemorySnapshot.Take, areas => Cleaner.Clean(areas, powerServices), () => DateTime.UtcNow,
+                SystemConditions.AwakeTime, SystemConditions.Read, new GateOptions());
             service.Sampled += s => Post(() => OnSampled(s));
             service.CleanStarted += r => Post(() => OnCleanStarted(r));
             service.CleanCompleted += (report, r) => Post(() => OnCleanCompleted(report, r));
             service.Failed += (ex, source) => Post(() => OnServiceError(ex, source));
+            service.HoldChanged += r => Post(RefreshAutoRow);
             service.Update(ServiceSettings());
+            // A pause outlasts a restart, cut to an hour from now: settings.ini is user-writable.
+            if (elevated && settings.AutoCleanEnabled) service.RestorePause(settings.AutoCleanPausedUntilUtc);
+            RefreshAutoRow();
             // Before service.Start, so a Power Clean of this run is never mistaken for an earlier run's leftover.
             if (elevated) StartServiceRecovery();
 
             if (instance != null) instance.ActivationRequested += OnActivationRequested;
+            SystemEvents.PowerModeChanged += OnPowerModeChanged;
             SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
             SystemParameters.StaticPropertyChanged += OnSystemParameterChanged;
             app.SessionEnding += delegate { Exit(); };
@@ -230,6 +261,7 @@ namespace RamOptimiser.App
             // A prompt still up when the user exits: its result arrives later and is ignored.
             elevationState = ElevationFlow.Next(elevationState, ElevationEvent.ExitRequested).State;
             exiting = true;
+            SystemEvents.PowerModeChanged -= OnPowerModeChanged;
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
             SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged;
             if (service != null) service.Dispose();
@@ -312,6 +344,8 @@ namespace RamOptimiser.App
         /// <summary>Last-resort cleanup from the fatal-error path; never throws.</summary>
         public void EmergencyCleanup()
         {
+            // SystemEvents is static: a handler left attached would outlive the shell.
+            try { SystemEvents.PowerModeChanged -= OnPowerModeChanged; } catch (Exception) { }
             try { if (service != null) service.Dispose(); } catch (Exception) { }
             try { if (tray != null) tray.Dispose(); } catch (Exception) { }
             try { if (instance != null) instance.Dispose(); } catch (Exception) { }
@@ -386,8 +420,18 @@ namespace RamOptimiser.App
             resultRows = F<StackPanel>("ResultRows");
             topList = F<StackPanel>("TopList");
             autoDescription = F<TextBlock>("AutoDescription");
-            autoPaused = F<TextBlock>("AutoPaused");
+            autoStatusLine = F<StackPanel>("AutoStatusLine");
+            autoStatusGlyph = F<Path>("AutoStatusGlyph");
+            autoStatusText = F<TextBlock>("AutoStatus");
+            autoStatusDetail = F<TextBlock>("AutoStatusDetail");
+            autoResumeButton = F<Button>("AutoResumeButton");
             autoSwitch = F<CheckBox>("AutoSwitch");
+            autoBar = F<LiveRegion>("AutoBar");
+            autoBarGlyph = F<Path>("AutoBarGlyph");
+            autoBarTitle = F<TextBlock>("AutoBarTitle");
+            autoBarDetail = F<TextBlock>("AutoBarDetail");
+            autoBarResume = F<Button>("AutoBarResume");
+            autoBarDismiss = F<Button>("AutoBarDismiss");
 
             startupView = F<ScrollViewer>("StartupView");
             startupSummary = F<TextBlock>("StartupSummary");
@@ -410,6 +454,9 @@ namespace RamOptimiser.App
             saveError = F<TextBlock>("SaveError");
             settingsAutoSwitch = F<CheckBox>("SettingsAutoSwitch");
             cooldownText = F<TextBlock>("CooldownText");
+            pauseRow = F<Border>("PauseRow");
+            pauseNote = F<TextBlock>("PauseNote");
+            pauseButton = F<Button>("PauseButton");
             thresholdSlider = F<Slider>("ThresholdSlider");
             thresholdValue = F<TextBlock>("ThresholdValue");
             intervalBox = F<ComboBox>("IntervalBox");
@@ -456,6 +503,9 @@ namespace RamOptimiser.App
             restartButton.Click += delegate { RestartElevated(); };
             resultDetails.Expanded += delegate { resultDetails.Header = AppText.DetailsLabel(true, resultCount); };
             resultDetails.Collapsed += delegate { resultDetails.Header = AppText.DetailsLabel(false, resultCount); };
+            autoResumeButton.Click += delegate { ResumeAutoClean(); };
+            autoBarResume.Click += delegate { ResumeAutoClean(); };
+            autoBarDismiss.Click += delegate { DismissAutoBar(); };
             OnToggle(autoSwitch, SetAutoClean);
             Motion.AddPress(cleanButton);
         }
@@ -490,6 +540,11 @@ namespace RamOptimiser.App
         void WireSettings()
         {
             OnToggle(settingsAutoSwitch, SetAutoClean);
+            pauseButton.Click += delegate
+            {
+                if (autoInfo != null && autoInfo.Paused) ResumeAutoClean();
+                else PauseAutoClean();
+            };
             OnToggle(settingsPowerSwitch, SetPowerClean);
             restoreButton.Click += delegate { RestoreServices(); };
             thresholdTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = ThresholdSaveDelay };
@@ -1164,6 +1219,8 @@ namespace RamOptimiser.App
                 UpdateCleanButton();
             }
             RefreshResultLine();
+            // Every sample: catches a pause ending and the back-off streak changing (cheap when nothing changed).
+            RefreshAutoRow();
             if (!WindowShowing || !memoryTab.IsSelected)
             {
                 // Nobody can see the view: skip its animations and redraw it from the newest sample when it shows.
@@ -1204,6 +1261,7 @@ namespace RamOptimiser.App
         {
             viewStale = false;
             sampleError.Visibility = Visibility.Collapsed;
+            ShowAutoBar(); // the slot is free again
             // The admin line stays one short line; its longer reason is the link's help text (not while prompting).
             if (elevationState != ElevationState.Prompting)
                 AutomationProperties.SetHelpText(restartButton, AppText.ElevationNotice(s.HasLists));
@@ -1271,6 +1329,7 @@ namespace RamOptimiser.App
             memView.SampleFailed();
             sampleErrorText.Text = AppText.SampleErrorText(ex.Message, (int)SampleInterval.TotalSeconds, memView.HasData);
             sampleError.Visibility = Visibility.Visible;
+            ShowAutoBar(); // the error takes the slot
             ShowMemoryState();
             if (lastSnapshot == null) UpdateTray();
         }
@@ -1387,6 +1446,7 @@ namespace RamOptimiser.App
             if (report != null && report.After != null) OnSampled(report.After);
             if (report != null && report.Services.Count > 0 && settingsTab.IsSelected) RefreshServices();
             UpdateRestoreUi();
+            RefreshAutoRow(); // the clean moved the back-off streak and the next threshold time
         }
 
         void SetCleaning(bool on)
@@ -1553,7 +1613,60 @@ namespace RamOptimiser.App
         void SetAutoClean(bool on)
         {
             settings.AutoCleanEnabled = on;
+            // Turning it off ends a pause (the service drops it too), so turning it on again never finds an old one.
+            if (!on) settings.AutoCleanPausedUntilUtc = null;
             SaveAndApply();
+        }
+
+        /// <summary>Holds automatic cleans for an hour (tray, Settings). Only offered when it changes something.</summary>
+        void PauseAutoClean()
+        {
+            if (exiting || service == null || !AppText.CanPause(AppText.AutoState(settings.AutoCleanEnabled, elevated, service.GetStatus())))
+                return;
+            try { service.Pause(AutoCleanService.PauseLength); }
+            catch (ObjectDisposedException) { return; }
+            RefreshAutoRow();
+        }
+
+        void ResumeAutoClean()
+        {
+            if (exiting || service == null) return;
+            service.Resume();
+            RefreshAutoRow();
+        }
+
+        /// <summary>Hides the back-off bar until the streak changes; the auto-clean card keeps the details.</summary>
+        void DismissAutoBar()
+        {
+            if (barNotice == null) return;
+            dismissedBarKey = barNotice.Key;
+            ShowAutoBar();
+        }
+
+        /// <summary>The saved pause follows the service's, so it outlasts a restart (owner decision); elevated only.</summary>
+        void PersistPause()
+        {
+            if (!elevated || service == null || exiting) return;
+            DateTime? want = autoInfo != null && autoInfo.Paused ? autoInfo.PausedUntilUtc : null;
+            if (settings.AutoCleanPausedUntilUtc == want) return;
+            settings.AutoCleanPausedUntilUtc = want;
+            SaveAndApply();
+        }
+
+        /// <summary>
+        /// Sleep and wake (P5). Runs on the SystemEvents thread, where an exception would end the process: the service
+        /// calls never throw, and everything else is caught. StatusChange is ignored: each tick reads the power line.
+        /// </summary>
+        void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+        {
+            try
+            {
+                AutoCleanService s = service;
+                if (s == null || exiting) return;
+                if (e.Mode == PowerModes.Suspend) s.NotifySuspend();
+                else if (e.Mode == PowerModes.Resume) s.NotifyResume();
+            }
+            catch (Exception) { }
         }
 
         void SetPowerClean(bool on)
@@ -1849,10 +1962,115 @@ namespace RamOptimiser.App
             ApplySettings(before);
         }
 
+        /// <summary>
+        /// Auto-clean's state everywhere it shows: the card's line, the bar at the top of the Memory tab, the Settings
+        /// pause row and cooldown line, and the tray. Runs on every sample, so it only touches what changed; it also
+        /// keeps the saved pause in step with the service's.
+        /// </summary>
         void RefreshAutoRow()
         {
             autoDescription.Text = AppText.Sentence(AppText.AutoDescription(settings));
-            autoPaused.Visibility = !elevated && settings.AutoCleanEnabled ? Visibility.Visible : Visibility.Collapsed;
+            autoInfo = service == null ? null : service.GetStatus();
+            AutoCleanState state = AppText.AutoState(settings.AutoCleanEnabled, elevated, autoInfo);
+            CultureInfo culture = CultureInfo.CurrentCulture;
+            ShowAutoCard(AppText.AutoCard(state, autoInfo, settings, DateTime.UtcNow, culture));
+            barNotice = AppText.AutoBar(state, autoInfo, settings, culture);
+            ShowAutoBar();
+            ShowPauseRow(state, culture);
+            cooldownText.Text = AppText.Sentence(AppText.CooldownText(settings.CooldownSeconds, Streak));
+            string trayKey = state + "|" + AppText.TrayAutoLabel(state, autoInfo, culture);
+            if (trayKey != trayAutoKey) UpdateTray();
+            PersistPause();
+        }
+
+        int Streak { get { return autoInfo == null ? 0 : autoInfo.FutileStreak; } }
+
+        /// <summary>The line under the card's description. Focus on a Resume that goes away moves to the switch.</summary>
+        void ShowAutoCard(AutoNotice n)
+        {
+            bool hadFocus = autoResumeButton.IsKeyboardFocused;
+            autoStatusLine.Visibility = n == null ? Visibility.Collapsed : Visibility.Visible;
+            if (n != null)
+            {
+                autoStatusText.Text = n.Title;
+                autoStatusDetail.Text = n.Detail ?? "";
+                autoStatusDetail.Visibility = n.Detail == null ? Visibility.Collapsed : Visibility.Visible;
+                SetGlyph(autoStatusGlyph, n);
+                // The second line starts under the first line's words, not under the glyph (16 px plus its 6 px gap).
+                autoStatusDetail.Margin = new Thickness(n.Glyph == null ? 0 : 22, 0, 0, 0);
+                autoResumeButton.Visibility = n.Resume ? Visibility.Visible : Visibility.Collapsed;
+            }
+            if (hadFocus && autoResumeButton.Visibility != Visibility.Visible) autoSwitch.Focus();
+        }
+
+        void SetGlyph(Path glyph, AutoNotice n)
+        {
+            glyph.Visibility = n.Glyph == null ? Visibility.Collapsed : Visibility.Visible;
+            if (n.Glyph == null) return;
+            glyph.Data = Icon(n.Glyph);
+            glyph.SetResourceReference(Shape.StrokeProperty, n.Stroke ?? "Text");
+        }
+
+        /// <summary>
+        /// The bar shares its slot with the sample-error bar, which wins. It enters with a fade and an 8 px drop (320 ms,
+        /// ease out) and leaves with a fade (200 ms, ease in), at once when Windows animations are off. It is read out
+        /// once on entering the paused or waiting state, not on every streak step.
+        /// </summary>
+        void ShowAutoBar()
+        {
+            AutoNotice n = barNotice;
+            bool show = n != null && sampleError.Visibility != Visibility.Visible && n.Key != dismissedBarKey;
+            var drop = (TranslateTransform)autoBar.RenderTransform;
+            if (!show)
+            {
+                if (n == null) announcedBarKind = null;
+                if (!barShown) return;
+                barShown = false;
+                bool hadFocus = autoBar.IsKeyboardFocusWithin;
+                int gen = ++barGeneration;
+                Motion.To(drop, TranslateTransform.YProperty, -Motion.RiseDistance / 2, Motion.ExitDuration, Motion.Exit, WindowShowing);
+                Motion.To(autoBar, UIElement.OpacityProperty, 0, Motion.ExitDuration, Motion.Exit, WindowShowing,
+                    () => { if (gen == barGeneration) autoBar.Visibility = Visibility.Collapsed; });
+                if (hadFocus) autoSwitch.Focus();
+                return;
+            }
+
+            autoBarTitle.Text = n.Title;
+            autoBarDetail.Text = n.Detail ?? "";
+            autoBarDetail.Visibility = n.Detail == null ? Visibility.Collapsed : Visibility.Visible;
+            SetGlyph(autoBarGlyph, n);
+            autoBarResume.Visibility = n.Resume ? Visibility.Visible : Visibility.Collapsed;
+            autoBarDismiss.Visibility = n.Dismiss ? Visibility.Visible : Visibility.Collapsed;
+            AutomationProperties.SetName(autoBar, n.Name);
+            string kind = n.Key.Split(':')[0];
+            bool announce = kind != announcedBarKind;
+            announcedBarKind = kind;
+            if (!barShown)
+            {
+                barShown = true;
+                ++barGeneration;
+                autoBar.Visibility = Visibility.Visible;
+                bool animate = WindowShowing && Motion.On;
+                if (animate)
+                {
+                    Motion.To(autoBar, UIElement.OpacityProperty, 0, TimeSpan.Zero, null, false);
+                    Motion.To(drop, TranslateTransform.YProperty, -Motion.RiseDistance, TimeSpan.Zero, null, false);
+                }
+                Motion.To(autoBar, UIElement.OpacityProperty, 1, Motion.EnterDuration, Motion.Enter, animate);
+                Motion.To(drop, TranslateTransform.YProperty, 0, Motion.EnterDuration, Motion.Enter, animate);
+            }
+            if (announce && WindowShowing) dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => autoBar.Announce()));
+        }
+
+        /// <summary>Settings: Pause for 1 hour, or the pause's end and Resume, on one button so focus stays put.</summary>
+        void ShowPauseRow(AutoCleanState state, CultureInfo culture)
+        {
+            bool paused = state == AutoCleanState.Paused;
+            pauseRow.Visibility = paused || AppText.CanPause(state) ? Visibility.Visible : Visibility.Collapsed;
+            pauseNote.Text = AppText.PauseNote(autoInfo, culture);
+            pauseButton.Content = paused ? AppText.ResumeButtonText : AppText.PauseButtonText;
+            AutomationProperties.SetName(pauseButton, paused ? AppText.ResumeMenuText : AppText.PauseMenuText);
+            AutomationProperties.SetHelpText(pauseButton, pauseNote.Text);
         }
 
         void SyncSettingsUi(bool includeThreshold)
@@ -1875,7 +2093,7 @@ namespace RamOptimiser.App
                     thresholdSlider.Value = settings.ThresholdPercent;
                     ShowThreshold();
                 }
-                cooldownText.Text = AppText.Sentence(AppText.CooldownText(settings.CooldownSeconds));
+                cooldownText.Text = AppText.Sentence(AppText.CooldownText(settings.CooldownSeconds, Streak));
                 SelectByTag(intervalBox, settings.IntervalMinutes);
                 SelectByTag(themeBox, settings.Theme);
                 bool anyLocked = false;
@@ -2029,8 +2247,11 @@ namespace RamOptimiser.App
         void UpdateTray()
         {
             if (tray == null) return;
-            tray.SetMenuState(TrayMenuState.For(elevated, cleaningUi, settings.AutoCleanEnabled, memView.State != MemoryViewState.FailedNoData),
-                syncState == SettingsSyncState.SaveFailed);
+            TrayMenuState menuState = TrayMenuState.For(elevated, cleaningUi, settings.AutoCleanEnabled, memView.State != MemoryViewState.FailedNoData);
+            AutoCleanState auto = AppText.AutoState(settings.AutoCleanEnabled, elevated, autoInfo);
+            menuState.AutoText = AppText.TrayAutoLabel(auto, autoInfo, CultureInfo.CurrentCulture);
+            trayAutoKey = auto + "|" + menuState.AutoText;
+            tray.SetMenuState(menuState, syncState == SettingsSyncState.SaveFailed, AppText.CanPause(auto), auto == AutoCleanState.Paused);
             tray.Update(lastSnapshot, settings.ShowTrayPercent, taskbarLight);
         }
     }

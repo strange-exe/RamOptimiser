@@ -181,6 +181,39 @@ Update 2026-11-17: startup rows show the verdict and full detail at all times. T
 because the owner wanted the use case and warning in view ("it was fine before when it just warned and clearly
 mentioned the usecase not hidden in side a dropdown menu").
 
+### Auto-clean status: pause, back-off, holds (wave 2A, 2026-11-17)
+One state, derived each time (`AppText.AutoState`), first match wins: Off, NeedsAdmin, Paused, BackingOff (a futile
+streak above 0), Armed. It drives four places:
+- **Bar at the top of the Memory tab** (`AutoBar`, a polite live region in the sample-error slot; the error wins the
+  slot). Paused: pause glyph (Accent), "Auto-clean is paused until 15:41." / "Manual cleans still work." and Resume.
+  BackingOff: IconWarn (Caution), "Auto-clean now waits 20 minutes between cleans for high load, because recent
+  cleans did not help." and a dismiss button; a dismissed bar returns when the streak changes. No "Reset wait"
+  action (owner, adopted from the preview). Read out once on entering each state, not per streak step. Enters with
+  opacity and an 8 px drop (320 ms QuinticEase out), leaves with opacity and 4 px (200 ms CubicEase in), instant
+  with Windows animations off. Its fill is Card with a ControlBorder edge: the preview's info tokens were not added,
+  because Light/Dark/Styles.xaml belong to later packages.
+- **Auto-clean card line** under the description: "Paused: needs administrator rights"; "Paused until 15:41." with
+  a Resume link; the P5 hold reason (woke up, full screen, locked or on battery with a schedule); or the back-off in
+  two lines, "Waiting longer: the last 2 cleans left load at 85% or more." and "Next clean for high load after 15:20.
+  Closing an app frees more memory than cleaning." Focus on a Resume that disappears moves to the switch.
+- **Settings**: "Pause automatic cleans" row ("Manual cleans still work.") with one button that reads "Pause for 1
+  hour" or "Resume", so focus stays on it. Collapsed, never disabled, when auto-clean is off or needs admin. The
+  cooldown line reads "At most every 5 minutes; now every 20 minutes because recent cleans did not help." while
+  backing off; the minutes come from `AutoCleanService.ThresholdCooldown`, so the words match the policy.
+- **Tray**: "Auto-clean (paused until 15:41)", then "Pause auto-clean for 1 hour" or "Resume auto-clean", hidden
+  (not greyed) when auto-clean is off or needs admin. The back-off tooltip line is P7's (wave 3A).
+
+Decisions: the pause is 1 hour only and is saved (`AutoCleanPausedUntil=` in settings.ini, UTC, round-trip format),
+so it outlasts a restart; on start it is cut to at most an hour from then, because the file is user-writable. A
+pause can only stop automatic cleans, never cause one. Turning auto-clean off ends it. When a pause ends or is
+resumed, the schedule restarts from then. A manual clean resets the back-off when it brings load under the
+threshold and never lengthens it (owner, 2026-11-17).
+
+Contrast of the new pairs (from the tokens above): Caution glyph on Card 5.07 light / 10.73 dark; Accent glyph on
+Card above 6 in both; muted text on Card 6.46 / 8.46; ControlBorder edge on Surface 3.28 light. All pass.
+Verified: offscreen renders of the paused, backing-off and held states in light and dark (XAML only, no app run).
+Not verified: high contrast, Narrator on the tray menu, a real sleep and wake.
+
 ## Website (download page), started 2026-11-17
 
 Owner's pick, in their words: "Instrument is good but colour palette not so good, try obsidian alongside

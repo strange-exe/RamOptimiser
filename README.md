@@ -48,6 +48,14 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3):
   instead of showing a switch. While a service change applies, the other switches wait until it finishes.
 - Opened without admin rights, the app shows status only, plus a **Restart as administrator** link. The tray menu
   offers the same restart and says when auto-clean is paused for lack of admin rights.
+- Auto-clean can be paused for 1 hour from the tray menu (**Pause auto-clean for 1 hour**, then **Resume
+  auto-clean**) or from Settings. Manual cleans still work while it is paused. The pause is saved, so it outlasts a
+  restart of the app, but it never lasts more than an hour from the time it is read back.
+- When automatic cleans keep leaving load at or above the threshold, auto-clean waits longer between cleans for
+  high load (up to 16 times the cooldown). The Memory tab says so, with the time of the next one; Settings shows
+  the current wait. A manual clean never lengthens this wait. Automatic cleans also wait in the first 2 minutes
+  after the PC wakes and while a full-screen app runs; scheduled ones wait while the PC is locked or on battery.
+  The auto-clean card says why.
 - **Settings** has these options:
   - auto-clean when load reaches 50 to 99%, and/or on a schedule
   - which areas to clean

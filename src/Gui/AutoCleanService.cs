@@ -12,7 +12,8 @@ namespace RamOptimiser.Gui
     /// Samples memory on a thread-pool timer and cleans when the settings say so. Never touches the UI thread:
     /// every event is raised on a worker thread, so a GUI must marshal to its dispatcher. At most one clean
     /// runs at a time, whoever asks for it. Exceptions from the sample or clean functions, or from event
-    /// handlers, are reported through Error and never stop the timer.
+    /// handlers, are reported through Error and never stop the timer. The user can pause automatic cleans for up to
+    /// an hour (Pause, Resume); manual cleans always run.
     /// </summary>
     public sealed class AutoCleanService : IDisposable
     {
@@ -33,7 +34,8 @@ namespace RamOptimiser.Gui
         int cleaning;            // 1 while a clean runs (Interlocked)
         int cleanAreas;          // the running clean's Areas, 0 before it has read them and after it ends (Volatile)
         int ticking;             // 1 while a tick runs (Interlocked)
-        int futileStreak;        // threshold cleans in a row that left load at or above the threshold; guarded by gate
+        int futileStreak;        // automatic cleans in a row that left load at or above the threshold; guarded by gate
+        DateTime? pauseUntil;    // automatic cleans wait until then; never more than PauseLength after the clock; guarded by gate
         bool disposed;
         AutoCleanGate hold = AutoCleanGate.Initial; // sleep, wake grace, presence and power; guarded by gate
         DateTime lastTickWall;   // both clocks at the previous tick, for the sleep-gap check; guarded by gate
@@ -45,7 +47,16 @@ namespace RamOptimiser.Gui
         /// <summary>Each clean in a row that leaves load at or above the threshold doubles the wait, up to this many times.</summary>
         public const int MaxBackoffSteps = AutoCleanPolicy.MaxBackoffSteps;
 
-        /// <summary>Cleans in a row that did not bring load under the threshold (0 to MaxBackoffSteps).</summary>
+        /// <summary>
+        /// The one pause the app offers, and the longest any pause can last: a pause restored from settings.ini (which
+        /// the user can edit) or stretched by a clock set back is cut to this much from the clock's time.
+        /// </summary>
+        public static readonly TimeSpan PauseLength = TimeSpan.FromHours(1);
+
+        /// <summary>
+        /// Automatic cleans in a row that did not bring load under the threshold (0 to MaxBackoffSteps). A manual clean
+        /// can reset it (load fell under the threshold) but never adds to it: the user chose that clean.
+        /// </summary>
         public int FutileStreak { get { lock (gate) return futileStreak; } }
 
         public event Action<MemorySnapshot> Sampled;
@@ -213,7 +224,9 @@ namespace RamOptimiser.Gui
         /// <summary>
         /// Takes a copy, so later changes to the caller's object have no effect until the next Update. A clean
         /// already decided keeps the settings it started with. A new policy (PolicyChanged) clears the backoff, so
-        /// it starts from the normal cooldown; other changes, such as the theme, keep it.
+        /// it starts from the normal cooldown; other changes, such as the theme, keep it. Turning auto-clean off
+        /// ends a pause, so turning it on again never finds an old one. The pause itself is not a setting here:
+        /// Pause, Resume and RestorePause set it.
         /// </summary>
         public void Update(AppSettings newSettings)
         {
@@ -222,7 +235,79 @@ namespace RamOptimiser.Gui
             lock (gate)
             {
                 if (PolicyChanged(settings, next)) futileStreak = 0;
+                if (!next.AutoCleanEnabled) pauseUntil = null;
                 settings = next;
+            }
+        }
+
+        /// <summary>
+        /// Holds automatic cleans for length (at most PauseLength), replacing any pause. Manual cleans still run.
+        /// Returns false, changing nothing, while auto-clean is off: there is nothing to pause.
+        /// </summary>
+        public bool Pause(TimeSpan length)
+        {
+            if (length <= TimeSpan.Zero || length > PauseLength) throw new ArgumentOutOfRangeException("length");
+            lock (gate)
+            {
+                if (disposed) throw new ObjectDisposedException("AutoCleanService");
+                if (!settings.AutoCleanEnabled) return false;
+                pauseUntil = clock() + length;
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Takes up a pause saved by an earlier run, cut to PauseLength from now. False, changing nothing, when there
+        /// is none, it has ended, or auto-clean is off.
+        /// </summary>
+        public bool RestorePause(DateTime? untilUtc)
+        {
+            lock (gate)
+            {
+                if (disposed) throw new ObjectDisposedException("AutoCleanService");
+                if (!settings.AutoCleanEnabled) return false;
+                DateTime? until = ClampPause(untilUtc, clock());
+                if (until == null) return false;
+                pauseUntil = until;
+                return true;
+            }
+        }
+
+        /// <summary>Ends a pause now. The schedule restarts from now, so no overdue interval clean fires at once.</summary>
+        public void Resume()
+        {
+            lock (gate)
+            {
+                if (pauseUntil == null) return;
+                pauseUntil = null;
+                intervalFrom = clock();
+            }
+        }
+
+        /// <summary>A pause's end as it may stand at now: null when there is none or it has ended, else at most PauseLength on. Pure.</summary>
+        public static DateTime? ClampPause(DateTime? untilUtc, DateTime now)
+        {
+            if (!untilUtc.HasValue || untilUtc.Value <= now) return null;
+            DateTime latest = now + PauseLength;
+            return untilUtc.Value > latest ? latest : untilUtc.Value;
+        }
+
+        /// <summary>Everything the window and tray show about auto-clean, read together under the lock.</summary>
+        public AutoCleanStatus GetStatus()
+        {
+            lock (gate)
+            {
+                DateTime now = clock();
+                DateTime? until = ClampPause(pauseUntil, now);
+                return new AutoCleanStatus
+                {
+                    Paused = until.HasValue,
+                    PausedUntilUtc = until,
+                    FutileStreak = futileStreak,
+                    LastCleanUtc = lastClean,
+                    NextThresholdCleanUtc = lastClean.HasValue ? lastClean.Value + ThresholdCooldown(settings, futileStreak) : (DateTime?)null,
+                    Hold = shownReason
+                };
             }
         }
 
@@ -321,10 +406,18 @@ namespace RamOptimiser.Gui
         public static CleanReason? Decide(AppSettings s, uint loadPercent, DateTime? lastClean, DateTime intervalAnchor,
             DateTime now, bool cleanRunning, int futileStreak, GateHold hold)
         {
+            return Decide(s, loadPercent, lastClean, intervalAnchor, now, cleanRunning, futileStreak, hold, false);
+        }
+
+        /// <summary>As above; while the user's pause runs, no automatic clean of either kind.</summary>
+        public static CleanReason? Decide(AppSettings s, uint loadPercent, DateTime? lastClean, DateTime intervalAnchor,
+            DateTime now, bool cleanRunning, int futileStreak, GateHold hold, bool paused)
+        {
             if (s == null) throw new ArgumentNullException("s");
             if (hold == null) hold = GateHold.None;
             // One master switch: AutoCleanEnabled gates both the threshold clean and the interval clean.
             if (!s.AutoCleanEnabled || cleanRunning) return null;
+            if (paused) return null;
             // A clock set backwards would otherwise block every clean until it caught up again.
             if (lastClean.HasValue && lastClean.Value > now) lastClean = null;
             if (intervalAnchor > now) intervalAnchor = now;
@@ -369,10 +462,27 @@ namespace RamOptimiser.Gui
             try { snap = sample(); }
             catch (Exception ex) { RaiseError(ex, ServiceErrorSource.Sample); return; }
             if (snap == null) { RaiseError(new InvalidOperationException("The sample function returned no snapshot."), ServiceErrorSource.Sample); return; }
-            Raise(Sampled, snap);
 
             AppSettings s = settings;
             DateTime now = clock();
+            lock (gate)
+            {
+                // Before Sampled, so a handler reading GetStatus sees this sample's streak and pause.
+                // Pressure eased by itself: the next time load climbs, the normal cooldown applies again.
+                if (snap.LoadPercent < s.ThresholdPercent) futileStreak = 0;
+                if (pauseUntil.HasValue)
+                {
+                    if (now >= pauseUntil.Value)
+                    {
+                        // The pause ended: the schedule restarts now, so no overdue interval clean fires at once.
+                        pauseUntil = null;
+                        intervalFrom = now;
+                    }
+                    else if (pauseUntil.Value > now + PauseLength) pauseUntil = now + PauseLength; // clock set back
+                }
+            }
+            Raise(Sampled, snap);
+
             TimeSpan awakeNow;
             bool haveAwake = TryAwake(out awakeNow);
             if (!haveAwake) awakeNow = TimeSpan.FromTicks(now.Ticks);
@@ -380,6 +490,7 @@ namespace RamOptimiser.Gui
             DateTime? last;
             DateTime anchor;
             int streak;
+            bool paused;
             GateHold h;
             bool holdChanged = false;
             lock (gate)
@@ -402,12 +513,12 @@ namespace RamOptimiser.Gui
                 // A clock set back would otherwise hold interval cleans until it caught up with the anchor.
                 if (intervalFrom > now) intervalFrom = now;
                 anchor = intervalFrom;
-                // Pressure eased by itself: the next time load climbs, the normal cooldown applies again.
-                if (snap.LoadPercent < s.ThresholdPercent) futileStreak = 0;
                 streak = futileStreak;
+                // A Pause or Resume from the UI thread since the check above counts too.
+                paused = pauseUntil.HasValue && now < pauseUntil.Value;
             }
 
-            CleanReason? reason = Decide(s, snap.LoadPercent, last, anchor, now, IsCleaning, streak, h);
+            CleanReason? reason = Decide(s, snap.LoadPercent, last, anchor, now, IsCleaning, streak, h, paused);
             if (holdChanged) Raise(HoldChanged, h.Reason); // before a clean, which may take a while
             if (reason == null) return;
             if (Interlocked.CompareExchange(ref cleaning, 1, 0) != 0) return; // a manual clean got in first
@@ -433,7 +544,7 @@ namespace RamOptimiser.Gui
                 catch (Exception ex) { RaiseError(ex, ServiceErrorSource.Clean); }
                 if (report != null && report.After != null)
                 {
-                    lock (gate) futileStreak = NextStreak(futileStreak, report.After.LoadPercent, s.ThresholdPercent);
+                    lock (gate) futileStreak = StreakAfter(reason, futileStreak, report.After.LoadPercent, s.ThresholdPercent);
                 }
                 var completed = CleanCompleted;
                 if (completed != null)
@@ -444,6 +555,26 @@ namespace RamOptimiser.Gui
             }
             catch (Exception ex) { RaiseError(ex, ServiceErrorSource.Clean); }
             finally { EndClean(); }
+        }
+
+        /// <summary>
+        /// The streak after a clean. An automatic clean counts (NextStreak); a manual one can only reset it, when it
+        /// brought load under the threshold: the user chose to clean, which says nothing about whether automatic
+        /// cleans help, so it never lengthens their wait. Pure.
+        /// </summary>
+        public static int StreakAfter(CleanReason reason, int streak, uint loadAfter, int thresholdPercent)
+        {
+            if (reason != CleanReason.Manual) return NextStreak(streak, loadAfter, thresholdPercent);
+            return loadAfter < thresholdPercent ? 0 : streak;
+        }
+
+        /// <summary>A manual clean run on the calling thread, as CleanNow runs it on a worker. False when one is running.</summary>
+        internal bool RunManualCleanForTests()
+        {
+            AppSettings s = settings;
+            if (Interlocked.CompareExchange(ref cleaning, 1, 0) != 0) return false;
+            RunCleanHoldingGuard(CleanReason.Manual, s);
+            return true;
         }
 
         void Raise<T>(Action<T> handler, T arg)
@@ -466,5 +597,20 @@ namespace RamOptimiser.Gui
             try { tagged(ex, source); }
             catch { }
         }
+    }
+
+    /// <summary>A snapshot of what the window and tray show about auto-clean (AutoCleanService.GetStatus).</summary>
+    public sealed class AutoCleanStatus
+    {
+        /// <summary>The user paused automatic cleans, until PausedUntilUtc. Manual cleans still run.</summary>
+        public bool Paused;
+        public DateTime? PausedUntilUtc;
+        /// <summary>Automatic cleans in a row that left load at or above the threshold; above 0 the threshold wait is longer.</summary>
+        public int FutileStreak;
+        public DateTime? LastCleanUtc;
+        /// <summary>The earliest a clean for high load can run again (last clean plus the current cooldown); null before any clean.</summary>
+        public DateTime? NextThresholdCleanUtc;
+        /// <summary>Why automatic cleans wait for the system (sleep, full screen, lock, battery), as of the last tick.</summary>
+        public HoldReason Hold;
     }
 }
