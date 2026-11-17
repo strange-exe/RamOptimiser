@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace RamOptimiser.Tests
@@ -142,10 +143,81 @@ namespace RamOptimiser.Tests
 
             // GUI logic (wording, validation, theme rules, icon) and static XAML checks
             int appFailed = AppTests.Run();
-            int totalPassed = passed + GuiPlumbingTests.Passed + AppTests.Passed, totalFailed = failed + guiFailed + appFailed;
+
+            // Per-package test files register themselves: every other suite class is found and run, in name order.
+            List<Type> suites = DiscoverSuites(typeof(TestMain).Assembly);
+            int discoveredPassed = 0, discoveredFailed = 0;
+            foreach (Type suite in suites)
+            {
+                int suitePassed, suiteFailed;
+                RunSuite(suite, out suitePassed, out suiteFailed);
+                discoveredPassed += suitePassed;
+                discoveredFailed += suiteFailed;
+            }
+            var names = suites.ConvertAll(t => t.Name);
+            var sortedNames = new List<string>(names);
+            sortedNames.Sort(StringComparer.Ordinal);
+            Check("discovery: finds the sample suite", suites.Contains(typeof(DiscoverySampleTests)), string.Join(", ", names.ToArray()));
+            Check("discovery: leaves out the suites Main runs by hand", !suites.Contains(typeof(AppTests))
+                && !suites.Contains(typeof(GuiPlumbingTests)) && !suites.Contains(typeof(TestMain)));
+            Check("discovery: runs suites in name order", string.Join(",", names.ToArray()) == string.Join(",", sortedNames.ToArray()));
+            Check("discovery: the sample suite ran and its checks are counted",
+                DiscoverySampleTests.Passed == 1 && discoveredPassed >= DiscoverySampleTests.Passed,
+                DiscoverySampleTests.Passed + " sample, " + discoveredPassed + " discovered");
+
+            int totalPassed = passed + GuiPlumbingTests.Passed + AppTests.Passed + discoveredPassed,
+                totalFailed = failed + guiFailed + appFailed + discoveredFailed;
 
             Console.WriteLine("{0} passed, {1} failed", totalPassed, totalFailed);
             return totalFailed == 0 ? 0 : 1;
+        }
+
+        // ---------------------------------------------------------------- suite discovery
+
+        // A suite is a static class in this namespace named *Tests (other than the ones Main runs by hand)
+        // with public static int Run() and a public static int Passed property or field.
+        internal static List<Type> DiscoverSuites(Assembly assembly)
+        {
+            var suites = new List<Type>();
+            foreach (Type t in assembly.GetTypes())
+            {
+                if (!t.IsClass || !t.IsAbstract || !t.IsSealed || t.IsNested) continue; // static, top-level classes only
+                if (t.Namespace != "RamOptimiser.Tests" || !t.Name.EndsWith("Tests", StringComparison.Ordinal)) continue;
+                if (t == typeof(AppTests) || t == typeof(GuiPlumbingTests) || t.Name == "Tests") continue;
+                MethodInfo run = t.GetMethod("Run", BindingFlags.Public | BindingFlags.Static, null, Type.EmptyTypes, null);
+                if (run == null || run.ReturnType != typeof(int) || PassedMember(t) == null) continue;
+                suites.Add(t);
+            }
+            suites.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+            return suites;
+        }
+
+        static MemberInfo PassedMember(Type t)
+        {
+            PropertyInfo p = t.GetProperty("Passed", BindingFlags.Public | BindingFlags.Static);
+            if (p != null && p.PropertyType == typeof(int) && p.GetGetMethod() != null) return p;
+            FieldInfo f = t.GetField("Passed", BindingFlags.Public | BindingFlags.Static);
+            if (f != null && f.FieldType == typeof(int)) return f;
+            return null;
+        }
+
+        // A suite that throws counts as one failure, so a crash in one file never hides the others.
+        static void RunSuite(Type suite, out int suitePassed, out int suiteFailed)
+        {
+            try
+            {
+                suiteFailed = (int)suite.GetMethod("Run", BindingFlags.Public | BindingFlags.Static, null, Type.EmptyTypes, null)
+                    .Invoke(null, null);
+            }
+            catch (TargetInvocationException ex)
+            {
+                Exception inner = ex.InnerException ?? ex;
+                Console.WriteLine("FAIL " + suite.Name + ": threw " + inner.GetType().Name + ": " + inner.Message);
+                suiteFailed = 1;
+            }
+            MemberInfo m = PassedMember(suite);
+            PropertyInfo p = m as PropertyInfo;
+            suitePassed = p != null ? (int)p.GetValue(null, null) : (int)((FieldInfo)m).GetValue(null);
         }
 
         // ---------------------------------------------------------------- engine: outcomes, passes, drives, restore

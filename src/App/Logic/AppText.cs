@@ -23,7 +23,7 @@ namespace RamOptimiser.App
         public string Status;
     }
 
-    public static class AppText
+    public static partial class AppText
     {
         public const string AppName = "RAM Optimiser";
         /// <summary>.NET Framework's NotifyIcon.Text throws above 63 characters (newer .NET allows 127).</summary>
