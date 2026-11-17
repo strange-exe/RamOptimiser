@@ -8,6 +8,7 @@ using System.Management;
 using System.Runtime.InteropServices;
 using System.ServiceProcess;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace RamOptimiser
 {
@@ -81,20 +82,49 @@ namespace RamOptimiser
 
     // ====================================================================== startup apps
 
-    public enum StartupSource { UserRun, MachineRun, MachineRun32, UserFolder, CommonFolder }
+    /// <summary>
+    /// Where a startup entry lives. The RunOnce and Packaged kinds are listed only by StartupApps.Query(true) and
+    /// are read-only: a RunOnce entry can't be paused reversibly, and a packaged task belongs to Settings.
+    /// </summary>
+    public enum StartupSource { UserRun, MachineRun, MachineRun32, UserFolder, CommonFolder, UserRunOnce, MachineRunOnce, MachineRunOnce32, Packaged }
 
     public sealed class StartupApp
     {
         public StartupSource Source;
-        /// <summary>The Run value name, or the file name in a Startup folder: also the StartupApproved value name.</summary>
+        /// <summary>The Run value name, or the file name in a Startup folder: also the StartupApproved value name.
+        /// For a RunOnce row, the value name without its "!" or "*" prefix; for a packaged row, its display name.</summary>
         public string Name;
         public string ExeName;
         public string ExePath;
         public string Publisher;
         public bool Enabled;
         public KnownItem Known;
+        /// <summary>Packaged rows: the package family name (e.g. 5319275A.WhatsAppDesktop_cv1g1gvanyjgm).</summary>
+        public string PackageFamily;
+        /// <summary>Packaged rows: the task's state as Windows records it. Meaningless for other rows.</summary>
+        public PackagedState Packaged;
+        /// <summary>Packaged rows: a policy decides whether it starts (states 3 and 4).</summary>
+        public bool PolicySet;
         /// <summary>Entries under HKLM or the all-users folder need administrator rights to change.</summary>
-        public bool NeedsAdmin { get { return Source != StartupSource.UserRun && Source != StartupSource.UserFolder; } }
+        public bool NeedsAdmin
+        {
+            get
+            {
+                switch (Source)
+                {
+                    case StartupSource.MachineRun: case StartupSource.MachineRun32: case StartupSource.CommonFolder:
+                    case StartupSource.MachineRunOnce: case StartupSource.MachineRunOnce32:
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+        }
+        /// <summary>Only Run and Startup-folder rows have a reversible on/off switch (StartupApproved).</summary>
+        public bool CanToggle
+        {
+            get { return !StartupApps.IsRunOnce(Source) && Source != StartupSource.Packaged; }
+        }
     }
 
     /// <summary>
@@ -108,23 +138,88 @@ namespace RamOptimiser
     {
         const string RunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
         const string Run32Path = @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run";
+        const string RunOncePath = @"Software\Microsoft\Windows\CurrentVersion\RunOnce";
+        const string RunOnce32Path = @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce";
         const string ApprovedBase = @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\";
+        /// <summary>Shortcuts are a few KB; anything bigger is not read.</summary>
+        const int MaxShortcutBytes = 64 * 1024;
 
+        /// <summary>The rows the Startup tab shows today: Run keys and Startup folders, shortcuts listed by name.</summary>
         public static List<StartupApp> Query()
+        {
+            return Query(false);
+        }
+
+        /// <summary>
+        /// With includeExtraSources, also the RunOnce entries and packaged (Store / MSIX) startup tasks, both
+        /// read-only, and each Startup-folder shortcut's real target. Off by default until the Startup tab can show
+        /// read-only rows (package 6A), so the current list does not change.
+        /// </summary>
+        public static List<StartupApp> Query(bool includeExtraSources)
         {
             var list = new List<StartupApp>();
             ReadRun(list, Registry.CurrentUser, RunPath, StartupSource.UserRun);
             ReadRun(list, Registry.LocalMachine, RunPath, StartupSource.MachineRun);
             ReadRun(list, Registry.LocalMachine, Run32Path, StartupSource.MachineRun32);
-            ReadFolder(list, Environment.GetFolderPath(Environment.SpecialFolder.Startup), StartupSource.UserFolder);
-            ReadFolder(list, Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup), StartupSource.CommonFolder);
+            if (includeExtraSources)
+            {
+                // learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys
+                ReadRun(list, Registry.CurrentUser, RunOncePath, StartupSource.UserRunOnce);
+                ReadRun(list, Registry.LocalMachine, RunOncePath, StartupSource.MachineRunOnce);
+                ReadRun(list, Registry.LocalMachine, RunOnce32Path, StartupSource.MachineRunOnce32);
+            }
+            ReadFolder(list, Environment.GetFolderPath(Environment.SpecialFolder.Startup), StartupSource.UserFolder, includeExtraSources);
+            ReadFolder(list, Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup), StartupSource.CommonFolder, includeExtraSources);
+            if (includeExtraSources) list.AddRange(PackagedStartup.Read());
+            string[] roots = ProtectedRoots();
             foreach (StartupApp a in list)
             {
-                a.Enabled = IsApprovedEnabled(ReadApproved(a));
-                a.Known = TrustedKnown(StartupKnowledge.FindApp(a.ExeName), a.ExePath, ProtectedRoots());
+                // ApprovedKey is never consulted for a row without a StartupApproved switch.
+                if (a.Source == StartupSource.Packaged) a.Enabled = PackagedStartup.IsOn(a.Packaged);
+                else if (IsRunOnce(a.Source)) a.Enabled = true;
+                else a.Enabled = IsApprovedEnabled(ReadApproved(a));
+                a.Known = TrustedKnown(StartupKnowledge.FindApp(a.ExeName), a.ExePath, roots);
                 a.Publisher = PublisherOf(a.ExePath);
             }
             return list;
+        }
+
+        public static bool IsRunOnce(StartupSource s)
+        {
+            return s == StartupSource.UserRunOnce || s == StartupSource.MachineRunOnce || s == StartupSource.MachineRunOnce32;
+        }
+
+        /// <summary>
+        /// A RunOnce value name without its documented prefixes: "!" (delete only after the command succeeds) and
+        /// "*" (run in safe mode too). A name that is nothing but prefixes is kept as it is. Pure.
+        /// </summary>
+        public static string RunOnceDisplayName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return name;
+            string trimmed = name.TrimStart('!', '*');
+            return trimmed.Length == 0 ? name : trimmed;
+        }
+
+        /// <summary>Refuses a row with no reversible switch, before any key is opened. Pure.</summary>
+        public static void EnsureCanToggle(StartupApp a)
+        {
+            if (a == null) throw new ArgumentNullException("a");
+            if (!a.CanToggle) throw new InvalidOperationException("this entry can't be changed here");
+        }
+
+        /// <summary>
+        /// Points a Startup-folder row at the program its shortcut really runs, so the built-in list matches the real
+        /// exe and not "{shortcut name}.exe". A target that is not an .exe keeps the name-based guess. Pure.
+        /// </summary>
+        public static void ApplyShortcutTarget(StartupApp a, string target, string arguments)
+        {
+            if (a == null || string.IsNullOrEmpty(target) || !target.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                if (a != null && a.ExeName == null) a.ExeName = Path.GetFileNameWithoutExtension(a.Name) + ".exe";
+                return;
+            }
+            a.ExePath = target;
+            a.ExeName = LaunchedExe("\"" + target + "\" " + (arguments ?? "")) ?? SafeFileName(target);
         }
 
         /// <summary>
@@ -176,25 +271,90 @@ namespace RamOptimiser
                     if (string.IsNullOrEmpty(name)) continue; // the (Default) value is not a startup entry
                     string command = key.GetValue(name) as string;
                     string exe = ExePathOf(command);
-                    list.Add(new StartupApp { Source = source, Name = name, ExePath = exe,
+                    list.Add(new StartupApp { Source = source, Name = IsRunOnce(source) ? RunOnceDisplayName(name) : name, ExePath = exe,
                         ExeName = LaunchedExe(command) ?? SafeFileName(exe) });
                 }
             }
         }
 
-        static void ReadFolder(List<StartupApp> list, string dir, StartupSource source)
+        static void ReadFolder(List<StartupApp> list, string dir, StartupSource source, bool readShortcuts)
         {
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
             foreach (string file in Directory.GetFiles(dir))
             {
                 string name = Path.GetFileName(file);
                 if (string.Equals(name, "desktop.ini", StringComparison.OrdinalIgnoreCase)) continue;
-                // Shortcuts are listed by name; their target is not resolved (no COM shell call needed).
                 bool isExe = name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase);
-                list.Add(new StartupApp { Source = source, Name = name, ExePath = isExe ? file : null,
-                    ExeName = isExe ? name : Path.GetFileNameWithoutExtension(name) + ".exe" });
+                var a = new StartupApp { Source = source, Name = name, ExePath = isExe ? file : null,
+                    ExeName = isExe ? name : Path.GetFileNameWithoutExtension(name) + ".exe" };
+                // A shortcut's target is read from its bytes (LnkReader), never resolved through the shell.
+                if (readShortcuts && name.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
+                {
+                    string target, args;
+                    if (LnkReader.TryReadTarget(ReadRegularFile(file, MaxShortcutBytes), out target, out args))
+                        ApplyShortcutTarget(a, target, args);
+                }
+                list.Add(a);
             }
         }
+
+        /// <summary>
+        /// The bytes of a small regular file, or null. The file is opened without following a link
+        /// (FILE_FLAG_OPEN_REPARSE_POINT) and refused when it is a link, a directory or a device, or larger than
+        /// maxBytes, so a planted junction or symbolic link can't make the elevated app read another file.
+        /// </summary>
+        public static byte[] ReadRegularFile(string path, int maxBytes)
+        {
+            if (string.IsNullOrEmpty(path) || maxBytes <= 0) return null;
+            using (SafeFileHandle h = CreateFileW(path, GenericRead, FileShareRead, IntPtr.Zero, OpenExisting,
+                FileFlagOpenReparsePoint | FileFlagSequentialScan, IntPtr.Zero))
+            {
+                if (h.IsInvalid) return null;
+                if (GetFileType(h) != FileTypeDisk) return null;
+                FileInfoByHandle info;
+                if (!GetFileInformationByHandle(h, out info)) return null;
+                const uint refused = (uint)(FileAttributes.ReparsePoint | FileAttributes.Directory | FileAttributes.Device);
+                if ((info.FileAttributes & refused) != 0) return null;
+                long size = ((long)info.FileSizeHigh << 32) | info.FileSizeLow;
+                if (size > maxBytes) return null;
+                try
+                {
+                    using (var fs = new FileStream(h, FileAccess.Read))
+                    {
+                        var buffer = new byte[size];
+                        int read = 0;
+                        while (read < buffer.Length)
+                        {
+                            int n = fs.Read(buffer, read, buffer.Length - read);
+                            if (n <= 0) return null; // shrank while reading
+                            read += n;
+                        }
+                        return buffer;
+                    }
+                }
+                catch (IOException) { return null; }
+                catch (UnauthorizedAccessException) { return null; }
+            }
+        }
+
+        const uint GenericRead = 0x80000000, FileShareRead = 0x1, OpenExisting = 3;
+        const uint FileFlagOpenReparsePoint = 0x00200000, FileFlagSequentialScan = 0x08000000, FileTypeDisk = 1;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct FileInfoByHandle
+        {
+            public uint FileAttributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime;
+            public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern uint GetFileType(SafeFileHandle file);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GetFileInformationByHandle(SafeFileHandle file, out FileInfoByHandle info);
 
         /// <summary>The program path at the start of a Run command: quoted, or up to the first ".exe". Pure.</summary>
         public static string ExePathOf(string command)
@@ -263,7 +423,9 @@ namespace RamOptimiser
                 case StartupSource.MachineRun: hive = Registry.LocalMachine; sub = ApprovedBase + "Run"; break;
                 case StartupSource.MachineRun32: hive = Registry.LocalMachine; sub = ApprovedBase + "Run32"; break;
                 case StartupSource.UserFolder: hive = Registry.CurrentUser; sub = ApprovedBase + "StartupFolder"; break;
-                default: hive = Registry.LocalMachine; sub = ApprovedBase + "StartupFolder"; break;
+                case StartupSource.CommonFolder: hive = Registry.LocalMachine; sub = ApprovedBase + "StartupFolder"; break;
+                // RunOnce and packaged rows have no StartupApproved value: never map them to someone else's.
+                default: throw new InvalidOperationException("this entry can't be changed here");
             }
         }
 
@@ -292,10 +454,12 @@ namespace RamOptimiser
         /// <summary>
         /// Turns one entry on or off. Throws UnauthorizedAccessException for an all-users entry when not elevated, and
         /// IOException when a per-user key does not resolve inside this user's own hive (a registry link the user
-        /// planted could otherwise point an elevated write at a machine-wide key).
+        /// planted could otherwise point an elevated write at a machine-wide key). Throws InvalidOperationException
+        /// for a RunOnce or packaged row, which has no reversible switch.
         /// </summary>
         public static void SetEnabled(StartupApp a, bool enabled)
         {
+            EnsureCanToggle(a);
             RegistryKey hive; string sub;
             ApprovedKey(a, out hive, out sub);
             using (RegistryKey key = hive.CreateSubKey(sub))
