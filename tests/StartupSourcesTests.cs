@@ -123,7 +123,21 @@ namespace RamOptimiser.Tests
                 LnkReader.TryReadTarget(env, out path, out args) && path == expected, path);
 
             byte[] both = Lnk(null, LinkInfo(@"C:\Apps\x.exe", "", null, null), null, null, EnvBlock(@"C:\Other\z.exe"));
-            Check("lnk: link info wins over the environment block", LnkReader.TryReadTarget(both, out path, out args) && path == @"C:\Apps\x.exe", path);
+            Check("lnk: without HasExpString, link info wins over the environment block", LnkReader.TryReadTarget(both, out path, out args)
+                && path == @"C:\Apps\x.exe", path);
+            // MS-SHLLINK 2.1.1: HasExpString (0x200) says the target is the environment block; LinkInfo is only a hint.
+            byte[] expString = (byte[])both.Clone();
+            expString[21] |= 0x02;
+            Check("lnk: HasExpString prefers the environment block", LnkReader.TryReadTarget(expString, out path, out args)
+                && path == @"C:\Other\z.exe", path);
+            // ForceNoLinkInfo (0x100): the LinkInfo is ignored.
+            byte[] forceNo = (byte[])plain.Clone();
+            forceNo[21] |= 0x01;
+            Check("lnk: ForceNoLinkInfo ignores the link info", !LnkReader.TryReadTarget(forceNo, out path, out args) && path == null, path);
+            byte[] forceNoEnv = (byte[])both.Clone();
+            forceNoEnv[21] |= 0x01;
+            Check("lnk: ForceNoLinkInfo falls back to the environment block", LnkReader.TryReadTarget(forceNoEnv, out path, out args)
+                && path == @"C:\Other\z.exe", path);
 
             byte[] withArgs = Lnk(null, LinkInfo(@"C:\Apps\x.exe", "", null, null), "Contoso", "--tray --min", null);
             Check("lnk: reads arguments", LnkReader.TryReadTarget(withArgs, out path, out args)
@@ -299,6 +313,47 @@ namespace RamOptimiser.Tests
             try { StartupApps.EnsureCanToggle(new StartupApp { Source = StartupSource.UserRun, Name = "X" }); }
             catch (InvalidOperationException) { runOk = false; }
             Check("set enabled: a non-toggleable row throws", threw && threwPackaged && runOk);
+            // SetEnabled itself refuses before opening any key, so these calls write nothing.
+            bool setOnce = false, setPackaged = false;
+            try { StartupApps.SetEnabled(userOnce, false); }
+            catch (InvalidOperationException ex) { setOnce = ex.Message == "this entry can't be changed here"; }
+            try { StartupApps.SetEnabled(packaged, true); }
+            catch (InvalidOperationException ex) { setPackaged = ex.Message == "this entry can't be changed here"; }
+            Check("set enabled: SetEnabled refuses run-once and packaged rows", setOnce && setPackaged);
+            bool keyless = true;
+            foreach (StartupSource s in new[] { StartupSource.UserRunOnce, StartupSource.MachineRunOnce, StartupSource.MachineRunOnce32,
+                StartupSource.Packaged })
+            {
+                Microsoft.Win32.RegistryKey hive; string sub;
+                try { StartupApps.ApprovedKey(new StartupApp { Source = s, Name = "X" }, out hive, out sub); keyless = false; }
+                catch (InvalidOperationException) { }
+            }
+            Check("set enabled: rows without a StartupApproved value map to no key", keyless);
+
+            // A shortcut target must be a local drive path: a share would make the elevated app open it to read
+            // the publisher, connecting with the user's credentials.
+            foreach (string remote in new[] { @"\\host\share\a.exe", @"\\?\UNC\host\share\a.exe", @"\\?\C:\Apps\a.exe", @"a.exe", @"C:a.exe" })
+            {
+                var r = new StartupApp { Source = StartupSource.UserFolder, Name = "Remote.lnk" };
+                StartupApps.ApplyShortcutTarget(r, remote, "");
+                Check("shortcut: a non-local target keeps the guess: " + remote, r.ExePath == null && r.ExeName == "Remote.exe", r.ExePath);
+            }
+            Check("local drive path rule", StartupApps.IsLocalDrivePath(@"C:\Apps\a.exe") && StartupApps.IsLocalDrivePath(@"d:\a.exe")
+                && !StartupApps.IsLocalDrivePath(@"\\host\s\a.exe") && !StartupApps.IsLocalDrivePath(null) && !StartupApps.IsLocalDrivePath("C:")
+                && !StartupApps.IsLocalDrivePath(@"1:\a.exe"));
+
+            // A shortcut in the user's own Startup folder never earns a Keep lock: its LinkInfo path is a hint
+            // anyone can write, not what runs. The same exe from an admin-only source still does.
+            string[] roots = { @"C:\Windows" };
+            string spoofed = @"C:\Windows\System32\SecurityHealthSystray.exe";
+            var userLnk = new StartupApp { Source = StartupSource.UserFolder, Name = "Security.lnk" };
+            StartupApps.ApplyShortcutTarget(userLnk, spoofed, "");
+            KnownItem fromLnk = StartupApps.KnownFor(userLnk, roots);
+            Check("shortcut: a user Startup-folder shortcut is never Keep", userLnk.ExeName == "SecurityHealthSystray.exe"
+                && (fromLnk == null || fromLnk.Verdict != Verdict.Keep), fromLnk == null ? "null" : fromLnk.Verdict.ToString());
+            KnownItem fromRun = StartupApps.KnownFor(new StartupApp { Source = StartupSource.MachineRun, Name = "SecurityHealth",
+                ExePath = spoofed, ExeName = "SecurityHealthSystray.exe" }, roots);
+            Check("shortcut: the same exe from Run under a protected root is Keep", fromRun != null && fromRun.Verdict == Verdict.Keep);
 
             var lnk = new StartupApp { Source = StartupSource.UserFolder, Name = "Contoso.lnk" };
             StartupApps.ApplyShortcutTarget(lnk, @"C:\Apps\Contoso\tray.exe", "--min");
@@ -354,6 +409,30 @@ namespace RamOptimiser.Tests
             bool onlyClassic = true;
             foreach (StartupApp a in plain) onlyClassic &= a.CanToggle;
             Check("gate: the default listing has no new row kinds", onlyClassic);
+            // The same gate without depending on what this PC has installed.
+            List<StartupSource> plainSources = StartupApps.IncludedSources(false), allSources = StartupApps.IncludedSources(true);
+            StartupSource[] extras = { StartupSource.UserRunOnce, StartupSource.MachineRunOnce, StartupSource.MachineRunOnce32, StartupSource.Packaged };
+            bool gateOk = plainSources.Count == 5;
+            foreach (StartupSource s in extras) gateOk &= !plainSources.Contains(s) && allSources.Contains(s);
+            foreach (StartupSource s in plainSources) gateOk &= allSources.Contains(s);
+            Check("gate: the default sources leave out run-once and packaged", gateOk,
+                string.Join(",", plainSources.ConvertAll(s => s.ToString()).ToArray()));
+
+            // Manifests are decoded strictly: UTF-8 (with or without a BOM) or UTF-16 with a BOM; anything else is refused.
+            string xml = "<Package><x a=\"" + (char)0xE9 + "\"/></Package>";
+            byte[] utf8 = new UTF8Encoding(false).GetBytes(xml);
+            byte[] utf8Bom = new UTF8Encoding(true).GetPreamble();
+            byte[] withBom = new byte[utf8Bom.Length + utf8.Length];
+            utf8Bom.CopyTo(withBom, 0); utf8.CopyTo(withBom, utf8Bom.Length);
+            byte[] utf16 = new byte[2 + Encoding.Unicode.GetByteCount(xml)];
+            utf16[0] = 0xFF; utf16[1] = 0xFE;
+            Encoding.Unicode.GetBytes(xml).CopyTo(utf16, 2);
+            byte[] latin1 = Encoding.GetEncoding(28591).GetBytes(xml);
+            Check("manifest: UTF-8 decodes", PackagedStartup.DecodeManifest(utf8) == xml);
+            Check("manifest: UTF-8 with a BOM decodes", PackagedStartup.DecodeManifest(withBom) == xml);
+            Check("manifest: UTF-16 with a BOM decodes", PackagedStartup.DecodeManifest(utf16) == xml);
+            Check("manifest: bytes that are not UTF-8 are refused", PackagedStartup.DecodeManifest(latin1) == null);
+            Check("manifest: null is refused", PackagedStartup.DecodeManifest(null) == null);
 
             List<StartupApp> all = null; string error = null;
             try { all = StartupApps.Query(true); }

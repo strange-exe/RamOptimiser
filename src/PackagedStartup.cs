@@ -141,13 +141,20 @@ namespace RamOptimiser
             string file;
             try { file = Path.Combine(folder, "AppxManifest.xml"); }
             catch (ArgumentException) { return null; }
-            byte[] bytes = StartupApps.ReadRegularFile(file, MaxManifestBytes);
+            return DecodeManifest(StartupApps.ReadRegularFile(file, MaxManifestBytes));
+        }
+
+        /// <summary>
+        /// Manifest bytes as text: UTF-8 (the format's encoding), or whatever a byte order mark names. Bytes that are
+        /// not valid in that encoding give null rather than a guess, so a manifest in another encoding is skipped. Pure.
+        /// </summary>
+        internal static string DecodeManifest(byte[] bytes)
+        {
             if (bytes == null) return null;
             try
             {
-                // XmlReader honours the encoding declaration and BOM itself when given a stream.
                 using (var ms = new MemoryStream(bytes))
-                using (var reader = new StreamReader(ms, Encoding.UTF8, true)) return reader.ReadToEnd();
+                using (var reader = new StreamReader(ms, new UTF8Encoding(false, true), true)) return reader.ReadToEnd();
             }
             catch (DecoderFallbackException) { return null; }
         }

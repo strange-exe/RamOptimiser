@@ -158,19 +158,24 @@ namespace RamOptimiser
         public static List<StartupApp> Query(bool includeExtraSources)
         {
             var list = new List<StartupApp>();
-            ReadRun(list, Registry.CurrentUser, RunPath, StartupSource.UserRun);
-            ReadRun(list, Registry.LocalMachine, RunPath, StartupSource.MachineRun);
-            ReadRun(list, Registry.LocalMachine, Run32Path, StartupSource.MachineRun32);
-            if (includeExtraSources)
+            foreach (StartupSource source in IncludedSources(includeExtraSources))
             {
-                // learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys
-                ReadRun(list, Registry.CurrentUser, RunOncePath, StartupSource.UserRunOnce);
-                ReadRun(list, Registry.LocalMachine, RunOncePath, StartupSource.MachineRunOnce);
-                ReadRun(list, Registry.LocalMachine, RunOnce32Path, StartupSource.MachineRunOnce32);
+                switch (source)
+                {
+                    case StartupSource.UserRun: ReadRun(list, Registry.CurrentUser, RunPath, source); break;
+                    case StartupSource.MachineRun: ReadRun(list, Registry.LocalMachine, RunPath, source); break;
+                    case StartupSource.MachineRun32: ReadRun(list, Registry.LocalMachine, Run32Path, source); break;
+                    // learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys
+                    case StartupSource.UserRunOnce: ReadRun(list, Registry.CurrentUser, RunOncePath, source); break;
+                    case StartupSource.MachineRunOnce: ReadRun(list, Registry.LocalMachine, RunOncePath, source); break;
+                    case StartupSource.MachineRunOnce32: ReadRun(list, Registry.LocalMachine, RunOnce32Path, source); break;
+                    case StartupSource.UserFolder:
+                        ReadFolder(list, Environment.GetFolderPath(Environment.SpecialFolder.Startup), source, includeExtraSources); break;
+                    case StartupSource.CommonFolder:
+                        ReadFolder(list, Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup), source, includeExtraSources); break;
+                    case StartupSource.Packaged: list.AddRange(PackagedStartup.Read()); break;
+                }
             }
-            ReadFolder(list, Environment.GetFolderPath(Environment.SpecialFolder.Startup), StartupSource.UserFolder, includeExtraSources);
-            ReadFolder(list, Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup), StartupSource.CommonFolder, includeExtraSources);
-            if (includeExtraSources) list.AddRange(PackagedStartup.Read());
             string[] roots = ProtectedRoots();
             foreach (StartupApp a in list)
             {
@@ -178,10 +183,41 @@ namespace RamOptimiser
                 if (a.Source == StartupSource.Packaged) a.Enabled = PackagedStartup.IsOn(a.Packaged);
                 else if (IsRunOnce(a.Source)) a.Enabled = true;
                 else a.Enabled = IsApprovedEnabled(ReadApproved(a));
-                a.Known = TrustedKnown(StartupKnowledge.FindApp(a.ExeName), a.ExePath, roots);
+                a.Known = KnownFor(a, roots);
                 a.Publisher = PublisherOf(a.ExePath);
             }
             return list;
+        }
+
+        /// <summary>
+        /// The sources a listing reads, in order. Run-once and packaged rows come only with includeExtraSources
+        /// (the gate until the Startup tab can show read-only rows). Pure.
+        /// </summary>
+        public static List<StartupSource> IncludedSources(bool includeExtraSources)
+        {
+            var sources = new List<StartupSource> { StartupSource.UserRun, StartupSource.MachineRun, StartupSource.MachineRun32 };
+            if (includeExtraSources)
+            {
+                sources.Add(StartupSource.UserRunOnce);
+                sources.Add(StartupSource.MachineRunOnce);
+                sources.Add(StartupSource.MachineRunOnce32);
+            }
+            sources.Add(StartupSource.UserFolder);
+            sources.Add(StartupSource.CommonFolder);
+            if (includeExtraSources) sources.Add(StartupSource.Packaged);
+            return sources;
+        }
+
+        /// <summary>
+        /// The built-in list's entry for a row, with a Keep match only where it can be trusted (TrustedKnown). A
+        /// shortcut in the user's own Startup folder never earns Keep: its target path comes from LinkInfo or the
+        /// environment block, which the user can write to disagree with what the shell really runs. Pure.
+        /// </summary>
+        public static KnownItem KnownFor(StartupApp a, IList<string> protectedRoots)
+        {
+            if (a == null) return null;
+            string trusted = a.Source == StartupSource.UserFolder ? null : a.ExePath;
+            return TrustedKnown(StartupKnowledge.FindApp(a.ExeName), trusted, protectedRoots);
         }
 
         public static bool IsRunOnce(StartupSource s)
@@ -209,17 +245,26 @@ namespace RamOptimiser
 
         /// <summary>
         /// Points a Startup-folder row at the program its shortcut really runs, so the built-in list matches the real
-        /// exe and not "{shortcut name}.exe". A target that is not an .exe keeps the name-based guess. Pure.
+        /// exe and not "{shortcut name}.exe". A target that is not an .exe on a local drive keeps the name-based
+        /// guess: a share (\\host\...) would make the elevated app connect to it to read the publisher. Pure.
         /// </summary>
         public static void ApplyShortcutTarget(StartupApp a, string target, string arguments)
         {
-            if (a == null || string.IsNullOrEmpty(target) || !target.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            if (a == null || !IsLocalDrivePath(target) || !target.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
             {
                 if (a != null && a.ExeName == null) a.ExeName = Path.GetFileNameWithoutExtension(a.Name) + ".exe";
                 return;
             }
             a.ExePath = target;
             a.ExeName = LaunchedExe("\"" + target + "\" " + (arguments ?? "")) ?? SafeFileName(target);
+        }
+
+        /// <summary>A fully qualified path on a lettered drive ("C:\..."): no share, device or \\?\ prefix. Pure.</summary>
+        public static bool IsLocalDrivePath(string path)
+        {
+            if (string.IsNullOrEmpty(path) || path.Length < 3) return false;
+            char d = char.ToUpperInvariant(path[0]);
+            return d >= 'A' && d <= 'Z' && path[1] == ':' && path[2] == '\\';
         }
 
         /// <summary>
@@ -403,7 +448,8 @@ namespace RamOptimiser
 
         static string PublisherOf(string exePath)
         {
-            if (string.IsNullOrEmpty(exePath)) return null;
+            // Local drives only: a share in a user-writable Run value would make the elevated app connect to it.
+            if (!IsLocalDrivePath(exePath)) return null;
             try
             {
                 if (!File.Exists(exePath)) return null;
@@ -415,7 +461,7 @@ namespace RamOptimiser
             catch (UnauthorizedAccessException) { return null; }
         }
 
-        static void ApprovedKey(StartupApp a, out RegistryKey hive, out string sub)
+        internal static void ApprovedKey(StartupApp a, out RegistryKey hive, out string sub)
         {
             switch (a.Source)
             {

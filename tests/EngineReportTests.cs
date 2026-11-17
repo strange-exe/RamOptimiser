@@ -145,6 +145,11 @@ namespace RamOptimiser.Tests
             Check("combine: message names the merged size", Cleaner.CombineMessage(30720, 4096) == "merged 120.0 MB",
                 Cleaner.CombineMessage(30720, 4096));
             Check("combine: zero pages says none found", Cleaner.CombineMessage(0, 4096) == "no identical pages found");
+            // Until an elevated run confirms Windows writes PagesCombined back, a zero count may only mean "not
+            // reported", so the row claims nothing for it.
+            Check("combine: the row names a merged size", Cleaner.CombineRowMessage(30720, 4096) == "merged 120.0 MB");
+            Check("combine: the row says nothing for zero pages while the count is unconfirmed",
+                !Cleaner.PagesCombinedConfirmed && Cleaner.CombineRowMessage(0, 4096) == null);
         }
 
         // ---------------------------------------------------------------- E8+E16: report lines
@@ -217,7 +222,9 @@ namespace RamOptimiser.Tests
             var s = new MemorySnapshot
             {
                 TotalPhys = 16 * GB, AvailablePhys = 6 * GB, HasLists = true, PageSize = 4096,
-                Modified = 600 * MB, ModifiedNoWrite = 40 * MB, SystemCache = 1100 * MB,
+                // SystemCache is the standby list plus the system working set (PERFORMANCE_INFORMATION), so it is
+                // never below Standby: here a 1 GB system working set on top of 5 GB of standby.
+                Modified = 600 * MB, ModifiedNoWrite = 40 * MB, SystemCache = 6 * GB,
                 StandbyByPriority = new ulong[8], Standby = 5 * GB
             };
             s.StandbyByPriority[0] = 1200 * MB;
@@ -247,7 +254,17 @@ namespace RamOptimiser.Tests
             AreaEstimate standby = Row(CleanEstimate.For(ListSnap(), Areas.StandbyList), Areas.StandbyList);
             Check("estimate: standby is the whole standby total", standby.Kind == EstimateKind.Bytes && standby.Bytes == 5 * GB);
             AreaEstimate cache = Row(CleanEstimate.For(ListSnap(), Areas.SystemFileCache), Areas.SystemFileCache);
-            Check("estimate: file cache is an upper bound", cache.Kind == EstimateKind.Bytes && cache.Bytes == 1100 * MB && cache.UpperBound);
+            Check("estimate: file cache leaves out what is already on standby", cache.Kind == EstimateKind.Bytes && cache.Bytes == 1 * GB
+                && cache.UpperBound, Format.Bytes(cache.Bytes));
+            MemorySnapshot noLists = ListSnap();
+            noLists.HasLists = false;
+            cache = Row(CleanEstimate.For(noLists, Areas.SystemFileCache), Areas.SystemFileCache);
+            Check("estimate: file cache without the lists is the whole figure, said to include standby", cache.Kind == EstimateKind.Bytes
+                && cache.Bytes == 6 * GB && cache.UpperBound && cache.Note.Contains("already on standby"), cache.Note);
+            MemorySnapshot odd = ListSnap();
+            odd.SystemCache = 2 * GB;
+            cache = Row(CleanEstimate.For(odd, Areas.SystemFileCache), Areas.SystemFileCache);
+            Check("estimate: file cache below standby clamps to 0", cache.Kind == EstimateKind.Bytes && cache.Bytes == 0, Format.Bytes(cache.Bytes));
 
             MemorySnapshot refused = ListSnap();
             refused.HasLists = false;
@@ -385,10 +402,10 @@ namespace RamOptimiser.Tests
             Check("dry run: first line says nothing was cleaned", lines.Count > 0 && lines[0] == "Dry run: nothing was cleaned.", w.ToString());
             Check("dry run: combine row", lines.Contains("  combine       can't be estimated: depends on how many pages are identical"), w.ToString());
             Check("dry run: modified row", lines.Contains("  modified      about 560.0 MB written to disk, then counted as available"), w.ToString());
-            Check("dry run: file cache row", lines.Contains("  filecache     up to 1.1 GB of file cache moved to standby (still counted as available)"), w.ToString());
+            Check("dry run: file cache row", lines.Contains("  filecache     up to 1.0 GB of file cache moved to standby, where it counts as available"), w.ToString());
             Check("dry run: standby-low row", lines.Contains("  standby-low   about 1.2 GB of low-priority cache dropped (already counted as available)"), w.ToString());
             Check("dry run: registry row", lines.Contains("  registry      no memory figure: writes registry changes to disk"), w.ToString());
-            Check("dry run: in-use line", lines.Contains("In use could drop by about 560.0 MB, plus whatever trimming releases."), w.ToString());
+            Check("dry run: in-use line", lines.Contains("In use could drop by about 560.0 MB, and by up to 1.0 GB more from the file cache, plus whatever trimming releases."), w.ToString());
             Check("dry run: advice line", lines.Count > 0
                 && lines[lines.Count - 1] == "Windows is not short of memory. A clean frees some now, and programs read part of it back.", w.ToString());
             Check("dry run: no admin note when lists are readable", !w.ToString().Contains("elevated terminal"));
@@ -406,18 +423,30 @@ namespace RamOptimiser.Tests
             Check("dry run: no admin note without list areas", !w.ToString().Contains("elevated terminal"), w.ToString());
             Check("dry run: unknown advice prints no advice line", Lines(w.ToString()).Count == 3, w.ToString());
 
-            // Through Main: it never reaches the elevation check or the cleaner. Skipped when elevated, so a bug here
-            // could never clean memory for real.
-            if (!Privileges.IsElevated())
-            {
-                TextWriter saved = Console.Out;
-                var captured = new StringWriter();
-                int code;
-                try { Console.SetOut(captured); code = Program.Main(new[] { "clean", "--dry-run", "--areas", "registry" }); }
-                finally { Console.SetOut(saved); }
-                Check("dry run: Main needs no admin and changes nothing", code == Program.ExitOk
-                    && captured.ToString().StartsWith("Dry run: nothing was cleaned."), code + " " + captured);
-            }
+            // The file cache alone: flushing it moves its pages to standby, so In use can drop.
+            w = new StringWriter();
+            Program.PrintDryRun(w, ListSnap(), Areas.SystemFileCache);
+            lines = Lines(w.ToString());
+            Check("dry run: file cache alone says In use can drop", lines.Contains("In use could drop by up to 1.0 GB from the file cache.")
+                && !w.ToString().Contains("not likely to drop"), w.ToString());
+            w = new StringWriter();
+            Program.PrintDryRun(w, ListSnap(), Areas.SystemFileCache | Areas.WorkingSets);
+            Check("dry run: file cache with trimming", Lines(w.ToString()).Contains(
+                "In use could drop by up to 1.0 GB from the file cache, plus whatever trimming releases."), w.ToString());
+
+            // Through the dispatcher: a dry run never reaches the elevation check or the cleaner, elevated or not.
+            // The fakes throw, so a bug here can never clean memory for real.
+            var dryOut = new StringWriter();
+            int dryCode = Program.Dispatch(Options.Parse(new[] { "clean", "--dry-run", "--areas", "registry" }), dryOut,
+                () => ListSnap(), a => { throw new InvalidOperationException("dry run reached the cleaner"); },
+                o => { throw new InvalidOperationException("dry run reached watch"); });
+            Check("dry run: the dispatcher never calls the cleaner", dryCode == Program.ExitOk
+                && dryOut.ToString().StartsWith("Dry run: nothing was cleaned."), dryCode + " " + dryOut);
+            int cleans = 0;
+            int cleanCode = Program.Dispatch(Options.Parse(new[] { "clean", "--areas", "registry" }), new StringWriter(),
+                () => ListSnap(), a => { cleans++; return a == Areas.RegistryCache ? 7 : -1; },
+                o => { throw new InvalidOperationException("clean reached watch"); });
+            Check("dispatch: a real clean goes to the cleaner with its areas", cleans == 1 && cleanCode == 7, cleans + " " + cleanCode);
         }
 
         // ---------------------------------------------------------------- E20: watch wake-up
@@ -428,7 +457,7 @@ namespace RamOptimiser.Tests
             public double Seconds;
             public Func<double, uint> Load = t => 95;
             public uint LoadAfter = 50;
-            public bool LowSignalled = true;
+            public bool LowSignalled = true, CleanThrows;
             public ulong CommitTotal, CommitLimit;
             public List<bool> Flags = new List<bool>();
             public List<double> FlagTimes = new List<double>();
@@ -447,6 +476,7 @@ namespace RamOptimiser.Tests
                     Clean = a =>
                     {
                         Cleans++;
+                        if (CleanThrows) throw new InvalidOperationException("clean failed");
                         return new CleanReport
                         {
                             Before = new MemorySnapshot { TotalPhys = 100, AvailablePhys = 5, LoadPercent = 95 },
@@ -504,6 +534,13 @@ namespace RamOptimiser.Tests
             Check("watch: low wake logs a line", rig.Out.ToString().Contains("[12:00:01] Windows reports low memory: checking now"), rig.Out.ToString());
             Check("watch: stop still ends watching", rig.Out.ToString().EndsWith("Stopped." + Environment.NewLine), rig.Out.ToString());
 
+            // A clean that throws did not clean: after a low wake it mutes the signal, so with --cooldown 0 a failing
+            // clean is not retried back to back on the still-set signal.
+            rig = new LowRig { CleanThrows = true, MaxWaits = 4 };
+            rig.Run(85, 0);
+            Check("watch: a failed clean after a low wake mutes the signal", rig.Flags.Count >= 2 && rig.Flags[0] && !rig.Flags[1],
+                string.Join(",", rig.Flags.ConvertAll(f => f ? "1" : "0").ToArray()));
+
             // Without a low signal, the plain interval wait is unchanged.
             rig = new LowRig { Load = t => 50, LowSignalled = false, MaxWaits = 4 };
             rig.Run(85, 300);
@@ -552,6 +589,14 @@ namespace RamOptimiser.Tests
             Check("advice text: mixed wording", AppText.CleanAdvice(CleanAdvice.Mixed, s)
                 == "Windows is not short of memory. A clean frees some now, and programs read part of it back.");
             Check("advice text: null snapshot is safe", AppText.CleanAdvice(CleanAdvice.CommitBound, null) != null);
+            // One source for the shared sentences: the app and the terminal say the same thing.
+            bool same = true;
+            foreach (CleanAdvice a in new[] { CleanAdvice.WillHelp, CleanAdvice.Mixed, CleanAdvice.NotNeeded })
+                same &= CleanEstimate.AdviceSentence(a) != null && AppText.CleanAdvice(a, s) == CleanEstimate.AdviceSentence(a)
+                    && Program.AdviceText(a, s) == CleanEstimate.AdviceSentence(a);
+            Check("advice text: app and terminal share one sentence per advice", same);
+            Check("advice text: the shared sentence has none for commit bound or none",
+                CleanEstimate.AdviceSentence(CleanAdvice.CommitBound) == null && CleanEstimate.AdviceSentence(CleanAdvice.None) == null);
         }
 
         // ---------------------------------------------------------------- helpers

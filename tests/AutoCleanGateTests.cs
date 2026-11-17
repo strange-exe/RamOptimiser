@@ -24,6 +24,7 @@ namespace RamOptimiser.Tests
         public static int Run()
         {
             GateTests();
+            FallbackTests();
             DecideTests();
             MapperTests();
             WordingTests();
@@ -49,6 +50,29 @@ namespace RamOptimiser.Tests
         static string Show(GateHold h)
         {
             return h == null ? "null" : h.Reason + " t=" + h.Threshold + " i=" + h.Interval;
+        }
+
+        /// <summary>
+        /// No working awake clock: the service passes wall time as awake time, so no sleep gap can show and the
+        /// suspend timeout counts wall time. A wall jump while marked asleep must still read as a wake.
+        /// </summary>
+        static void FallbackTests()
+        {
+            var o = new GateOptions();
+            AutoCleanGate asleep = AutoCleanGate.OnSuspend(AutoCleanGate.Initial, TimeSpan.FromTicks(T0.Ticks)).Gate;
+            DateTime woke = T0 + TimeSpan.FromHours(8);
+            GateStep jump = AutoCleanGate.OnTick(asleep, woke, TimeSpan.FromHours(8), TimeSpan.FromHours(8), TimeSpan.FromTicks(woke.Ticks),
+                Presence.Unknown, PowerSource.Unknown, o, true);
+            Check("gate: no awake clock, a wall jump while asleep is a wake with the grace", Holds(jump.Hold, HoldReason.Resuming, true, true)
+                && jump.Reanchor && !jump.Gate.Asleep, Show(jump.Hold) + " reanchor=" + jump.Reanchor);
+            DateTime later = T0 + S(61);
+            GateStep ticks = AutoCleanGate.OnTick(asleep, later, S(2), S(2), TimeSpan.FromTicks(later.Ticks), Presence.Unknown, PowerSource.Unknown, o, true);
+            Check("gate: no awake clock, short ticks still expire the suspend without a grace", Holds(ticks.Hold, HoldReason.None, false, false)
+                && !ticks.Reanchor && !ticks.Gate.Asleep, Show(ticks.Hold));
+            AutoCleanGate asleepReal = AutoCleanGate.OnSuspend(AutoCleanGate.Initial, A0).Gate;
+            GateStep awake8h = AutoCleanGate.OnTick(asleepReal, woke, S(2), S(2), A0 + TimeSpan.FromHours(8), Presence.Unknown, PowerSource.Unknown, o, false);
+            Check("gate: with an awake clock the flag changes nothing", Holds(awake8h.Hold, HoldReason.None, false, false) && !awake8h.Reanchor,
+                Show(awake8h.Hold));
         }
 
         static void GateTests()

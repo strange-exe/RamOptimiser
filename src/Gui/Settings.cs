@@ -115,17 +115,33 @@ namespace RamOptimiser.Gui
         public static AppSettings Load(string path)
         {
             if (path == null) throw new ArgumentNullException("path");
+            AppSettings settings;
+            return TryLoad(path, out settings) ? settings : new AppSettings();
+        }
+
+        /// <summary>
+        /// As Load, but says whether the file was read: false (and null) for a missing, oversize, locked, refused or
+        /// unreadable file, so a caller merging or reloading never takes a file it could not read for one of
+        /// defaults. A file that was read but holds bad values is true, with defaults for those values.
+        /// </summary>
+        public static bool TryLoad(string path, out AppSettings settings)
+        {
+            settings = null;
+            if (path == null) return false;
             try
             {
                 string full = Path.GetFullPath(path);
                 SafeUserFolder.Check(Path.GetDirectoryName(full), full);
                 var info = new FileInfo(full);
-                if (!info.Exists || info.Length > MaxFileBytes) return new AppSettings();
-                return Parse(File.ReadAllText(full, Utf8NoBom));
+                if (!info.Exists || info.Length > MaxFileBytes) return false;
+                settings = Parse(File.ReadAllText(full, Utf8NoBom));
+                return true;
             }
-            catch (IOException) { return new AppSettings(); }
-            catch (UnauthorizedAccessException) { return new AppSettings(); }
-            catch (System.Security.SecurityException) { return new AppSettings(); }
+            catch (ArgumentException) { return false; }
+            catch (NotSupportedException) { return false; }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (System.Security.SecurityException) { return false; }
         }
 
         /// <summary>

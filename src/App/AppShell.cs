@@ -44,6 +44,7 @@ namespace RamOptimiser.App
         AppSettings settings;
         /// <summary>Restart as administrator: idle, waiting on the UAC prompt, or exiting (P10).</summary>
         ElevationState elevationState = ElevationState.Idle;
+        bool restartHadFocus;
         /// <summary>The settings as last loaded or saved, and the file's stamp then: the merge's common ancestor (P12).</summary>
         AppSettings baseline;
         FileStamp stamp;
@@ -1076,6 +1077,8 @@ namespace RamOptimiser.App
             FlushThreshold();
             elevationState = step.State;
             restartError.Visibility = Visibility.Collapsed;
+            // Disabling the link drops keyboard focus; it goes back there if the prompt is cancelled or fails.
+            restartHadFocus = restartButton.IsKeyboardFocused;
             ShowRestartLink();
             string args;
             int pid;
@@ -1114,12 +1117,21 @@ namespace RamOptimiser.App
                     // Asked from the tray, the window may be hidden or on another tab: bring the error line into view.
                     memoryTab.IsSelected = true;
                     ShowWindow();
+                    RestoreRestartFocus();
                     return;
                 default:
                     // Cancelled: the link comes back, with no message, as before.
                     ShowRestartLink();
+                    RestoreRestartFocus();
                     return;
             }
+        }
+
+        /// <summary>Puts keyboard focus back on the restart link when it had it before the prompt.</summary>
+        void RestoreRestartFocus()
+        {
+            if (restartHadFocus && restartButton.IsEnabled && restartButton.IsVisible) restartButton.Focus();
+            restartHadFocus = false;
         }
 
         /// <summary>
@@ -1734,9 +1746,11 @@ namespace RamOptimiser.App
         {
             AppSettings before = settings.Clone();
             FileStamp now = SettingsStore.Stamp(settingsPath);
-            // Only a file that was read and exists is merged: an unreadable one must not reset other settings.
-            if (now.Exists && !now.Equals(stamp))
-                settings = SettingsMerge.Merge(baseline, settings, SettingsStore.Load(settingsPath).Normalized());
+            // Only a file that was read and exists is merged: an unreadable one must not reset other settings, so the
+            // app's own settings are saved as they are.
+            AppSettings disk;
+            if (now.Exists && !now.Equals(stamp) && SettingsStore.TryLoad(settingsPath, out disk))
+                settings = SettingsMerge.Merge(baseline, settings, disk.Normalized());
             try
             {
                 SettingsStore.Save(settings, settingsPath);
@@ -1774,8 +1788,9 @@ namespace RamOptimiser.App
             EnsureIntervalChoice();
             // A new threshold moves the slider too, unless a slider value of the user's own still waits.
             SyncSettingsUi(settings.ThresholdPercent != before.ThresholdPercent && !thresholdPending.Pending);
-            // A chosen area behind the disclosure is shown, so the list never hides what will be cleaned.
-            if ((settings.Areas & HiddenAreas) != 0) moreAreas.IsExpanded = true;
+            // An area newly chosen behind the disclosure (from the file) is shown, so the list never hides what will be
+            // cleaned; a disclosure the user closed stays closed on later saves.
+            if (AreasDisclosure.ShouldReveal(before.Areas, settings.Areas, HiddenAreas)) moreAreas.IsExpanded = true;
             RefreshAutoRow();
             UpdateTray();
             if (settings.Theme != before.Theme) ReapplyTheme();
@@ -1817,7 +1832,14 @@ namespace RamOptimiser.App
             // Unchanged, unreadable or deleted: nothing to apply (the next save writes the file again).
             if (!now.Exists || now.Equals(stamp)) return;
             syncState = SettingsSync.Next(syncState, SettingsSyncEvent.DiskChanged);
-            AppSettings disk = SettingsStore.Load(settingsPath).Normalized();
+            AppSettings disk;
+            if (!SettingsStore.TryLoad(settingsPath, out disk))
+            {
+                // Locked, too big or refused: keep running on the current settings and try on a later activation.
+                syncState = SettingsSync.Next(syncState, SettingsSyncEvent.ReloadFailed);
+                return;
+            }
+            disk = disk.Normalized();
             disk.StartWithWindows = settings.StartWithWindows;
             AppSettings before = settings;
             settings = disk;

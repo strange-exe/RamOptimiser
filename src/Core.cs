@@ -502,7 +502,7 @@ namespace RamOptimiser
                     {
                         ulong pageSize = report.Before != null && report.Before.PageSize != 0 ? report.Before.PageSize : 4096;
                         report.CombinedBytes += pages * pageSize;
-                        r.Message = CombineMessage(pages, pageSize);
+                        r.Message = CombineRowMessage(pages, pageSize);
                     }
                     break;
                 case Areas.VolumeCache: FlushVolumes(r); break;
@@ -613,6 +613,19 @@ namespace RamOptimiser
         {
             if (pages == 0) return "no identical pages found";
             return "merged " + Format.Bytes(pages * pageSize);
+        }
+
+        /// <summary>
+        /// Whether a run has confirmed that Windows writes PagesCombined back into the buffer. Until then a zero
+        /// count may only mean "not reported", so the row claims nothing for it (open item from wave 1).
+        /// </summary>
+        internal static readonly bool PagesCombinedConfirmed = false;
+
+        /// <summary>Pure: the combine row's message, or null for a zero count while the count is unconfirmed.</summary>
+        internal static string CombineRowMessage(ulong pages, ulong pageSize)
+        {
+            if (pages == 0 && !PagesCombinedConfirmed) return null;
+            return CombineMessage(pages, pageSize);
         }
 
         private static void SetResult(AreaResult r, int status)
@@ -797,8 +810,21 @@ namespace RamOptimiser
                 case Areas.WorkingSets:
                     e.Kind = EstimateKind.Unknown; e.Note = "programs read back what they touch next"; break;
                 case Areas.SystemFileCache:
-                    e.Kind = EstimateKind.Bytes; e.Bytes = s.SystemCache; e.UpperBound = true;
-                    e.Note = "of file cache moved to standby (still counted as available)"; break;
+                    // SystemCache is "the size of the standby list plus the system working set" (PERFORMANCE_INFORMATION,
+                    // learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-performance_information). Only the working
+                    // set can move to standby; with the lists unreadable the whole figure is shown and said to include it.
+                    e.Kind = EstimateKind.Bytes; e.UpperBound = true;
+                    if (s.HasLists)
+                    {
+                        e.Bytes = s.SystemCache - Math.Min(s.Standby, s.SystemCache);
+                        e.Note = "of file cache moved to standby, where it counts as available";
+                    }
+                    else
+                    {
+                        e.Bytes = s.SystemCache;
+                        e.Note = "of file cache moved to standby (this figure also counts cache already on standby)";
+                    }
+                    break;
                 case Areas.ModifiedList:
                     e.Kind = EstimateKind.Bytes; e.Bytes = s.Modified - Math.Min(s.ModifiedNoWrite, s.Modified);
                     e.Note = "written to disk, then counted as available"; break;
@@ -830,6 +856,34 @@ namespace RamOptimiser
             foreach (AreaEstimate a in e)
                 if (a != null && a.Area == Areas.ModifiedList && a.Kind == EstimateKind.Bytes) sum += a.Bytes;
             return sum;
+        }
+
+        /// <summary>
+        /// The most In use could drop from flushing the file cache, which moves its pages to standby. A ceiling, not
+        /// a likely amount: the system working set holds more than file pages. Zero when filecache is not chosen.
+        /// </summary>
+        public static ulong FileCacheDropUpTo(IList<AreaEstimate> e)
+        {
+            ulong sum = 0;
+            if (e == null) return 0;
+            foreach (AreaEstimate a in e)
+                if (a != null && a.Area == Areas.SystemFileCache && a.Kind == EstimateKind.Bytes) sum += a.Bytes;
+            return sum;
+        }
+
+        /// <summary>
+        /// The advice sentence the app and the terminal share, or null for CommitBound (each surface words that one
+        /// with its own figure) and None.
+        /// </summary>
+        public static string AdviceSentence(CleanAdvice a)
+        {
+            switch (a)
+            {
+                case CleanAdvice.WillHelp: return "Windows reports low memory: a clean can make room now.";
+                case CleanAdvice.Mixed: return "Windows is not short of memory. A clean frees some now, and programs read part of it back.";
+                case CleanAdvice.NotNeeded: return "Windows has plenty of free memory. Cleaning now mostly empties cache and slows the next few minutes.";
+                default: return null;
+            }
         }
 
         /// <summary>

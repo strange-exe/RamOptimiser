@@ -826,6 +826,40 @@ namespace RamOptimiser.Tests
                     rig.AwakeReads + " reads");
             }
 
+            // No awake clock: the first tick after a real sleep may beat the resume message. The suspend must not
+            // simply expire on the hours slept and let an overdue clean fire; it is a wake, with the grace.
+            using (var rig = new HoldRig(threshold85))
+            {
+                rig.AwakeThrows = true;
+                rig.Svc.RunTick();
+                rig.Svc.NotifySuspend();
+                rig.Wall += TimeSpan.FromHours(8);
+                rig.Load = 95;
+                rig.Svc.RunTick();
+                Check("service: no awake clock, the first tick after sleep holds for the grace", rig.Cleans == 0 && rig.Svc.Hold == HoldReason.Resuming,
+                    rig.Cleans + " cleans, " + rig.Svc.Hold);
+                rig.Wall += TimeSpan.FromSeconds(121);
+                rig.Svc.RunTick();
+                Check("service: no awake clock, cleans after the grace", rig.Cleans == 1 && rig.Svc.Hold == HoldReason.None,
+                    rig.Cleans + " cleans, " + rig.Svc.Hold);
+            }
+
+            // Start forgets the last tick: time the service was stopped is not a sleep. The timer's first tick runs at
+            // once on a pool thread; a due clean there proves no gap was seen (a gap would hold it for 2 minutes).
+            using (var rig = new HoldRig(threshold85))
+            {
+                rig.Svc.RunTick();
+                rig.Wall += TimeSpan.FromHours(8);
+                rig.Awake += TimeSpan.FromSeconds(2);
+                rig.Load = 95;
+                rig.Svc.Start(TimeSpan.FromHours(1));
+                DateTime until = DateTime.UtcNow.AddSeconds(10);
+                while (Volatile.Read(ref rig.Cleans) == 0 && DateTime.UtcNow < until) Thread.Sleep(10);
+                rig.Svc.Stop();
+                Check("service: Start forgets the last tick, so a stop is not taken for sleep", Volatile.Read(ref rig.Cleans) == 1
+                    && rig.Svc.Hold == HoldReason.None, rig.Cleans + " cleans, " + rig.Svc.Hold);
+            }
+
             // HoldChanged: once per change, never per tick.
             using (var rig = new HoldRig(interval10))
             {

@@ -145,9 +145,11 @@ namespace RamOptimiser
                         output.WriteLine("[{0:HH:mm:ss}] load {1}% >= {2}%: cleaning", Now(), s.LoadPercent, o.ThresholdPercent);
                         // Recorded before cleaning, so a clean that keeps failing still waits the cooldown.
                         last = now;
-                        cleaning = cleanedThisTick = true;
+                        cleaning = true;
                         CleanReport report = Clean(o.Areas);
                         cleaning = false;
+                        // Only a clean that ran counts for the low signal: a failed one must not be retried at once.
+                        cleanedThisTick = true;
                         failedCleans = 0;
                         Program.PrintReport(output, report);
                         if (CleanEstimate.Advise(s) == CleanAdvice.CommitBound)
@@ -202,14 +204,24 @@ namespace RamOptimiser
                 return ExitUsage;
             }
 
+            return Dispatch(o, Console.Out, MemorySnapshot.Take, RunClean, RunWatch);
+        }
+
+        /// <summary>
+        /// Runs a parsed command. The sampler, cleaner and watch are passed in, so tests can prove a dry run never
+        /// reaches the cleaner without calling Main (which changes the process's DLL search).
+        /// </summary>
+        internal static int Dispatch(Options o, TextWriter output, Func<MemorySnapshot> sample, Func<Areas, int> runClean,
+            Func<Options, int> runWatch)
+        {
             switch (o.Command)
             {
-                case Command.Status: PrintStatus(Console.Out, MemorySnapshot.Take()); return ExitOk;
+                case Command.Status: PrintStatus(output, sample()); return ExitOk;
                 case Command.Clean:
                     // Before the elevation check: a dry run only reads, needs no admin and never reaches the cleaner.
-                    if (o.DryRun) { PrintDryRun(Console.Out, MemorySnapshot.Take(), o.Areas); return ExitOk; }
-                    return RunClean(o.Areas);
-                case Command.Watch: return RunWatch(o);
+                    if (o.DryRun) { PrintDryRun(output, sample(), o.Areas); return ExitOk; }
+                    return runClean(o.Areas);
+                case Command.Watch: return runWatch(o);
                 default: PrintHelp(); return ExitOk;
             }
         }
@@ -307,9 +319,15 @@ namespace RamOptimiser
             }
             if (needsLists) w.WriteLine("(the standby and modified figures need an elevated terminal)");
             ulong drop = CleanEstimate.InUseDropAtLeast(rows);
+            ulong cache = CleanEstimate.FileCacheDropUpTo(rows);
             bool trims = (areas & Areas.WorkingSets) != 0;
-            if (drop > 0)
-                w.WriteLine("In use could drop by about {0}{1}", Format.Bytes(drop), trims ? ", plus whatever trimming releases." : ".");
+            string plusTrim = trims ? ", plus whatever trimming releases." : ".";
+            if (drop > 0 && cache > 0)
+                w.WriteLine("In use could drop by about {0}, and by up to {1} more from the file cache{2}", Format.Bytes(drop), Format.Bytes(cache), plusTrim);
+            else if (drop > 0)
+                w.WriteLine("In use could drop by about {0}{1}", Format.Bytes(drop), plusTrim);
+            else if (cache > 0)
+                w.WriteLine("In use could drop by up to {0} from the file cache{1}", Format.Bytes(cache), plusTrim);
             else if (trims)
                 w.WriteLine("In use could drop by whatever trimming releases; that can't be estimated.");
             else if (unknown)
@@ -339,10 +357,7 @@ namespace RamOptimiser
                 case CleanAdvice.CommitBound:
                     return "Committed memory is " + (s == null ? 0 : s.CommitPercent)
                         + "% of the limit; cleaning does not lower it. Close programs you are not using.";
-                case CleanAdvice.WillHelp: return "Windows reports low memory: a clean can make room now.";
-                case CleanAdvice.Mixed: return "Windows is not short of memory. A clean frees some now, and programs read part of it back.";
-                case CleanAdvice.NotNeeded: return "Windows has plenty of free memory. Cleaning now mostly empties cache and slows the next few minutes.";
-                default: return null;
+                default: return CleanEstimate.AdviceSentence(a);
             }
         }
 

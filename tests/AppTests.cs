@@ -238,6 +238,26 @@ namespace RamOptimiser.Tests
             Check("settings reload retries a failed save", checkBody.Contains("SettingsSyncState.SaveFailed") && checkBody.Contains("SaveAndApply();"), checkBody);
             Check("save merges hand edits", shell.Contains("SettingsMerge.Merge(baseline, settings,"));
             Check("tray is told when settings are not saved", shell.Contains("syncState == SettingsSyncState.SaveFailed"));
+            // A file that could not be read (locked, too big, refused) is never taken for a file of defaults.
+            Check("settings reload only applies a file it could read", checkBody.Contains("SettingsStore.TryLoad(settingsPath, out disk)")
+                && checkBody.Contains("SettingsSyncEvent.ReloadFailed") && !checkBody.Contains("SettingsStore.Load("), checkBody);
+            int save = shell.IndexOf("void SaveAndApply()", StringComparison.Ordinal);
+            int saveEnd = save < 0 ? -1 : shell.IndexOf("\n        }", save, StringComparison.Ordinal);
+            string saveBody = save < 0 || saveEnd < 0 ? "" : shell.Substring(save, saveEnd - save);
+            Check("save merges only a file it could read", saveBody.Contains("SettingsStore.TryLoad(settingsPath, out disk)")
+                && !saveBody.Contains("SettingsStore.Load("), saveBody);
+            // The hidden-areas disclosure opens only for an area newly on, not on every save.
+            Check("a save leaves a closed disclosure closed", shell.Contains("AreasDisclosure.ShouldReveal(before.Areas, settings.Areas, HiddenAreas)")
+                && !shell.Contains("if ((settings.Areas & HiddenAreas) != 0) moreAreas.IsExpanded = true;"));
+            // P10: keyboard focus goes back to the restart link after a cancelled or failed prompt.
+            Check("restart as administrator notes keyboard focus before disabling the link",
+                restartBody.IndexOf("restartHadFocus = restartButton.IsKeyboardFocused;", StringComparison.Ordinal) >= 0
+                && restartBody.IndexOf("restartHadFocus = restartButton.IsKeyboardFocused;", StringComparison.Ordinal)
+                    < restartBody.IndexOf("ShowRestartLink();", StringComparison.Ordinal), restartBody);
+            Check("a failed restart gives focus back", showError.Success && showError.Groups["body"].Value.Contains("RestoreRestartFocus();"));
+            Match cancelled = Regex.Match(shell, @"// Cancelled: the link comes back(?<body>(?:(?!\n        }\n)[\s\S])*)");
+            Check("a cancelled restart gives focus back", cancelled.Success && cancelled.Groups["body"].Value.Contains("RestoreRestartFocus();"),
+                cancelled.Success ? cancelled.Groups["body"].Value : "Cancelled branch not found");
 
             // P10: the elevated copy waits for the copy that asked for it before taking the lock.
             Check("start-up takes over from the copy that asked for elevation", main.Contains("options.HandoffFrom > 0")

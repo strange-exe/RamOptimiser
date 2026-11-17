@@ -30,7 +30,9 @@ namespace RamOptimiser.Tests
             AcquireAfterTests();
             MergeTests();
             StampTests();
+            TryLoadTests();
             SyncTests();
+            DisclosureTests();
             return failed;
         }
 
@@ -255,6 +257,47 @@ namespace RamOptimiser.Tests
             {
                 try { Directory.Delete(dir, true); } catch (IOException) { }
             }
+        }
+
+        /// <summary>
+        /// A file that could not be read is not a file of defaults: a reload or merge from it would reset every
+        /// setting in the running app and then write those defaults over the user's file.
+        /// </summary>
+        static void TryLoadTests()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "ramopt-tryload-" + Guid.NewGuid().ToString("N"));
+            string path = Path.Combine(dir, "settings.ini");
+            try
+            {
+                AppSettings got;
+                Check("try load: a missing file is not read", !SettingsStore.TryLoad(path, out got) && got == null);
+                SettingsStore.Save(new AppSettings { ThresholdPercent = 61 }, path);
+                Check("try load: a good file is read", SettingsStore.TryLoad(path, out got) && got != null && got.ThresholdPercent == 61,
+                    got == null ? "null" : got.ThresholdPercent.ToString());
+                using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+                    Check("try load: a file held open by another program is not read", !SettingsStore.TryLoad(path, out got) && got == null);
+                File.WriteAllText(path, "ThresholdPercent=62\n" + new string('#', (int)SettingsStore.MaxFileBytes));
+                Check("try load: an oversize file is not read", !SettingsStore.TryLoad(path, out got) && got == null);
+                Check("try load: Load still gives defaults for it", SettingsStore.Load(path).ThresholdPercent == AppSettings.DefaultThresholdPercent);
+                Check("try load: a bad path is not read", !SettingsStore.TryLoad(dir + "\\bad\0name.ini", out got) && got == null);
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); } catch (IOException) { }
+            }
+        }
+
+        static void DisclosureTests()
+        {
+            const Areas hidden = Areas.ModifiedList | Areas.CombinePages;
+            Check("disclosure: a hidden area newly on opens it", RamOptimiser.App.AreasDisclosure.ShouldReveal(Areas.WorkingSets,
+                Areas.WorkingSets | Areas.ModifiedList, hidden));
+            Check("disclosure: a hidden area already on leaves it as the user set it", !RamOptimiser.App.AreasDisclosure.ShouldReveal(
+                Areas.ModifiedList, Areas.ModifiedList, hidden));
+            Check("disclosure: a shown area newly on leaves it", !RamOptimiser.App.AreasDisclosure.ShouldReveal(Areas.ModifiedList,
+                Areas.ModifiedList | Areas.WorkingSets, hidden));
+            Check("disclosure: a hidden area turned off leaves it", !RamOptimiser.App.AreasDisclosure.ShouldReveal(
+                Areas.ModifiedList | Areas.CombinePages, Areas.ModifiedList, hidden));
         }
 
         static void SyncRow(SettingsSyncState from, SettingsSyncEvent e, SettingsSyncState to)

@@ -91,6 +91,19 @@ namespace RamOptimiser.App
     }
 
     /// <summary>Initial: nothing read yet. FailedNoData: reading failed before any figure was shown.</summary>
+    /// <summary>When the "more areas" disclosure opens by itself. Pure.</summary>
+    public static class AreasDisclosure
+    {
+        /// <summary>
+        /// True when an area behind the disclosure is newly on (a reload or merge from the file chose it), so the
+        /// list never hides what will be cleaned. An area that was already on leaves the disclosure as the user set it.
+        /// </summary>
+        public static bool ShouldReveal(Areas before, Areas after, Areas hidden)
+        {
+            return (after & ~before & hidden) != 0;
+        }
+    }
+
     public enum MemoryViewState { Initial, Live, LiveWithError, FailedNoData }
 
     /// <summary>The Memory tab's one state, moved by each sample and each sampling failure.</summary>

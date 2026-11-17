@@ -138,12 +138,25 @@ namespace RamOptimiser.Gui
         public static GateStep OnTick(AutoCleanGate g, DateTime now, TimeSpan wallSinceLast, TimeSpan awakeSinceLast,
             TimeSpan awakeNow, Presence p, PowerSource power, GateOptions o)
         {
+            return OnTick(g, now, wallSinceLast, awakeSinceLast, awakeNow, p, power, o, false);
+        }
+
+        /// <summary>
+        /// As above. awakeIsWall says the awake figures are the wall clock standing in for a missing awake clock:
+        /// then no gap can show, and the suspend timeout would count the hours slept, so a wall jump of at least
+        /// SleepGap while marked asleep is taken as the wake (grace and a fresh schedule), whichever of this tick
+        /// and the resume message comes first.
+        /// </summary>
+        public static GateStep OnTick(AutoCleanGate g, DateTime now, TimeSpan wallSinceLast, TimeSpan awakeSinceLast,
+            TimeSpan awakeNow, Presence p, PowerSource power, GateOptions o, bool awakeIsWall)
+        {
             if (g == null) throw new ArgumentNullException("g");
             if (o == null) throw new ArgumentNullException("o");
 
             // A wall clock set back, or an awake clock going back (which it never should), is no gap.
             bool slept = wallSinceLast > TimeSpan.Zero && awakeSinceLast >= TimeSpan.Zero
                 && wallSinceLast - awakeSinceLast >= o.SleepGap;
+            if (awakeIsWall && g.Asleep && wallSinceLast >= o.SleepGap) slept = true;
             if (slept)
             {
                 AutoCleanGate woke = new AutoCleanGate(false, g.SuspendedAtAwake, now + o.ResumeGrace, p, power);

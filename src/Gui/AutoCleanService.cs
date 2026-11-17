@@ -387,7 +387,7 @@ namespace RamOptimiser.Gui
                 TimeSpan wallSince = haveLastTick ? now - lastTickWall : TimeSpan.Zero;
                 // Without a working awake clock both deltas are the wall's, so no sleep gap can show.
                 TimeSpan awakeSince = haveLastTick && haveAwake ? awakeNow - lastTickAwake : wallSince;
-                GateStep step = AutoCleanGate.OnTick(hold, now, wallSince, awakeSince, awakeNow, c.Presence, c.Power, options);
+                GateStep step = AutoCleanGate.OnTick(hold, now, wallSince, awakeSince, awakeNow, c.Presence, c.Power, options, !haveAwake);
                 hold = step.Gate;
                 h = step.Hold;
                 // A wake, or a hold that blocked the schedule ending: the schedule restarts now, so no overdue

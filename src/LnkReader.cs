@@ -14,7 +14,8 @@ namespace RamOptimiser
     {
         const int HeaderSize = 0x4C;
         const uint HasLinkTargetIDList = 0x1, HasLinkInfo = 0x2, HasName = 0x4, HasRelativePath = 0x8,
-            HasWorkingDir = 0x10, HasArguments = 0x20, HasIconLocation = 0x40, IsUnicode = 0x80;
+            HasWorkingDir = 0x10, HasArguments = 0x20, HasIconLocation = 0x40, IsUnicode = 0x80,
+            ForceNoLinkInfo = 0x100, HasExpString = 0x200;
         const uint VolumeIDAndLocalBasePath = 0x1;
         const uint EnvironmentVariableDataBlock = 0xA0000001;
         const int EnvironmentBlockSize = 0x314;
@@ -25,7 +26,9 @@ namespace RamOptimiser
 
         /// <summary>
         /// True with the program path (and arguments, "" when none) when the bytes are a well-formed shell link whose
-        /// LinkInfo has a local path, or, failing that, whose environment-variable block names one. False otherwise.
+        /// LinkInfo has a local path, or, failing that, whose environment-variable block names one (the block comes
+        /// first when HasExpString or ForceNoLinkInfo is set). False otherwise. The path is what the file says, not a
+        /// verified program: callers must not trust it for anything a user-writable shortcut could abuse.
         /// </summary>
         public static bool TryReadTarget(byte[] data, out string path, out string arguments)
         {
@@ -102,7 +105,11 @@ namespace RamOptimiser
                 pos += (int)blockSize;
             }
 
-            if (!string.IsNullOrEmpty(linkPath)) target = linkPath;
+            // LinkInfo is only a hint for finding a moved target (MS-SHLLINK 2.3). HasExpString says the target is the
+            // environment block, and ForceNoLinkInfo says LinkInfo is ignored: both put the block first.
+            if ((flags & ForceNoLinkInfo) != 0) linkPath = null;
+            bool preferEnv = (flags & HasExpString) != 0 && !string.IsNullOrEmpty(envTarget);
+            if (!preferEnv && !string.IsNullOrEmpty(linkPath)) target = linkPath;
             else if (!string.IsNullOrEmpty(envTarget)) target = Environment.ExpandEnvironmentVariables(envTarget);
             if (target != null && (target.Length > MaxStringChars || target.IndexOf('\0') >= 0)) return false;
             return true;

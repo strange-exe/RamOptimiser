@@ -27,10 +27,7 @@ namespace RamOptimiser.App
                         : s.CommitPercent.ToString(CultureInfo.InvariantCulture) + "%";
                     return "Programs have reserved " + reserved + " of the memory Windows can give out. "
                         + "Cleaning does not lower that; closing programs does.";
-                case Advice.WillHelp: return "Windows reports low memory: a clean can make room now.";
-                case Advice.Mixed: return "Windows is not short of memory. A clean frees some now, and programs read part of it back.";
-                case Advice.NotNeeded: return "Windows has plenty of free memory. Cleaning now mostly empties cache and slows the next few minutes.";
-                default: return null;
+                default: return CleanEstimate.AdviceSentence(a); // shared with ramopt; null for None
             }
         }
     }
