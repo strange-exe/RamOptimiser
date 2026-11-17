@@ -1,0 +1,698 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Management;
+using System.Runtime.InteropServices;
+using System.ServiceProcess;
+using Microsoft.Win32;
+
+namespace RamOptimiser
+{
+    public enum Verdict
+    {
+        /// <summary>Nothing most people need stops working.</summary>
+        Safe,
+        /// <summary>A feature some people use stops until it is turned back on.</summary>
+        Caution,
+        /// <summary>Windows, security or hardware support: shown, never offered.</summary>
+        Keep,
+        /// <summary>Not in the built-in list: shown, never offered for services.</summary>
+        Unknown
+    }
+
+    /// <summary>What the app knows about one startup app (by exe file name) or service (by service name).</summary>
+    public sealed class KnownItem
+    {
+        public readonly bool IsService;
+        public readonly string Match;
+        public readonly string Label;
+        public readonly string Purpose;
+        public readonly Verdict Verdict;
+        public readonly string Effect;
+
+        public KnownItem(bool isService, string match, string label, string purpose, Verdict verdict, string effect)
+        {
+            IsService = isService; Match = match; Label = label; Purpose = purpose; Verdict = verdict; Effect = effect;
+        }
+    }
+
+    /// <summary>
+    /// The built-in knowledge base (StartupKb.cs, generated from researched entries) plus the Power Clean catalog.
+    /// Compiled in, never read from a file the user can write: the elevated app acts only on what is listed here.
+    /// </summary>
+    public static partial class StartupKnowledge
+    {
+        static readonly KnownItem[] Entries = BuildEntries();
+
+        public static KnownItem FindApp(string exeName)
+        {
+            if (string.IsNullOrEmpty(exeName)) return null;
+            foreach (KnownItem k in Entries)
+                if (!k.IsService && string.Equals(k.Match, exeName, StringComparison.OrdinalIgnoreCase)) return k;
+            return null;
+        }
+
+        public static KnownItem FindService(string serviceName)
+        {
+            if (string.IsNullOrEmpty(serviceName)) return null;
+            foreach (KnownItem k in Entries)
+                if (k.IsService && string.Equals(k.Match, serviceName, StringComparison.OrdinalIgnoreCase)) return k;
+            ServiceRule rule = ServiceCatalog.Find(serviceName);
+            if (rule == null) return null;
+            return new KnownItem(true, serviceName, rule.Label, rule.Why,
+                rule.Tier == ServiceTier.Suggested ? Verdict.Safe : Verdict.Caution, null);
+        }
+
+        public static IEnumerable<KnownItem> Services()
+        {
+            foreach (KnownItem k in Entries) if (k.IsService) yield return k;
+        }
+
+        /// <summary>Only listed services that are safe or come with a caution may have their startup changed.</summary>
+        public static bool CanDisableService(string serviceName)
+        {
+            KnownItem k = FindService(serviceName);
+            return k != null && (k.Verdict == Verdict.Safe || k.Verdict == Verdict.Caution);
+        }
+    }
+
+    // ====================================================================== startup apps
+
+    public enum StartupSource { UserRun, MachineRun, MachineRun32, UserFolder, CommonFolder }
+
+    public sealed class StartupApp
+    {
+        public StartupSource Source;
+        /// <summary>The Run value name, or the file name in a Startup folder: also the StartupApproved value name.</summary>
+        public string Name;
+        public string ExeName;
+        public string ExePath;
+        public string Publisher;
+        public bool Enabled;
+        public KnownItem Known;
+        /// <summary>Entries under HKLM or the all-users folder need administrator rights to change.</summary>
+        public bool NeedsAdmin { get { return Source != StartupSource.UserRun && Source != StartupSource.UserFolder; } }
+    }
+
+    /// <summary>
+    /// Startup apps from the Run keys and Startup folders, turned off and on the way Task Manager does it: a value
+    /// under Explorer\StartupApproved, so the app's own entry is never deleted and on/off is always reversible.
+    /// The Run keys are documented (learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys);
+    /// the StartupApproved value format is not: first byte even = on, odd = off (Task Manager writes 02 and 03),
+    /// then an 8-byte FILETIME of the change. Observed on this PC (02, 03, 06); may change in a future Windows.
+    /// </summary>
+    public static class StartupApps
+    {
+        const string RunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        const string Run32Path = @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run";
+        const string ApprovedBase = @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\";
+
+        public static List<StartupApp> Query()
+        {
+            var list = new List<StartupApp>();
+            ReadRun(list, Registry.CurrentUser, RunPath, StartupSource.UserRun);
+            ReadRun(list, Registry.LocalMachine, RunPath, StartupSource.MachineRun);
+            ReadRun(list, Registry.LocalMachine, Run32Path, StartupSource.MachineRun32);
+            ReadFolder(list, Environment.GetFolderPath(Environment.SpecialFolder.Startup), StartupSource.UserFolder);
+            ReadFolder(list, Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup), StartupSource.CommonFolder);
+            foreach (StartupApp a in list)
+            {
+                a.Enabled = IsApprovedEnabled(ReadApproved(a));
+                a.Known = TrustedKnown(StartupKnowledge.FindApp(a.ExeName), a.ExePath, ProtectedRoots());
+                a.Publisher = PublisherOf(a.ExePath);
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// The built-in list matches by file name, which anyone can copy. A Keep match locks the switch, so it counts
+        /// only for a program in a folder only administrators can write; elsewhere the row is treated as unknown. Pure.
+        /// </summary>
+        public static KnownItem TrustedKnown(KnownItem k, string exePath, IList<string> protectedRoots)
+        {
+            if (k == null || k.Verdict != Verdict.Keep) return k;
+            foreach (string root in protectedRoots)
+                if (IsInside(exePath, root)) return k;
+            return null;
+        }
+
+        static string[] ProtectedRoots()
+        {
+            var roots = new List<string>();
+            foreach (string r in new[] {
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Environment.GetEnvironmentVariable("ProgramW6432") })
+                if (!string.IsNullOrEmpty(r)) roots.Add(r);
+            return roots.ToArray();
+        }
+
+        /// <summary>True when the normalised path lies under dir ("..", "." and mixed slashes resolved first). Pure.</summary>
+        public static bool IsInside(string path, string dir)
+        {
+            if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(dir)) return false;
+            try
+            {
+                string full = Path.GetFullPath(path), root = Path.GetFullPath(dir).TrimEnd('\\') + "\\";
+                return full.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (ArgumentException) { return false; }
+            catch (NotSupportedException) { return false; }
+            catch (PathTooLongException) { return false; }
+            catch (System.Security.SecurityException) { return false; }
+        }
+
+        static void ReadRun(List<StartupApp> list, RegistryKey hive, string path, StartupSource source)
+        {
+            using (RegistryKey key = hive.OpenSubKey(path))
+            {
+                if (key == null) return;
+                foreach (string name in key.GetValueNames())
+                {
+                    if (string.IsNullOrEmpty(name)) continue; // the (Default) value is not a startup entry
+                    string command = key.GetValue(name) as string;
+                    string exe = ExePathOf(command);
+                    list.Add(new StartupApp { Source = source, Name = name, ExePath = exe,
+                        ExeName = LaunchedExe(command) ?? SafeFileName(exe) });
+                }
+            }
+        }
+
+        static void ReadFolder(List<StartupApp> list, string dir, StartupSource source)
+        {
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+            foreach (string file in Directory.GetFiles(dir))
+            {
+                string name = Path.GetFileName(file);
+                if (string.Equals(name, "desktop.ini", StringComparison.OrdinalIgnoreCase)) continue;
+                // Shortcuts are listed by name; their target is not resolved (no COM shell call needed).
+                bool isExe = name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase);
+                list.Add(new StartupApp { Source = source, Name = name, ExePath = isExe ? file : null,
+                    ExeName = isExe ? name : Path.GetFileNameWithoutExtension(name) + ".exe" });
+            }
+        }
+
+        /// <summary>The program path at the start of a Run command: quoted, or up to the first ".exe". Pure.</summary>
+        public static string ExePathOf(string command)
+        {
+            if (string.IsNullOrWhiteSpace(command)) return null;
+            string c = Environment.ExpandEnvironmentVariables(command.Trim());
+            if (c.StartsWith("\"", StringComparison.Ordinal))
+            {
+                int end = c.IndexOf('"', 1);
+                return end > 1 ? c.Substring(1, end - 1) : null;
+            }
+            int exe = c.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+            if (exe > 0) return c.Substring(0, exe + 4);
+            int space = c.IndexOf(' ');
+            return space > 0 ? c.Substring(0, space) : c;
+        }
+
+        /// <summary>
+        /// Squirrel-style launchers (Discord, Slack, classic Teams) run "Update.exe --processStart App.exe": the app is
+        /// the argument, not Update.exe. Null for any other command. Pure.
+        /// </summary>
+        public static string LaunchedExe(string command)
+        {
+            string exe = SafeFileName(ExePathOf(command));
+            if (!string.Equals(exe, "Update.exe", StringComparison.OrdinalIgnoreCase)) return null;
+            const string flag = "--processStart";
+            int at = command.IndexOf(flag, StringComparison.OrdinalIgnoreCase);
+            if (at < 0) return null;
+            string rest = command.Substring(at + flag.Length).TrimStart(' ', '=');
+            if (rest.StartsWith("\"", StringComparison.Ordinal))
+            {
+                int end = rest.IndexOf('"', 1);
+                return end > 1 ? SafeFileName(rest.Substring(1, end - 1)) : null;
+            }
+            int space = rest.IndexOf(' ');
+            string token = space > 0 ? rest.Substring(0, space) : rest;
+            return token.Length > 0 ? SafeFileName(token) : null;
+        }
+
+        static string SafeFileName(string path)
+        {
+            if (path == null) return null;
+            try { return Path.GetFileName(path); }
+            catch (ArgumentException) { return null; }
+        }
+
+        static string PublisherOf(string exePath)
+        {
+            if (string.IsNullOrEmpty(exePath)) return null;
+            try
+            {
+                if (!File.Exists(exePath)) return null;
+                string company = FileVersionInfo.GetVersionInfo(exePath).CompanyName;
+                return string.IsNullOrWhiteSpace(company) ? null : company.Trim();
+            }
+            catch (ArgumentException) { return null; }
+            catch (IOException) { return null; }
+            catch (UnauthorizedAccessException) { return null; }
+        }
+
+        static void ApprovedKey(StartupApp a, out RegistryKey hive, out string sub)
+        {
+            switch (a.Source)
+            {
+                case StartupSource.UserRun: hive = Registry.CurrentUser; sub = ApprovedBase + "Run"; break;
+                case StartupSource.MachineRun: hive = Registry.LocalMachine; sub = ApprovedBase + "Run"; break;
+                case StartupSource.MachineRun32: hive = Registry.LocalMachine; sub = ApprovedBase + "Run32"; break;
+                case StartupSource.UserFolder: hive = Registry.CurrentUser; sub = ApprovedBase + "StartupFolder"; break;
+                default: hive = Registry.LocalMachine; sub = ApprovedBase + "StartupFolder"; break;
+            }
+        }
+
+        static byte[] ReadApproved(StartupApp a)
+        {
+            RegistryKey hive; string sub;
+            ApprovedKey(a, out hive, out sub);
+            using (RegistryKey key = hive.OpenSubKey(sub)) return key == null ? null : key.GetValue(a.Name) as byte[];
+        }
+
+        /// <summary>No value means on (Windows has not recorded a choice yet); otherwise the low bit of byte 0 is "off". Pure.</summary>
+        public static bool IsApprovedEnabled(byte[] value)
+        {
+            return value == null || value.Length == 0 || (value[0] & 1) == 0;
+        }
+
+        /// <summary>The 12-byte value Task Manager writes: 02 (on) or 03 (off), three zero bytes, FILETIME. Pure.</summary>
+        public static byte[] ApprovedBytes(bool enabled, DateTime utc)
+        {
+            var b = new byte[12];
+            b[0] = enabled ? (byte)2 : (byte)3;
+            if (!enabled) BitConverter.GetBytes(utc.ToFileTimeUtc()).CopyTo(b, 4);
+            return b;
+        }
+
+        /// <summary>
+        /// Turns one entry on or off. Throws UnauthorizedAccessException for an all-users entry when not elevated, and
+        /// IOException when a per-user key does not resolve inside this user's own hive (a registry link the user
+        /// planted could otherwise point an elevated write at a machine-wide key).
+        /// </summary>
+        public static void SetEnabled(StartupApp a, bool enabled)
+        {
+            RegistryKey hive; string sub;
+            ApprovedKey(a, out hive, out sub);
+            using (RegistryKey key = hive.CreateSubKey(sub))
+            {
+                if (hive == Registry.CurrentUser && !IsOwnUserKey(KernelPath(key), CurrentSid(), sub))
+                    throw new IOException("its settings key points outside your user profile");
+                key.SetValue(a.Name, ApprovedBytes(enabled, DateTime.UtcNow), RegistryValueKind.Binary);
+            }
+        }
+
+        /// <summary>True when a kernel key path is exactly \REGISTRY\USER\{sid}\{sub}. Pure.</summary>
+        public static bool IsOwnUserKey(string kernelPath, string sid, string sub)
+        {
+            if (string.IsNullOrEmpty(kernelPath) || string.IsNullOrEmpty(sid) || string.IsNullOrEmpty(sub)) return false;
+            return string.Equals(kernelPath, @"\REGISTRY\USER\" + sid + @"\" + sub.Trim('\\'), StringComparison.OrdinalIgnoreCase);
+        }
+
+        static string CurrentSid()
+        {
+            using (var id = System.Security.Principal.WindowsIdentity.GetCurrent()) return id.User == null ? null : id.User.Value;
+        }
+
+        /// <summary>The key's real path after any links were followed (NtQueryKey, KeyNameInformation); null if unknown.</summary>
+        public static string KernelPath(RegistryKey key)
+        {
+            int size = 512;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                IntPtr buf = Marshal.AllocHGlobal(size);
+                try
+                {
+                    int needed;
+                    int status = NtQueryKey(key.Handle, KeyNameInformation, buf, size, out needed);
+                    if (status == 0)
+                    {
+                        int bytes = Marshal.ReadInt32(buf);
+                        if (bytes < 0 || bytes > size - 4) return null;
+                        return Marshal.PtrToStringUni(IntPtr.Add(buf, 4), bytes / 2);
+                    }
+                    if (status != StatusBufferTooSmall && status != StatusBufferOverflow) return null;
+                    size = Math.Max(needed, size * 2);
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+            return null;
+        }
+
+        const int KeyNameInformation = 3;
+        const int StatusBufferTooSmall = unchecked((int)0xC0000023), StatusBufferOverflow = unchecked((int)0x80000005);
+
+        [DllImport("ntdll.dll")]
+        static extern int NtQueryKey(Microsoft.Win32.SafeHandles.SafeRegistryHandle key, int infoClass, IntPtr info, int length, out int resultLength);
+    }
+
+    // ====================================================================== services at startup
+
+    public enum StartMode { Automatic, AutomaticDelayed, Manual, Disabled, Other }
+
+    public sealed class StartupService
+    {
+        public string Name;
+        public string DisplayName;
+        public StartMode Mode;
+        public bool Running;
+        public long MemoryBytes = -1;
+        public int SharedWith;
+        public KnownItem Known;
+        /// <summary>This app set it to Manual and recorded how it started before.</summary>
+        public bool DisabledByApp;
+        /// <summary>The service's own permissions deny administrators a startup change (e.g. Gaming Services).</summary>
+        public bool Protected;
+        public bool CanDisable { get { return Mode == StartMode.Automatic || Mode == StartMode.AutomaticDelayed; } }
+    }
+
+    public sealed class StartupChange
+    {
+        public bool Ok;
+        public string Message;
+    }
+
+    /// <summary>
+    /// Services that start with Windows. "Disable" sets a listed safe or caution service to Manual (it can still
+    /// be started on demand) and stops it; the old start type is kept under an administrators-only key in HKLM so
+    /// Re-enable puts it back. ChangeServiceConfig / ChangeServiceConfig2 (learn.microsoft.com/en-us/windows/win32/api/winsvc/).
+    /// </summary>
+    public static class StartupServices
+    {
+        const string JournalPath = @"SOFTWARE\RamOptimiser\ServiceStartup";
+
+        public static List<StartupService> Query()
+        {
+            Dictionary<string, string> journal = ReadJournal();
+            var result = new List<StartupService>();
+            var runningPerPid = new Dictionary<int, int>();
+            var pids = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            string windir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            using (var searcher = new ManagementObjectSearcher("SELECT Name, DisplayName, State, StartMode, ProcessId, PathName FROM Win32_Service"))
+            using (ManagementObjectCollection all = searcher.Get())
+            {
+                foreach (ManagementObject mo in all)
+                {
+                    using (mo)
+                    {
+                        string name = mo["Name"] as string;
+                        bool running = string.Equals(mo["State"] as string, "Running", StringComparison.OrdinalIgnoreCase);
+                        int pid = mo["ProcessId"] == null ? 0 : Convert.ToInt32(mo["ProcessId"], CultureInfo.InvariantCulture);
+                        if (running && pid > 0) { int n; runningPerPid.TryGetValue(pid, out n); runningPerPid[pid] = n + 1; }
+                        KnownItem known = StartupKnowledge.FindService(name);
+                        string path = mo["PathName"] as string;
+                        bool thirdParty = !string.IsNullOrEmpty(path) && !IsUnder(StartupApps.ExePathOf(path), windir);
+                        bool recorded = journal.ContainsKey(name);
+                        // Listed services always; others only when they are third-party and running (Windows has hundreds).
+                        if (known == null && !recorded && !(thirdParty && running)) continue;
+                        var s = new StartupService
+                        {
+                            Name = name,
+                            DisplayName = mo["DisplayName"] as string ?? name,
+                            Running = running,
+                            Known = known,
+                            DisabledByApp = recorded, // confirmed against the current start type below
+                        };
+                        if (running && pid > 0) pids[name] = pid;
+                        result.Add(s);
+                    }
+                }
+            }
+            bool elevated = Privileges.IsElevated();
+            foreach (StartupService s in result)
+            {
+                s.Mode = ReadMode(s.Name);
+                // Only meaningful with admin rights: without them every service would look protected.
+                s.Protected = elevated && StartupKnowledge.CanDisableService(s.Name) && !CanChangeConfig(s.Name);
+                // The journal only says this app once set it to Manual. If it is no longer Manual (another admin,
+                // a policy, or a Disable whose change failed), the row shows the real start type instead.
+                s.DisabledByApp = JournalStillHolds(s.DisabledByApp, s.Mode);
+                int pid;
+                if (!pids.TryGetValue(s.Name, out pid)) continue;
+                int n; runningPerPid.TryGetValue(pid, out n); s.SharedWith = n;
+                try { using (Process p = Process.GetProcessById(pid)) s.MemoryBytes = p.PrivateMemorySize64; }
+                catch (ArgumentException) { }
+                catch (InvalidOperationException) { }
+                catch (Win32Exception) { }
+            }
+            result.Sort((a, b) =>
+            {
+                int c = Rank(a).CompareTo(Rank(b));
+                return c != 0 ? c : b.MemoryBytes.CompareTo(a.MemoryBytes);
+            });
+            return result;
+        }
+
+        /// <summary>Offered rows first (safe, then caution), then locked ones.</summary>
+        static int Rank(StartupService s)
+        {
+            Verdict v = s.Known == null ? Verdict.Unknown : s.Known.Verdict;
+            return v == Verdict.Safe ? 0 : v == Verdict.Caution ? 1 : v == Verdict.Unknown ? 2 : 3;
+        }
+
+        static bool IsUnder(string path, string dir)
+        {
+            if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(dir)) return false;
+            return path.StartsWith(dir.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static StartMode ReadMode(string name)
+        {
+            try
+            {
+                using (var sc = new ServiceController(name))
+                {
+                    switch (sc.StartType)
+                    {
+                        case ServiceStartMode.Automatic: return IsDelayed(name) ? StartMode.AutomaticDelayed : StartMode.Automatic;
+                        case ServiceStartMode.Manual: return StartMode.Manual;
+                        case ServiceStartMode.Disabled: return StartMode.Disabled;
+                        default: return StartMode.Other;
+                    }
+                }
+            }
+            catch (InvalidOperationException) { return StartMode.Other; }
+        }
+
+        /// <summary>A journal entry counts only while the service is still at the Manual start this app set. Pure.</summary>
+        public static bool JournalStillHolds(bool recorded, StartMode now)
+        {
+            return recorded && now == StartMode.Manual;
+        }
+
+        /// <summary>Sets a listed service to Manual and stops it. Needs administrator rights.</summary>
+        public static StartupChange Disable(string name)
+        {
+            lock (ServiceTrimmer.Operation) return DisableLocked(name);
+        }
+
+        static StartupChange DisableLocked(string name)
+        {
+            if (!StartupKnowledge.CanDisableService(name)) return Fail("not in the list of services that are safe to change");
+            StartMode before = ReadMode(name);
+            if (before != StartMode.Automatic && before != StartMode.AutomaticDelayed) return Fail("does not start with Windows");
+            bool journaled = false;
+            try
+            {
+                // Record first, so a crash after the change still leaves the way back.
+                using (RegistryKey key = Registry.LocalMachine.CreateSubKey(JournalPath))
+                    key.SetValue(name, before == StartMode.AutomaticDelayed ? "auto-delayed" : "auto", RegistryValueKind.String);
+                journaled = true;
+                SetStart(name, SERVICE_DEMAND_START, false);
+            }
+            catch (UnauthorizedAccessException) { if (journaled) ForgetJournal(name); return Fail(DeniedMessage()); }
+            catch (Win32Exception ex) { if (journaled) ForgetJournal(name); return Fail(ex.Message.TrimEnd('.')); }
+
+            // ControlService stops this service only; it refuses when a running service depends on it.
+            int err = NativeService.StopOnly(name);
+            if (err == NativeService.ErrorServiceNotActive) return new StartupChange { Ok = true, Message = "won't start with Windows" };
+            if (err == NativeService.ErrorDependentServicesRunning)
+                return new StartupChange { Ok = true, Message = "won't start with Windows; still running until restart" };
+            if (err != 0) return new StartupChange { Ok = true, Message = "won't start with Windows; could not stop it now" };
+            try
+            {
+                using (var sc = new ServiceController(name)) sc.WaitForStatus(ServiceControllerStatus.Stopped, ServiceTrimmer.StopTimeout);
+            }
+            catch (InvalidOperationException) { return new StartupChange { Ok = true, Message = "won't start with Windows; could not stop it now" }; }
+            catch (System.ServiceProcess.TimeoutException) { return new StartupChange { Ok = true, Message = "won't start with Windows; still stopping" }; }
+            return new StartupChange { Ok = true, Message = "won't start with Windows; stopped" };
+        }
+
+        /// <summary>Puts back the start type recorded by Disable. Only for services this app changed and that are still Manual.</summary>
+        public static StartupChange Reenable(string name)
+        {
+            lock (ServiceTrimmer.Operation) return ReenableLocked(name);
+        }
+
+        static StartupChange ReenableLocked(string name)
+        {
+            string recorded;
+            if (!ReadJournal().TryGetValue(name, out recorded)) return Fail("was not changed by this app");
+            if (!StartupKnowledge.CanDisableService(name)) return Fail("not in the list of services this app may change");
+            StartMode now = ReadMode(name);
+            if (now == StartMode.Automatic || now == StartMode.AutomaticDelayed)
+            {
+                ForgetJournal(name); // someone already turned it back on
+                return new StartupChange { Ok = true, Message = "already starts with Windows" };
+            }
+            // Only undo this app's own change: a service someone has since Disabled is left exactly as it is.
+            if (now != StartMode.Manual) return Fail("its start type was changed after this app turned it off, so it was left as it is");
+            try
+            {
+                SetStart(name, SERVICE_AUTO_START, recorded == "auto-delayed");
+                ForgetJournal(name);
+            }
+            catch (UnauthorizedAccessException) { return Fail(DeniedMessage()); }
+            catch (Win32Exception ex) { return Fail(ex.Message.TrimEnd('.')); }
+            try
+            {
+                using (var sc = new ServiceController(name))
+                    if (sc.Status == ServiceControllerStatus.Stopped) sc.Start();
+            }
+            catch (InvalidOperationException) { return new StartupChange { Ok = true, Message = "starts with Windows again; start it now failed" }; }
+            return new StartupChange { Ok = true, Message = "starts with Windows again" };
+        }
+
+        static void ForgetJournal(string name)
+        {
+            try
+            {
+                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(JournalPath, true))
+                    if (key != null) key.DeleteValue(name, false);
+            }
+            catch (UnauthorizedAccessException) { }
+            catch (System.Security.SecurityException) { }
+            catch (IOException) { }
+        }
+
+        /// <summary>Only well-formed records for listed services count; anything else in the key is ignored.</summary>
+        static Dictionary<string, string> ReadJournal()
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            using (RegistryKey key = Registry.LocalMachine.OpenSubKey(JournalPath))
+            {
+                if (key == null) return map;
+                foreach (string name in key.GetValueNames())
+                {
+                    string v = key.GetValue(name) as string;
+                    if ((v == "auto" || v == "auto-delayed") && StartupKnowledge.CanDisableService(name)) map[name] = v;
+                }
+            }
+            return map;
+        }
+
+        static StartupChange Fail(string message) { return new StartupChange { Ok = false, Message = message }; }
+
+        // ------------------------------------------------------------------ winsvc.h
+        const uint SC_MANAGER_CONNECT = 0x0001, SERVICE_QUERY_CONFIG = 0x0001, SERVICE_CHANGE_CONFIG = 0x0002;
+        const uint SERVICE_NO_CHANGE = 0xFFFFFFFF, SERVICE_AUTO_START = 2, SERVICE_DEMAND_START = 3;
+        const uint SERVICE_CONFIG_DELAYED_AUTO_START_INFO = 3;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct SERVICE_DELAYED_AUTO_START_INFO { public int fDelayedAutostart; }
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern IntPtr OpenSCManagerW(string machine, string database, uint access);
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern IntPtr OpenServiceW(IntPtr scm, string name, uint access);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool CloseServiceHandle(IntPtr h);
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool ChangeServiceConfigW(IntPtr service, uint type, uint start, uint errorControl, string binaryPath,
+            string loadOrderGroup, IntPtr tagId, string dependencies, string startName, string password, string displayName);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool ChangeServiceConfig2W(IntPtr service, uint level, ref SERVICE_DELAYED_AUTO_START_INFO info);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool QueryServiceConfig2W(IntPtr service, uint level, out SERVICE_DELAYED_AUTO_START_INFO info, int size, out int needed);
+
+        static IntPtr Open(string name, uint access, out IntPtr scm)
+        {
+            scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+            if (scm == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+            IntPtr svc = OpenServiceW(scm, name, access);
+            if (svc == IntPtr.Zero)
+            {
+                int err = Marshal.GetLastWin32Error();
+                CloseServiceHandle(scm);
+                scm = IntPtr.Zero; // closed here, so a caller's finally must not close it again
+                if (err == 5) throw new UnauthorizedAccessException();
+                throw new Win32Exception(err);
+            }
+            return svc;
+        }
+
+        /// <summary>Whether this process may change the service's startup: opens it for SERVICE_CHANGE_CONFIG and closes it.</summary>
+        static bool CanChangeConfig(string name)
+        {
+            IntPtr scm = IntPtr.Zero, svc = IntPtr.Zero;
+            try { svc = Open(name, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG, out scm); return true; }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (Win32Exception) { return false; }
+            finally
+            {
+                if (svc != IntPtr.Zero) CloseServiceHandle(svc);
+                if (scm != IntPtr.Zero) CloseServiceHandle(scm);
+            }
+        }
+
+        /// <summary>"Access denied" from an elevated process means the service's own permissions say no, not missing rights.</summary>
+        static string DeniedMessage()
+        {
+            return Privileges.IsElevated() ? "Windows protects this service, so its startup can't be changed" : "needs administrator rights";
+        }
+
+        static bool IsDelayed(string name)
+        {
+            IntPtr scm = IntPtr.Zero, svc = IntPtr.Zero;
+            try
+            {
+                svc = Open(name, SERVICE_QUERY_CONFIG, out scm);
+                SERVICE_DELAYED_AUTO_START_INFO info; int needed;
+                return QueryServiceConfig2W(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, out info, Marshal.SizeOf(typeof(SERVICE_DELAYED_AUTO_START_INFO)), out needed)
+                    && info.fDelayedAutostart != 0;
+            }
+            catch (Win32Exception) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+            finally
+            {
+                if (svc != IntPtr.Zero) CloseServiceHandle(svc);
+                if (scm != IntPtr.Zero) CloseServiceHandle(scm);
+            }
+        }
+
+        static void SetStart(string name, uint start, bool delayed)
+        {
+            IntPtr scm;
+            IntPtr svc = Open(name, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG, out scm);
+            try
+            {
+                if (!ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, start, SERVICE_NO_CHANGE, null, null, IntPtr.Zero, null, null, null, null))
+                    throw Error();
+                if (start == SERVICE_AUTO_START)
+                {
+                    var info = new SERVICE_DELAYED_AUTO_START_INFO { fDelayedAutostart = delayed ? 1 : 0 };
+                    if (!ChangeServiceConfig2W(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, ref info)) throw Error();
+                }
+            }
+            finally
+            {
+                CloseServiceHandle(svc);
+                CloseServiceHandle(scm);
+            }
+        }
+
+        static Exception Error()
+        {
+            int err = Marshal.GetLastWin32Error();
+            return err == 5 ? (Exception)new UnauthorizedAccessException() : new Win32Exception(err);
+        }
+    }
+}

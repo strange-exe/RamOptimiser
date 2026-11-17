@@ -1,0 +1,7 @@
+bin/
+bin-*/
+.claude/
+.impeccable/
+*.log
+# The zip is published as a GitHub Release asset, not committed.
+site/public/download/

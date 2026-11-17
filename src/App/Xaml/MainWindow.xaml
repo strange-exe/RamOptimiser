@@ -1,0 +1,483 @@
+<!-- RAM Optimiser window (redesign 2, option A "Windows native"). Loaded at runtime with XamlReader (no
+     code-behind); AppShell finds the named elements and wires their events. Three tabs along the top, like
+     Windows Settings and Task Manager: Memory, Startup, Settings. Reading order per tab is in design.md. -->
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:app="clr-namespace:RamOptimiser.App;assembly=RamOptimiser"
+        Title="RAM Optimiser" Width="460" MinWidth="440" MaxWidth="720" Height="720" MinHeight="480"
+        ResizeMode="CanResize" WindowStartupLocation="CenterScreen"
+        UseLayoutRounding="True" SnapsToDevicePixels="True"
+        TextOptions.TextFormattingMode="Display"
+        Background="{DynamicResource Surface}" Foreground="{DynamicResource Text}"
+        FontFamily="{DynamicResource BodyFont}" FontSize="14"
+        AutomationProperties.Name="RAM Optimiser">
+  <TabControl x:Name="Tabs" AutomationProperties.Name="Sections">
+
+    <!-- ============================== Memory ============================== -->
+    <TabItem x:Name="MemoryTab" AutomationProperties.Name="Memory">
+      <TabItem.Header>
+        <StackPanel Orientation="Horizontal">
+          <Path Style="{StaticResource IconPath}" Data="{StaticResource IconMemory}" Margin="0,0,8,0"
+                Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=TabItem}}"/>
+          <TextBlock Text="Memory" VerticalAlignment="Center"/>
+        </StackPanel>
+      </TabItem.Header>
+      <ScrollViewer x:Name="MainView" Focusable="False" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="16,12,16,16">
+          <!-- Sample failed -->
+          <Border x:Name="SampleError" Style="{StaticResource InfoBar}" Margin="0,0,0,8" Visibility="Collapsed">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Path Style="{StaticResource IconPath}" Data="{StaticResource IconError}" Stroke="{DynamicResource Danger}"
+                    VerticalAlignment="Top" Margin="0,1,8,0"/>
+              <TextBlock x:Name="SampleErrorText" Grid.Column="1" TextWrapping="Wrap" FontSize="13" Margin="0,0,6,0"
+                         Text="Memory status could not be read."/>
+            </Grid>
+          </Border>
+
+          <!-- 1. Load, memory map, legend, commit charge -->
+          <Border Style="{StaticResource CardBorder}" Padding="16,12,16,14">
+            <StackPanel>
+              <app:SummaryPanel x:Name="LoadCard" AutomationProperties.Name="Memory load">
+                <TextBlock Typography.NumeralAlignment="Tabular" TextOptions.TextFormattingMode="Ideal" TextWrapping="Wrap"><Run
+                    x:Name="LoadNumber" Text="--" FontFamily="{DynamicResource DisplayFont}" FontSize="44" FontWeight="SemiBold"/><Run
+                    Text="%" FontFamily="{DynamicResource DisplayFont}" FontSize="28" FontWeight="SemiBold"/><Run
+                    Text="   " FontSize="14"/><Run x:Name="InUseRun" Text="Reading memory..." FontSize="14" Foreground="{DynamicResource MutedText}"/></TextBlock>
+              </app:SummaryPanel>
+
+              <!-- Memory map: one bar for the whole of RAM; the ring is a 3:1 edge over the parts. -->
+              <Grid Height="24" Margin="0,10,0,0">
+                <app:MapPanel x:Name="MapBar" Background="{DynamicResource Card}" Gap="2" Radius="4"
+                              AutomationProperties.Name="Memory map">
+                  <Border x:Name="SegInUse" Background="{DynamicResource MapInUse}"/>
+                  <Border x:Name="SegModified" Background="{DynamicResource MapModified}"/>
+                  <Border x:Name="SegStandby" Background="{DynamicResource MapStandby}"/>
+                  <Border x:Name="SegFree" Background="{DynamicResource MapFree}"/>
+                </app:MapPanel>
+                <Border CornerRadius="4" BorderThickness="1" BorderBrush="{DynamicResource ControlBorder}" IsHitTestVisible="False"/>
+              </Grid>
+              <TextBlock x:Name="ListsNote" Style="{StaticResource Small}" Margin="0,8,0,0" Visibility="Collapsed"/>
+
+              <!-- Legend: 2 x 2, in the map's left-to-right order read down each column -->
+              <Grid Margin="0,10,0,0">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="20"/>
+                  <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <app:SummaryPanel x:Name="RowInUse" Padding="0,2">
+                  <DockPanel>
+                    <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapInUse}"/>
+                    <TextBlock x:Name="ValInUse" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
+                    <TextBlock Text="In use" VerticalAlignment="Center"/>
+                  </DockPanel>
+                </app:SummaryPanel>
+                <app:SummaryPanel x:Name="RowModified" Grid.Row="1" Padding="0,2">
+                  <DockPanel>
+                    <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapModified}"/>
+                    <TextBlock x:Name="ValModified" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
+                    <TextBlock Text="Modified" VerticalAlignment="Center"/>
+                  </DockPanel>
+                </app:SummaryPanel>
+                <app:SummaryPanel x:Name="RowStandby" Grid.Column="2" Padding="0,2">
+                  <DockPanel>
+                    <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapStandby}"/>
+                    <TextBlock x:Name="ValStandby" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
+                    <TextBlock Text="Standby" VerticalAlignment="Center"/>
+                  </DockPanel>
+                </app:SummaryPanel>
+                <app:SummaryPanel x:Name="RowFree" Grid.Row="1" Grid.Column="2" Padding="0,2">
+                  <DockPanel>
+                    <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapFree}"/>
+                    <TextBlock x:Name="ValFree" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
+                    <TextBlock x:Name="FreeLabel" Text="Free" VerticalAlignment="Center"/>
+                  </DockPanel>
+                </app:SummaryPanel>
+              </Grid>
+
+              <!-- Commit charge: what apps have reserved, which cleaning cannot lower -->
+              <Border Style="{StaticResource RowDivider}" Margin="0,12,0,0" Padding="0,12,0,0">
+                <StackPanel>
+                  <app:SummaryPanel x:Name="CommitRow" AutomationProperties.Name="Committed">
+                    <DockPanel>
+                      <TextBlock x:Name="CommitValue" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
+                      <TextBlock Text="Committed" VerticalAlignment="Center"/>
+                    </DockPanel>
+                  </app:SummaryPanel>
+                  <Grid Height="4" Margin="0,6,0,0">
+                    <app:MapPanel x:Name="CommitBar" Background="{DynamicResource TrackBackground}" Gap="0" Radius="2">
+                      <Border x:Name="CommitUsed" Background="{DynamicResource Accent}"/>
+                      <Border x:Name="CommitRest" Background="{DynamicResource TrackBackground}"/>
+                    </app:MapPanel>
+                  </Grid>
+                  <TextBlock Style="{StaticResource Small}" Margin="0,6,0,0"
+                             Text="Reserved by apps. The limit includes the page file, and cleaning does not lower it."/>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </Border>
+
+          <!-- 2. Clean memory -->
+          <Button x:Name="CleanButton" Style="{StaticResource PrimaryButton}" Margin="0,12,0,0" Content="Clean memory"
+                  AutomationProperties.Name="Clean memory"/>
+          <TextBlock x:Name="PowerNote" Style="{StaticResource Small}" Margin="4,6,4,0" Visibility="Collapsed"/>
+
+          <!-- One admin line when not elevated -->
+          <StackPanel x:Name="AdminLine" Margin="4,6,0,0" Visibility="Collapsed">
+            <WrapPanel>
+              <TextBlock x:Name="ElevationText" Style="{StaticResource Muted}" TextWrapping="NoWrap" VerticalAlignment="Center"
+                         Margin="0,0,4,0" Text="Needs administrator rights to clean."/>
+              <Button x:Name="RestartButton" Style="{StaticResource LinkButton}" Content="Restart as administrator"
+                      AutomationProperties.Name="Restart as administrator"/>
+            </WrapPanel>
+            <TextBlock x:Name="RestartError" Visibility="Collapsed" Margin="0,6,0,0" TextWrapping="Wrap" FontSize="13"
+                       FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
+          </StackPanel>
+
+          <!-- 3. The last clean, manual or automatic (announced politely to screen readers) -->
+          <app:LiveRegion x:Name="ResultPanel" Margin="4,8,0,0" Visibility="Collapsed"
+                          AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Last clean">
+            <app:LiveRegion.RenderTransform>
+              <TranslateTransform/>
+            </app:LiveRegion.RenderTransform>
+            <StackPanel>
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Path x:Name="ResultGlyph" Style="{StaticResource IconPath}" Data="{StaticResource IconCheck}"
+                      Stroke="{DynamicResource Ok}" VerticalAlignment="Top" Margin="0,1,8,0"/>
+                <TextBlock x:Name="ResultText" Grid.Column="1" Style="{StaticResource Muted}"/>
+              </Grid>
+              <Expander x:Name="ResultDetails" Style="{StaticResource Disclosure}" Margin="20,2,0,0" Header="Show areas"
+                        AutomationProperties.Name="Results by area">
+                <Border Style="{StaticResource CardBorder}" Margin="0,4,0,0" Padding="12,2">
+                  <StackPanel x:Name="ResultRows"/>
+                </Border>
+              </Expander>
+            </StackPanel>
+          </app:LiveRegion>
+
+          <!-- 4. Top apps -->
+          <Border Style="{StaticResource CardBorder}" Padding="16,12" Margin="0,12,0,0">
+            <StackPanel>
+              <TextBlock Text="Using the most memory" FontWeight="SemiBold"/>
+              <StackPanel x:Name="TopList" Margin="0,6,0,0" AutomationProperties.Name="Apps using the most memory">
+                <TextBlock Style="{StaticResource Muted}" Text="Reading apps..."/>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+
+          <!-- 5. Auto-clean -->
+          <Border Style="{StaticResource CardBorder}" Padding="16,10" Margin="0,8,0,0">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <StackPanel VerticalAlignment="Center">
+                <TextBlock Text="Auto-clean" FontWeight="SemiBold"/>
+                <TextBlock x:Name="AutoDescription" Style="{StaticResource Small}" Text="When load reaches 85%"/>
+                <TextBlock x:Name="AutoPaused" Style="{StaticResource Small}" Visibility="Collapsed"
+                           Text="Paused: needs administrator rights"/>
+              </StackPanel>
+              <CheckBox x:Name="AutoSwitch" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
+                        VerticalAlignment="Center" AutomationProperties.Name="Auto-clean"/>
+            </Grid>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+    </TabItem>
+
+    <!-- ============================== Startup ============================== -->
+    <TabItem x:Name="StartupTab" AutomationProperties.Name="Startup">
+      <TabItem.Header>
+        <StackPanel Orientation="Horizontal">
+          <Path Style="{StaticResource IconPath}" Data="{StaticResource IconPower}" Margin="0,0,8,0"
+                Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=TabItem}}"/>
+          <TextBlock Text="Startup" VerticalAlignment="Center"/>
+        </StackPanel>
+      </TabItem.Header>
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <StackPanel Margin="16,12,16,0">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border BorderThickness="1" CornerRadius="4" BorderBrush="{DynamicResource ControlBorder}" Background="{DynamicResource Card}">
+              <StackPanel Orientation="Horizontal" AutomationProperties.Name="Show">
+                <RadioButton x:Name="ShowAppsButton" GroupName="StartupKind" Style="{StaticResource SegmentStyle}" IsChecked="True"
+                             AutomationProperties.Name="Startup apps">
+                  <TextBlock><Run Text="Apps"/><Run x:Name="AppsCount" Text="" Foreground="{DynamicResource MutedText}" FontWeight="Normal"/></TextBlock>
+                </RadioButton>
+                <RadioButton x:Name="ShowServicesButton" GroupName="StartupKind" Style="{StaticResource SegmentStyle}"
+                             AutomationProperties.Name="Services">
+                  <TextBlock><Run Text="Services"/><Run x:Name="ServicesCount" Text="" Foreground="{DynamicResource MutedText}" FontWeight="Normal"/></TextBlock>
+                </RadioButton>
+              </StackPanel>
+            </Border>
+            <Grid Grid.Column="1" Margin="8,0,0,0">
+              <TextBox x:Name="StartupSearch" Style="{StaticResource SearchBox}" Tag="Search" Height="36"
+                       AutomationProperties.Name="Search startup items"/>
+              <Path Style="{StaticResource IconPath}" Data="{StaticResource IconSearch}" Stroke="{DynamicResource MutedText}"
+                    HorizontalAlignment="Left" Margin="9,0,0,0" IsHitTestVisible="False"/>
+            </Grid>
+          </Grid>
+          <TextBlock x:Name="StartupSummary" Style="{StaticResource Small}" Margin="0,10,0,0" Text="Reading what starts with Windows..."/>
+          <WrapPanel Margin="0,8,0,0">
+            <TextBlock Text="Show" VerticalAlignment="Center" FontSize="13" Margin="0,0,8,4"/>
+            <ComboBox x:Name="VerdictBox" Width="200" Margin="0,0,16,4" AutomationProperties.Name="Show verdict"/>
+            <TextBlock Text="Sort" VerticalAlignment="Center" FontSize="13" Margin="0,0,8,4"/>
+            <ComboBox x:Name="SortBox" Width="110" Margin="0,0,0,4" AutomationProperties.Name="Sort by"/>
+          </WrapPanel>
+          <TextBlock x:Name="StartupError" Visibility="Collapsed" Margin="0,8,0,0" TextWrapping="Wrap" FontSize="13" FontWeight="SemiBold"
+                     Foreground="{DynamicResource Danger}"/>
+        </StackPanel>
+        <ScrollViewer x:Name="StartupView" Grid.Row="1" Focusable="False" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel Margin="16,8,16,16">
+            <!-- Loading: about a second while Windows lists the services -->
+            <StackPanel x:Name="StartupLoading" AutomationProperties.Name="Loading startup items">
+              <TextBlock Style="{StaticResource Small}" Text="Reading apps and services, about a second"/>
+              <Border Style="{StaticResource Skeleton}" Width="260"/>
+              <Border Style="{StaticResource Skeleton}" Width="190"/>
+              <Border Style="{StaticResource Skeleton}" Width="230"/>
+            </StackPanel>
+            <Border x:Name="StartupCard" Style="{StaticResource CardBorder}" Visibility="Collapsed">
+              <StackPanel x:Name="StartupList"/>
+            </Border>
+            <!-- Empty: nothing in this list, or nothing matches the search and filter -->
+            <StackPanel x:Name="StartupEmpty" HorizontalAlignment="Center" Margin="0,24,0,0" Visibility="Collapsed">
+              <Path Style="{StaticResource IconPath}" Data="{StaticResource IconEmpty}" Stroke="{DynamicResource MutedText}"
+                    HorizontalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                <Path.RenderTransform>
+                  <ScaleTransform ScaleX="2" ScaleY="2"/>
+                </Path.RenderTransform>
+              </Path>
+              <TextBlock x:Name="StartupEmptyTitle" Margin="0,20,0,0" FontWeight="SemiBold" HorizontalAlignment="Center" TextAlignment="Center"/>
+              <TextBlock x:Name="StartupEmptyText" Style="{StaticResource Small}" Margin="0,2,0,0" HorizontalAlignment="Center" TextAlignment="Center"/>
+            </StackPanel>
+            <TextBlock x:Name="StartupNote" Style="{StaticResource Small}" Margin="4,10,4,0"/>
+          </StackPanel>
+        </ScrollViewer>
+      </Grid>
+    </TabItem>
+
+    <!-- ============================== Settings ============================== -->
+    <TabItem x:Name="SettingsTab" AutomationProperties.Name="Settings">
+      <TabItem.Header>
+        <StackPanel Orientation="Horizontal">
+          <Path Style="{StaticResource IconPath}" Data="{StaticResource IconSliders}" Margin="0,0,8,0"
+                Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=TabItem}}"/>
+          <TextBlock Text="Settings" VerticalAlignment="Center"/>
+        </StackPanel>
+      </TabItem.Header>
+      <ScrollViewer x:Name="SettingsView" Focusable="False" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="16,0,16,16">
+          <TextBlock x:Name="SaveError" Visibility="Collapsed" Margin="0,12,0,0" TextWrapping="Wrap" FontSize="13" FontWeight="SemiBold"
+                     Foreground="{DynamicResource Danger}"/>
+
+          <!-- Auto-clean -->
+          <TextBlock Text="Auto-clean" Style="{StaticResource SectionHeading}"/>
+          <Border Style="{StaticResource CardBorder}">
+            <StackPanel>
+              <Grid Margin="16,10">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel VerticalAlignment="Center">
+                  <TextBlock Text="Clean automatically"/>
+                  <TextBlock x:Name="CooldownText" Style="{StaticResource Small}" Text="At most every 5 minutes"/>
+                </StackPanel>
+                <CheckBox x:Name="SettingsAutoSwitch" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
+                          VerticalAlignment="Center" AutomationProperties.Name="Clean automatically"/>
+              </Grid>
+              <Border Style="{StaticResource RowDivider}" Padding="16,10">
+                <StackPanel>
+                  <TextBlock Text="When memory load reaches"/>
+                  <Grid Margin="0,4,0,0">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Slider x:Name="ThresholdSlider" Minimum="50" Maximum="99" SmallChange="1" LargeChange="5"
+                            IsSnapToTickEnabled="True" TickFrequency="1" VerticalAlignment="Center"
+                            AutomationProperties.Name="Clean when memory load reaches, percent"/>
+                    <Border Grid.Column="1" Margin="12,0,0,0" MinWidth="52" Height="32" BorderThickness="1" CornerRadius="4"
+                            BorderBrush="{DynamicResource ControlBorder}" Background="{DynamicResource Card}">
+                      <TextBlock x:Name="ThresholdValue" Style="{StaticResource FigureText}" HorizontalAlignment="Center" Text="85%"/>
+                    </Border>
+                  </Grid>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource RowDivider}" Padding="16,10">
+                <DockPanel>
+                  <ComboBox x:Name="IntervalBox" DockPanel.Dock="Right" Width="170" AutomationProperties.Name="Also clean on a schedule"/>
+                  <TextBlock Text="Also clean on a schedule" VerticalAlignment="Center" Margin="0,0,12,0" TextWrapping="Wrap"/>
+                </DockPanel>
+              </Border>
+            </StackPanel>
+          </Border>
+
+          <!-- What to clean: the common four, then the rest behind a disclosure -->
+          <TextBlock Text="What to clean" Style="{StaticResource SectionHeading}"/>
+          <Border Style="{StaticResource CardBorder}" Padding="16,4">
+            <StackPanel>
+              <CheckBox x:Name="AreaWorkingSets" Margin="0,8" VerticalContentAlignment="Top" AutomationProperties.Name="Process working sets">
+                <StackPanel>
+                  <TextBlock Text="Process working sets"/>
+                  <TextBlock Style="{StaticResource Small}" Text="Biggest drop in use; apps pause briefly as they reload"/>
+                </StackPanel>
+              </CheckBox>
+              <CheckBox x:Name="AreaFileCache" Margin="0,8" VerticalContentAlignment="Top" AutomationProperties.Name="System file cache">
+                <StackPanel>
+                  <TextBlock Text="System file cache"/>
+                  <TextBlock Style="{StaticResource Small}" Text="Recently read files are read from disk again"/>
+                </StackPanel>
+              </CheckBox>
+              <CheckBox x:Name="AreaStandbyLow" Margin="0,8" VerticalContentAlignment="Top" AutomationProperties.Name="Low-priority standby">
+                <StackPanel>
+                  <TextBlock Text="Low-priority standby"/>
+                  <TextBlock Style="{StaticResource Small}" Text="Small effect, small cost"/>
+                </StackPanel>
+              </CheckBox>
+              <CheckBox x:Name="AreaStandby" Margin="0,8" VerticalContentAlignment="Top" AutomationProperties.Name="Full standby cache">
+                <StackPanel>
+                  <TextBlock Text="Full standby cache"/>
+                  <TextBlock Style="{StaticResource Small}" Text="Apps and files load slower until it refills"/>
+                </StackPanel>
+              </CheckBox>
+              <Expander x:Name="MoreAreas" Style="{StaticResource Disclosure}" Margin="0,2,0,6" Header="Show 4 more areas"
+                        AutomationProperties.Name="More areas">
+                <StackPanel Margin="0,4,0,0">
+                  <CheckBox x:Name="AreaModified" Margin="0,8" VerticalContentAlignment="Top" AutomationProperties.Name="Modified pages">
+                    <StackPanel>
+                      <TextBlock Text="Modified pages"/>
+                      <TextBlock Style="{StaticResource Small}" Text="Writes changed pages to disk first, then frees them"/>
+                    </StackPanel>
+                  </CheckBox>
+                  <CheckBox x:Name="AreaVolumes" Margin="0,8" VerticalContentAlignment="Top" AutomationProperties.Name="Drive write cache">
+                    <StackPanel>
+                      <TextBlock Text="Drive write cache"/>
+                      <TextBlock Style="{StaticResource Small}" Text="Writes cached data out to every drive"/>
+                    </StackPanel>
+                  </CheckBox>
+                  <CheckBox x:Name="AreaCombine" Margin="0,8" VerticalContentAlignment="Top" AutomationProperties.Name="Combine identical pages">
+                    <StackPanel>
+                      <TextBlock Text="Combine identical pages"/>
+                      <TextBlock Style="{StaticResource Small}" Text="Keeps one copy of duplicate pages; costs a moment of CPU"/>
+                    </StackPanel>
+                  </CheckBox>
+                  <CheckBox x:Name="AreaRegistry" Margin="0,8" VerticalContentAlignment="Top" AutomationProperties.Name="Registry cache">
+                    <StackPanel>
+                      <TextBlock Text="Registry cache"/>
+                      <TextBlock Style="{StaticResource Small}" Text="Small effect"/>
+                    </StackPanel>
+                  </CheckBox>
+                </StackPanel>
+              </Expander>
+              <TextBlock x:Name="AreaReason" Style="{StaticResource Small}" Margin="0,0,0,8" Visibility="Collapsed"
+                         Text="At least one area must stay selected."/>
+            </StackPanel>
+          </Border>
+
+          <!-- Power Clean: services are filled in from AppShell -->
+          <TextBlock Text="Power Clean" Style="{StaticResource SectionHeading}"/>
+          <Border Style="{StaticResource CardBorder}">
+            <StackPanel>
+              <Grid Margin="16,10">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel VerticalAlignment="Center">
+                  <TextBlock Text="Use Power Clean"/>
+                  <TextBlock Style="{StaticResource Small}"
+                             Text="Clean memory then cleans every area and stops the services ticked below. Their startup settings are not changed."/>
+                </StackPanel>
+                <CheckBox x:Name="SettingsPowerSwitch" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
+                          VerticalAlignment="Center" AutomationProperties.Name="Use Power Clean"/>
+              </Grid>
+              <Border Style="{StaticResource RowDivider}" Padding="16,4">
+                <Expander x:Name="PowerServices" Style="{StaticResource Disclosure}" Margin="0,4" Header="Services to stop"
+                          AutomationProperties.Name="Services to stop">
+                  <StackPanel x:Name="PowerList" Margin="0,4,0,0" AutomationProperties.Name="Services to stop">
+                    <TextBlock Style="{StaticResource Muted}" Margin="0,6" Text="Reading services..."/>
+                  </StackPanel>
+                </Expander>
+              </Border>
+              <Border Style="{StaticResource RowDivider}" Padding="16,10">
+                <StackPanel>
+                  <Button x:Name="RestoreButton" Style="{StaticResource OutlineButton}" HorizontalAlignment="Left"
+                          Content="Restore services" AutomationProperties.Name="Restore services"/>
+                  <TextBlock x:Name="PowerStatus" Style="{StaticResource Small}" Margin="0,6,0,0"/>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </Border>
+
+          <!-- App -->
+          <TextBlock Text="App" Style="{StaticResource SectionHeading}"/>
+          <Border Style="{StaticResource CardBorder}">
+            <StackPanel>
+              <DockPanel Margin="16,10">
+                <ComboBox x:Name="ThemeBox" DockPanel.Dock="Right" Width="170" AutomationProperties.Name="Theme"/>
+                <TextBlock Text="Theme" VerticalAlignment="Center" Margin="0,0,12,0"/>
+              </DockPanel>
+              <Border Style="{StaticResource RowDivider}" Padding="16,10">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="Start with Windows"/>
+                    <TextBlock Style="{StaticResource Small}" Text="Opens in the tray at sign-in, as administrator"/>
+                    <TextBlock x:Name="StartupReason" Style="{StaticResource Small}" Visibility="Collapsed"/>
+                  </StackPanel>
+                  <CheckBox x:Name="StartupCheck" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
+                            VerticalAlignment="Center" AutomationProperties.Name="Start with Windows"/>
+                </Grid>
+              </Border>
+              <Border Style="{StaticResource RowDivider}" Padding="16,10">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Close button hides to the tray" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                  <CheckBox x:Name="CloseToTrayCheck" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
+                            VerticalAlignment="Center" AutomationProperties.Name="Close button hides to the tray"/>
+                </Grid>
+              </Border>
+              <Border Style="{StaticResource RowDivider}" Padding="16,10">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Show the load percent on the tray icon" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                  <CheckBox x:Name="TrayPercentCheck" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
+                            VerticalAlignment="Center" AutomationProperties.Name="Show the load percent on the tray icon"/>
+                </Grid>
+              </Border>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+    </TabItem>
+  </TabControl>
+</Window>

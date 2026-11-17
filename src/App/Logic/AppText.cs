@@ -1,0 +1,690 @@
+// Pure, testable logic for the GUI: wording, validation and theme resolution. No WPF or WinForms here,
+// so the test runner compiles this file as it is.
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using RamOptimiser.Gui;
+
+namespace RamOptimiser.App
+{
+    public enum ResolvedTheme { Light, Dark, HighContrast }
+
+    public enum AreaState { Ok, Failed, Skipped }
+
+    /// <summary>One line of the clean result: the area's label, its state and the words shown for it.</summary>
+    public sealed class AreaLine
+    {
+        public Areas Area;
+        public string Label;
+        public AreaState State;
+        /// <summary>"ok", "failed: reason" or "skipped: reason".</summary>
+        public string Status;
+    }
+
+    public static class AppText
+    {
+        public const string AppName = "RAM Optimiser";
+        /// <summary>.NET Framework's NotifyIcon.Text throws above 63 characters (newer .NET allows 127).</summary>
+        public const int MaxTooltipLength = 63;
+
+        public const string StandbyHelp = "Standby is Windows' cache of recent files. It already counts as available, "
+            + "so clearing it frees nothing you lack and apps load slower until it refills.";
+        public const string NeedsAdmin = "needs administrator rights";
+        public const string CleanNeedsAdmin = "Cleaning needs administrator rights. Use Restart as administrator, below this button.";
+        public const string LastAreaReason = "At least one area must stay selected.";
+        public const string StartupNeedsAdmin = "Needs administrator rights: restart as administrator to change this.";
+
+        /// <summary>
+        /// The not-elevated notice. Some Windows builds let any user read the standby and modified lists;
+        /// only when they are refused does the notice say so.
+        /// </summary>
+        public static string ElevationNotice(bool listsReadable)
+        {
+            return listsReadable
+                ? "Cleaning needs administrator rights. Until then RAM Optimiser shows memory status but cannot clean."
+                : "Cleaning needs administrator rights. Until then RAM Optimiser shows memory load but cannot clean or read the standby and modified lists.";
+        }
+
+        public static string ThresholdError
+        {
+            get
+            {
+                return "Enter a whole number from " + AppSettings.MinThresholdPercent.ToString(CultureInfo.InvariantCulture)
+                    + " to " + AppSettings.MaxThresholdPercent.ToString(CultureInfo.InvariantCulture) + ".";
+            }
+        }
+
+        public static string AreaLabel(Areas area)
+        {
+            switch (area)
+            {
+                case Areas.WorkingSets: return "Process working sets";
+                case Areas.SystemFileCache: return "System file cache";
+                case Areas.ModifiedList: return "Modified pages";
+                case Areas.LowPriorityStandby: return "Low-priority standby";
+                case Areas.StandbyList: return "Full standby cache (slower afterwards)";
+                case Areas.CombinePages: return "Combine identical pages";
+                case Areas.RegistryCache: return "Registry cache";
+                case Areas.VolumeCache: return "Drive write cache (writes to disk)";
+                case Areas.Services: return "Unused services (Power Clean)";
+                default: throw new ArgumentOutOfRangeException("area");
+            }
+        }
+
+        /// <summary>Status words for one area. Colour is never the only signal: the words say it all.</summary>
+        public static string Status(AreaResult r)
+        {
+            if (r == null) throw new ArgumentNullException("r");
+            // An ok still carries what it did: "stopped 3 services", "3 passes", "flushed 1 of 2 drives; E: ...".
+            if (r.Ok) return string.IsNullOrEmpty(r.Message) ? "ok" : "ok: " + Plain(r.Message, "");
+            if (r.Skipped) return "skipped: " + Plain(r.Message, "not available on this PC");
+            return "failed: " + FailureReason(r);
+        }
+
+        internal static string FailureReason(AreaResult r)
+        {
+            if (r.NtStatus == Native.STATUS_PRIVILEGE_NOT_HELD || r.NtStatus == Native.STATUS_ACCESS_DENIED
+                || r.Win32Error == ErrorPrivilegeNotHeld || r.Win32Error == ErrorAccessDenied)
+                return NeedsAdmin;
+            if (r.NtStatus != 0)
+                return "not supported on this PC (0x" + r.NtStatus.ToString("X8", CultureInfo.InvariantCulture) + ")";
+            if (r.Win32Error != 0)
+                return Plain(r.Message, "Windows error") + " (error " + r.Win32Error.ToString(CultureInfo.InvariantCulture) + ")";
+            return Plain(r.Message, "unknown error");
+        }
+
+        const int ErrorAccessDenied = 5, ErrorPrivilegeNotHeld = 1314;
+
+        /// <summary>Lower-cases the first letter and drops a trailing full stop, so it reads after "failed: ".</summary>
+        internal static string Plain(string message, string fallback)
+        {
+            string m = message == null ? "" : message.Trim();
+            while (m.EndsWith(".", StringComparison.Ordinal)) m = m.Substring(0, m.Length - 1).TrimEnd();
+            if (m.Length == 0) return fallback;
+            if (m.Length > 1 && char.IsUpper(m[0]) && !char.IsUpper(m[1]))
+                m = char.ToLowerInvariant(m[0]) + m.Substring(1);
+            return m;
+        }
+
+        public static AreaLine Describe(AreaResult r)
+        {
+            return new AreaLine
+            {
+                Area = r.Area,
+                Label = AreaLabel(r.Area),
+                State = r.Ok ? AreaState.Ok : r.Skipped ? AreaState.Skipped : AreaState.Failed,
+                Status = Status(r)
+            };
+        }
+
+        public static string Headline(CleanReport report)
+        {
+            if (report == null) return "Clean did not finish";
+            long freed = report.InUseFreed;
+            return freed > 0 ? "Freed " + Format.Bytes(freed) : "Nothing freed";
+        }
+
+        public static string Summary(CleanReport report)
+        {
+            if (report == null) throw new ArgumentNullException("report");
+            int ok = 0;
+            foreach (AreaResult r in report.Results) if (r.Ok) ok++;
+            int total = report.Results.Count;
+            return "In use went from " + Format.Bytes(report.Before.InUse) + " to " + Format.Bytes(report.After.InUse)
+                + " (" + report.After.LoadPercent.ToString(CultureInfo.InvariantCulture) + "% load). "
+                + ok.ToString(CultureInfo.InvariantCulture) + " of " + total.ToString(CultureInfo.InvariantCulture)
+                + (total == 1 ? " area" : " areas") + " cleaned.";
+        }
+
+        public static string FailedSummary(Exception error)
+        {
+            return error == null ? "The clean stopped before it could report a result."
+                : "The clean stopped: " + Plain(error.Message, "unknown error") + ".";
+        }
+
+        public static string InUseLine(MemorySnapshot s)
+        {
+            return Format.Bytes(s.InUse) + " of " + Format.Bytes(s.TotalPhys) + " in use";
+        }
+
+        /// <summary>One name for the load card, so a screen reader hears the number and its meaning together.</summary>
+        public static string LoadCardName(MemorySnapshot s)
+        {
+            return "Memory load " + s.LoadPercent.ToString(CultureInfo.InvariantCulture) + " percent, " + InUseLine(s);
+        }
+
+        public static string RowName(string label, string hint, string value)
+        {
+            string name = label;
+            if (!string.IsNullOrEmpty(hint)) name += ", " + hint.Replace("+", "plus");
+            return name + ": " + value;
+        }
+
+        /// <summary>The row's name with the change from the last clean, e.g. "In use: 11.6 GB, changed by -2.8 GB".</summary>
+        public static string RowName(string label, string hint, string value, string change)
+        {
+            string name = RowName(label, hint, value);
+            return string.IsNullOrEmpty(change) ? name : name + ", changed by " + change;
+        }
+
+        /// <summary>The one admin line under Clean memory, followed by the Restart as administrator link.</summary>
+        public const string AdminLine = "Needs administrator rights to clean.";
+        /// <summary>Shown under the map when the page lists are refused and the map has only two parts.</summary>
+        public const string ListsNeedAdmin = "Modified, standby and free need administrator rights to read.";
+
+        /// <summary>Under a two-part map: why modified, standby and free are missing.</summary>
+        public static string ListsNote(bool elevated)
+        {
+            return elevated ? "Modified, standby and free could not be read." : ListsNeedAdmin;
+        }
+
+        /// <summary>The words after the big percent: "of 15.2 GB in use".</summary>
+        public static string HeadlineCaption(MemorySnapshot s)
+        {
+            return "of " + Format.Bytes(s.TotalPhys) + " in use";
+        }
+
+        /// <summary>The map's accessible name: every part as text, so the bar is never the only way to read it.</summary>
+        public static string MapName(MemoryMap m, ulong total)
+        {
+            string text = "Memory map of " + Format.Bytes(total) + ": in use " + Format.Bytes(m.Bytes(MapPart.InUse));
+            if (!m.Detailed) return text + ", available " + Format.Bytes(m.Bytes(MapPart.Free));
+            return text + ", modified " + Format.Bytes(m.Bytes(MapPart.Modified)) + ", standby " + Format.Bytes(m.Bytes(MapPart.Standby))
+                + ", free " + Format.Bytes(m.Bytes(MapPart.Free));
+        }
+
+        const long OneMegabyte = 1024 * 1024;
+
+        /// <summary>Changes under 1 MB are noise between two readings, not something the clean did.</summary>
+        public static bool IsNoChange(long bytes)
+        {
+            return bytes > -OneMegabyte && bytes < OneMegabyte;
+        }
+
+        /// <summary>A signed change for the rows after a clean: "-2.8 GB", "+117.0 MB", or "0 MB".</summary>
+        public static string Change(long bytes)
+        {
+            if (IsNoChange(bytes)) return "0 MB";
+            return (bytes < 0 ? "-" : "+") + Format.Bytes(bytes == long.MinValue ? long.MaxValue : Math.Abs(bytes));
+        }
+
+        /// <summary>The one muted sentence under "Freed 2.8 GB".</summary>
+        public static string ResultSentence(CleanReport report)
+        {
+            if (report == null) return FailedSummary(null);
+            int ok = 0, failed = 0;
+            foreach (AreaResult r in report.Results)
+            {
+                if (r.Ok) ok++;
+                else if (!r.Skipped) failed++;
+            }
+            int total = report.Results.Count;
+            string text = ok.ToString(CultureInfo.InvariantCulture) + " of " + total.ToString(CultureInfo.InvariantCulture)
+                + (total == 1 ? " area" : " areas") + " cleaned";
+            if (failed > 0) text += ", " + failed.ToString(CultureInfo.InvariantCulture) + " failed";
+            return text + "; load is now " + report.After.LoadPercent.ToString(CultureInfo.InvariantCulture) + "%.";
+        }
+
+        /// <summary>The disclosure that shows the per-area results.</summary>
+        public static string DetailsLabel(bool expanded, int count)
+        {
+            if (expanded) return "Hide areas";
+            return "Show " + count.ToString(CultureInfo.InvariantCulture) + (count == 1 ? " area" : " areas");
+        }
+
+        public static string TrayTooltip(MemorySnapshot s)
+        {
+            string text = s == null ? AppName + ": memory status unavailable"
+                : AppName + ": " + s.LoadPercent.ToString(CultureInfo.InvariantCulture) + "% ("
+                  + Format.Bytes(s.InUse) + " of " + Format.Bytes(s.TotalPhys) + ")";
+            return text.Length <= MaxTooltipLength ? text : text.Substring(0, MaxTooltipLength);
+        }
+
+        /// <summary>The auto-clean row's second line, e.g. "when load reaches 85%, and every 30 minutes".</summary>
+        public static string AutoDescription(AppSettings s)
+        {
+            string text = "when load reaches " + s.ThresholdPercent.ToString(CultureInfo.InvariantCulture) + "%";
+            if (s.IntervalMinutes > 0) text += ", and " + IntervalPhrase(s.IntervalMinutes);
+            return text;
+        }
+
+        /// <summary>The Clean button's label. It keeps its name under Power Clean (the line under it says so),
+        /// so the main action never renames itself.</summary>
+        public static string CleanLabel(bool powerClean, bool cleaning)
+        {
+            return cleaning ? "Cleaning..." : "Clean memory";
+        }
+
+        /// <summary>The line under Clean memory while Power Clean is on; null when it is off.</summary>
+        public static string PowerNote(bool powerClean, int n)
+        {
+            if (!powerClean) return null;
+            string text = "Power Clean is on: cleans every area";
+            if (n > 0) text += " and stops " + n.ToString(CultureInfo.InvariantCulture) + (n == 1 ? " chosen service" : " chosen services");
+            return text + ".";
+        }
+
+        /// <summary>First letter upper case: the shared phrases above read mid-sentence, labels start a line.</summary>
+        public static string Sentence(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            return char.ToUpperInvariant(text[0]) + text.Substring(1);
+        }
+
+        /// <summary>
+        /// The line under Clean memory after any clean, manual or automatic: "Last clean at 14:32 freed 2.8 GB.
+        /// Load went from 81% to 74%." Failures are counted, so a partial clean never reads as a full one.
+        /// </summary>
+        public static string LastClean(DateTime localTime, CleanReport report, bool automatic, CultureInfo culture)
+        {
+            string head = (automatic ? "Auto-clean at " : "Last clean at ") + localTime.ToString("t", culture);
+            if (report == null || report.Before == null || report.After == null) return head + " did not finish.";
+            int failed = 0;
+            foreach (AreaResult r in report.Results) if (!r.Ok && !r.Skipped) failed++;
+            string text = head + (report.InUseFreed > 0 ? " freed " + Format.Bytes(report.InUseFreed) : " freed nothing")
+                + ". Load went from " + report.Before.LoadPercent.ToString(CultureInfo.InvariantCulture) + "% to "
+                + report.After.LoadPercent.ToString(CultureInfo.InvariantCulture) + "%.";
+            if (failed > 0) text += " " + failed.ToString(CultureInfo.InvariantCulture) + (failed == 1 ? " area failed." : " areas failed.");
+            return text;
+        }
+
+        /// <summary>True when the clean ran every area it tried (skips are fine): the line gets a check, else a warning.</summary>
+        public static bool CleanWentWell(CleanReport report)
+        {
+            return report != null && report.Before != null && report.After != null && report.AllOk;
+        }
+
+        /// <summary>"18.2 GB of 24.0 GB", or "unknown" when Windows did not report the commit limit.</summary>
+        public static string CommitText(MemorySnapshot s)
+        {
+            if (s == null || s.CommitLimit == 0) return "unknown";
+            return Format.Bytes(s.CommitTotal) + " of " + Format.Bytes(s.CommitLimit);
+        }
+
+        public static string CommitName(MemorySnapshot s)
+        {
+            if (s == null || s.CommitLimit == 0) return "Committed: unknown";
+            return "Committed " + CommitText(s) + ", " + s.CommitPercent.ToString(CultureInfo.InvariantCulture) + " percent of the limit";
+        }
+
+        /// <summary>The top-apps row as one phrase: "msedge: 2.1 GB, 24 processes".</summary>
+        public static string TopAppName(AppMemory a)
+        {
+            string text = a.Name + ": " + Format.Bytes(a.Bytes);
+            return a.Processes > 1 ? text + ", " + a.Processes.ToString(CultureInfo.InvariantCulture) + " processes" : text;
+        }
+
+        /// <summary>The error under a startup row that could not be changed: a title and the reason as a sentence.</summary>
+        public static string ChangeFailedTitle(string label, bool turningOn)
+        {
+            return (turningOn ? "Couldn't turn on " : "Couldn't turn off ") + label;
+        }
+
+        public static string ChangeFailedText(string reason, bool turningOn)
+        {
+            return Sentence(Plain(reason, "unknown error")) + ". It is still " + (turningOn ? "off." : "on.");
+        }
+
+        /// <summary>The closed list's header says what is inside: "Services to stop: 4 of 26 chosen".</summary>
+        public static string ServicesHeader(int chosen, int total)
+        {
+            if (total <= 0) return "Services to stop";
+            return "Services to stop: " + chosen.ToString(CultureInfo.InvariantCulture) + " of "
+                + total.ToString(CultureInfo.InvariantCulture) + " chosen";
+        }
+
+        /// <summary>The Power Clean row's second line, e.g. "every area, and stops 4 services until restart".</summary>
+        public static string PowerDescription(AppSettings s)
+        {
+            int n = s.PowerServices == null ? 0 : s.PowerServices.Count;
+            if (n == 0) return "every area; no services chosen";
+            return "every area, plus " + n.ToString(CultureInfo.InvariantCulture)
+                + (n == 1 ? " chosen service" : " chosen services") + " if running, until restart";
+        }
+
+        /// <summary>
+        /// One service row's detail, sentences joined with ". ": why it is safe to stop, then its memory or
+        /// state, e.g. "Only the Maps app uses it. Uses 6.2 MB".
+        /// </summary>
+        public static string ServiceDetail(ServiceRule rule, ServiceState state)
+        {
+            var parts = new List<string> { rule.Why };
+            if (state == null || !state.Running) parts.Add("Not running");
+            else if (state.SharedWith > 1) parts.Add("Shares a process with other services, so little is freed");
+            else if (state.MemoryBytes >= 0) parts.Add("Uses " + Format.Bytes((ulong)state.MemoryBytes));
+            if (rule.Triggered) parts.Add("Windows may start it again by itself");
+            return string.Join(". ", parts.ToArray());
+        }
+
+        public const string ServicesNeedAdmin = "Stopping and restoring services needs administrator rights.";
+
+        // ------------------------------------------------------------------ Startup view
+
+        /// <summary>The verdict as words, never colour alone. Unknown apps can still be turned off (Task Manager allows it).</summary>
+        public static string VerdictText(Verdict v, bool isService)
+        {
+            switch (v)
+            {
+                case Verdict.Safe: return "Safe to turn off";
+                case Verdict.Caution: return "Turn off with care";
+                case Verdict.Keep: return "Keep on";
+                default: return isService ? "Not in the app's list: left alone" : "Unknown app: usually safe to turn off";
+            }
+        }
+
+        /// <summary>Sentences joined with ". ": purpose, what turning it off does, and the facts the row knows.</summary>
+        public static string AppDetail(StartupApp a)
+        {
+            var parts = new List<string>();
+            if (a.Known != null)
+            {
+                parts.Add(a.Known.Purpose);
+                if (!string.IsNullOrEmpty(a.Known.Effect)) parts.Add("If off: " + a.Known.Effect);
+                // The list matches by file name only, so say which file this row really runs.
+                parts.Add("Runs " + (a.ExePath ?? a.Name));
+            }
+            else parts.Add(a.Publisher != null ? "From " + a.Publisher : "Publisher unknown");
+            if (a.NeedsAdmin) parts.Add("Starts for every user");
+            return string.Join(". ", parts.ToArray());
+        }
+
+        public static string ServiceDetail(StartupService s)
+        {
+            var parts = new List<string>();
+            if (s.Known != null)
+            {
+                parts.Add(s.Known.Purpose);
+                if (!string.IsNullOrEmpty(s.Known.Effect)) parts.Add("If off: " + s.Known.Effect);
+            }
+            parts.Add(StartLabel(s));
+            if (s.Protected) parts.Add("Windows protects this service, so its startup can't be changed here");
+            if (s.Running && s.SharedWith <= 1 && s.MemoryBytes >= 0) parts.Add("Uses " + Format.Bytes((ulong)s.MemoryBytes));
+            return string.Join(". ", parts.ToArray());
+        }
+
+        static string StartLabel(StartupService s)
+        {
+            if (s.DisabledByApp) return "Turned off by this app; starts only when something asks for it";
+            switch (s.Mode)
+            {
+                case StartMode.Automatic: return "Starts with Windows";
+                case StartMode.AutomaticDelayed: return "Starts shortly after Windows";
+                case StartMode.Manual: return "Starts only when something asks for it";
+                case StartMode.Disabled: return "Disabled";
+                default: return "Start type unknown";
+            }
+        }
+
+        /// <summary>The line under the title, e.g. "4 apps and 24 services start with Windows. 9 are safe to turn off".</summary>
+        public static string StartupSummary(int appsOn, int servicesOn, int safeOn)
+        {
+            string head = Count(appsOn, "app") + " and " + Count(servicesOn, "listed service") + " start with Windows";
+            return safeOn == 0 ? head + "." : head + ". " + Count(safeOn, "is", "are", true) + " safe to turn off.";
+        }
+
+        static string Count(int n, string noun)
+        {
+            return n.ToString(CultureInfo.InvariantCulture) + " " + noun + (n == 1 ? "" : "s");
+        }
+
+        static string Count(int n, string one, string many, bool bare)
+        {
+            return n.ToString(CultureInfo.InvariantCulture) + " " + (n == 1 ? one : many);
+        }
+
+        public const string StartupAppsNote = "Turning an app off works like Task Manager: it stays installed and can be turned back on here.";
+        public const string StartupServicesNote = "Turning a service off sets it to start only when needed and stops it now. "
+            + "Only services in the app's list can be changed, and only ones this app turned off can be turned back on.";
+
+        /// <summary>Status under the Restore button.</summary>
+        public static string RestoreStatus(int stoppedByApp)
+        {
+            if (stoppedByApp == 0) return "Stopped services come back when Windows restarts.";
+            return stoppedByApp.ToString(CultureInfo.InvariantCulture)
+                + (stoppedByApp == 1 ? " service is" : " services are") + " stopped by this app. They come back when you quit the app or restart Windows.";
+        }
+
+        public static string CooldownText(int seconds)
+        {
+            if (seconds <= 0) return "no minimum wait between cleans";
+            if (seconds % 60 != 0) return "at most every " + seconds.ToString(CultureInfo.InvariantCulture) + " seconds";
+            int minutes = seconds / 60;
+            return minutes == 1 ? "at most once a minute" : "at most every " + minutes.ToString(CultureInfo.InvariantCulture) + " minutes";
+        }
+
+        /// <summary>"every 30 minutes", "every hour", "every 2 hours".</summary>
+        public static string IntervalPhrase(int minutes)
+        {
+            if (minutes <= 0) return "never";
+            if (minutes == 60) return "every hour";
+            if (minutes % 60 == 0) return "every " + (minutes / 60).ToString(CultureInfo.InvariantCulture) + " hours";
+            if (minutes == 1) return "every minute";
+            return "every " + minutes.ToString(CultureInfo.InvariantCulture) + " minutes";
+        }
+
+        public static string IntervalLabel(int minutes)
+        {
+            if (minutes <= 0) return "Off";
+            string p = IntervalPhrase(minutes);
+            return char.ToUpperInvariant(p[0]) + p.Substring(1);
+        }
+
+        static readonly int[] StandardIntervals = { 0, 15, 30, 60, 120 };
+
+        /// <summary>The interval choices; a stored value outside the list is kept as an extra choice.</summary>
+        public static int[] IntervalChoices(int current)
+        {
+            var list = new List<int>(StandardIntervals);
+            if (!list.Contains(current) && AppSettings.InRange(current, AppSettings.MinIntervalMinutes, AppSettings.MaxIntervalMinutes))
+            {
+                list.Add(current);
+                list.Sort();
+            }
+            return list.ToArray();
+        }
+
+        public static string LastAutoClean(DateTime localTime, CleanReport report, CultureInfo culture)
+        {
+            string at = "Last auto-clean at " + localTime.ToString("t", culture);
+            if (report == null) return at + " did not finish";
+            int failed = 0;
+            foreach (AreaResult r in report.Results) if (!r.Ok && !r.Skipped) failed++;
+            string text = at + ": " + (report.InUseFreed > 0 ? "freed " + Format.Bytes(report.InUseFreed) : "nothing freed");
+            if (failed > 0) text += ", " + failed.ToString(CultureInfo.InvariantCulture) + (failed == 1 ? " area failed" : " areas failed");
+            return text;
+        }
+    }
+
+    public enum VerdictFilter { All, Safe, Caution, Keep, Unknown }
+
+    public enum StartupSort { Verdict, Name }
+
+    /// <summary>The Startup tab's search, verdict filter and sort, kept apart from WPF so they are tested.</summary>
+    public static class StartupFilter
+    {
+        public static readonly VerdictFilter[] Filters = { VerdictFilter.All, VerdictFilter.Safe, VerdictFilter.Caution, VerdictFilter.Keep, VerdictFilter.Unknown };
+
+        public static bool Matches(VerdictFilter filter, Verdict v)
+        {
+            switch (filter)
+            {
+                case VerdictFilter.Safe: return v == Verdict.Safe;
+                case VerdictFilter.Caution: return v == Verdict.Caution;
+                case VerdictFilter.Keep: return v == Verdict.Keep;
+                case VerdictFilter.Unknown: return v == Verdict.Unknown;
+                default: return true;
+            }
+        }
+
+        /// <summary>Case-insensitive search over the shown name and the real name; blank matches everything.</summary>
+        public static bool Matches(string search, string label, string name)
+        {
+            if (string.IsNullOrWhiteSpace(search)) return true;
+            string s = search.Trim();
+            return (label != null && label.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0)
+                || (name != null && name.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        public static string Label(VerdictFilter filter, int count)
+        {
+            string name;
+            switch (filter)
+            {
+                case VerdictFilter.Safe: name = "Safe to turn off"; break;
+                case VerdictFilter.Caution: name = "Turn off with care"; break;
+                case VerdictFilter.Keep: name = "Keep on"; break;
+                case VerdictFilter.Unknown: name = "Not in the app's list"; break;
+                default: name = "All verdicts"; break;
+            }
+            return name + " (" + count.ToString(CultureInfo.InvariantCulture) + ")";
+        }
+
+        /// <summary>Verdict order puts what can be turned off first: safe, care, unknown, keep; then by name.</summary>
+        public static int Rank(Verdict v)
+        {
+            switch (v)
+            {
+                case Verdict.Safe: return 0;
+                case Verdict.Caution: return 1;
+                case Verdict.Unknown: return 2;
+                default: return 3;
+            }
+        }
+
+        public static int Compare(StartupSort sort, Verdict a, string labelA, Verdict b, string labelB)
+        {
+            if (sort == StartupSort.Verdict)
+            {
+                int r = Rank(a).CompareTo(Rank(b));
+                if (r != 0) return r;
+            }
+            return string.Compare(labelA, labelB, StringComparison.CurrentCultureIgnoreCase);
+        }
+    }
+
+    /// <summary>The threshold text box: a whole number in the AppSettings range, nothing else.</summary>
+    public static class ThresholdInput
+    {
+        public static bool TryParse(string text, out int value)
+        {
+            value = 0;
+            if (text == null) return false;
+            string t = text.Trim();
+            if (t.Length == 0 || t.Length > 3) return false;
+            foreach (char c in t) if (c < '0' || c > '9') return false;
+            value = int.Parse(t, NumberStyles.None, CultureInfo.InvariantCulture);
+            return AppSettings.InRange(value, AppSettings.MinThresholdPercent, AppSettings.MaxThresholdPercent);
+        }
+    }
+
+    public static class AreaRules
+    {
+        /// <summary>False when area is the only one selected: the list may never become empty.</summary>
+        public static bool CanUntick(Areas selected, Areas area)
+        {
+            return (selected & area) == 0 || (selected & ~area & Areas.All) != Areas.None;
+        }
+
+        public static Areas Toggle(Areas selected, Areas area, bool on)
+        {
+            if (on) return (selected | area) & Areas.All;
+            return CanUntick(selected, area) ? selected & ~area & Areas.All : selected;
+        }
+    }
+
+    public static class ThemeResolver
+    {
+        /// <summary>
+        /// appsUseLightTheme / systemUsesLightTheme are the HKCU Personalize DWORDs (null when missing).
+        /// High contrast wins over everything; then the user's choice; System follows the app setting,
+        /// which Windows treats as light when the value is missing.
+        /// </summary>
+        public static ResolvedTheme Resolve(ThemeMode mode, int? appsUseLightTheme, bool highContrast)
+        {
+            if (highContrast) return ResolvedTheme.HighContrast;
+            if (mode == ThemeMode.Light) return ResolvedTheme.Light;
+            if (mode == ThemeMode.Dark) return ResolvedTheme.Dark;
+            return appsUseLightTheme.HasValue && appsUseLightTheme.Value == 0 ? ResolvedTheme.Dark : ResolvedTheme.Light;
+        }
+
+        /// <summary>A missing value means the Windows 10 default: a dark taskbar.</summary>
+        public static bool TaskbarIsLight(int? systemUsesLightTheme)
+        {
+            return systemUsesLightTheme.HasValue && systemUsesLightTheme.Value != 0;
+        }
+
+        /// <summary>Tray digits: #1A1A1A on a light taskbar, #FFFFFF on a dark one (design.md), as 0xAARRGGBB.</summary>
+        public static int TrayTextArgb(bool taskbarIsLight)
+        {
+            return taskbarIsLight ? unchecked((int)0xFF1A1A1A) : unchecked((int)0xFFFFFFFF);
+        }
+
+        public static string ThemeLabel(ThemeMode mode)
+        {
+            switch (mode)
+            {
+                case ThemeMode.Light: return "Light";
+                case ThemeMode.Dark: return "Dark";
+                default: return "Match Windows";
+            }
+        }
+    }
+
+    public sealed class LaunchOptions
+    {
+        public bool StartInTray;
+
+        /// <summary>"--tray" starts hidden in the notification area. Anything else is ignored.</summary>
+        public static LaunchOptions Parse(string[] args)
+        {
+            var o = new LaunchOptions();
+            if (args == null) return o;
+            foreach (string a in args)
+                if (a != null && string.Equals(a.Trim(), StartupTask.TrayArgument, StringComparison.OrdinalIgnoreCase))
+                    o.StartInTray = true;
+            return o;
+        }
+    }
+
+    /// <summary>Appends unhandled errors to %LOCALAPPDATA%\RamOptimiser\error.log, keeping it under ~1 MB.</summary>
+    public static class ErrorLog
+    {
+        public const long MaxBytes = 1024 * 1024;
+
+        public static string DefaultPath
+        {
+            get { return Path.Combine(Path.GetDirectoryName(SettingsStore.DefaultPath), "error.log"); }
+        }
+
+        public static string FormatEntry(DateTime utc, string context, Exception ex)
+        {
+            var sb = new StringBuilder();
+            sb.Append(utc.ToString("yyyy-MM-dd HH:mm:ss'Z'", CultureInfo.InvariantCulture));
+            sb.Append(' ').Append(string.IsNullOrEmpty(context) ? "error" : context).Append("\r\n");
+            sb.Append(ex == null ? "(no exception)" : ex.ToString()).Append("\r\n\r\n");
+            return sb.ToString();
+        }
+
+        /// <summary>Never throws: a failing log must not hide the error it was meant to record.</summary>
+        public static bool TryWrite(string path, string context, Exception ex)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                SafeUserFolder.Check(Path.GetDirectoryName(path), path, path + ".old");
+                var info = new FileInfo(path);
+                if (info.Exists && info.Length > MaxBytes)
+                {
+                    string old = path + ".old";
+                    if (File.Exists(old)) File.Delete(old);
+                    File.Move(path, old);
+                }
+                File.AppendAllText(path, FormatEntry(DateTime.UtcNow, context, ex), new UTF8Encoding(false));
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+    }
+}

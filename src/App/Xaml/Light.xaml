@@ -1,0 +1,38 @@
+<!-- design.md tokens (redesign 2, option A "Windows native"), light. Controls reference these keys with
+     DynamicResource; nothing else holds a colour. Values follow Windows 11 Fluent. -->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <SolidColorBrush x:Key="Surface" Color="#F3F3F3"/>
+  <SolidColorBrush x:Key="Card" Color="#FBFBFB"/>
+  <SolidColorBrush x:Key="Hairline" Color="#E5E5E5"/>
+  <SolidColorBrush x:Key="WindowBorder" Color="#CFCFCF"/>
+  <SolidColorBrush x:Key="ControlBorder" Color="#868686"/>
+  <SolidColorBrush x:Key="Text" Color="#1A1A1A"/>
+  <SolidColorBrush x:Key="MutedText" Color="#5C5C5C"/>
+  <SolidColorBrush x:Key="DisabledText" Color="#5C5C5C"/>
+  <SolidColorBrush x:Key="Accent" Color="#005FB8"/>
+  <SolidColorBrush x:Key="OnAccent" Color="#FFFFFF"/>
+  <SolidColorBrush x:Key="TrackBackground" Color="#EDEDED"/>
+  <SolidColorBrush x:Key="SecondaryButton" Color="#FBFBFB"/>
+  <SolidColorBrush x:Key="Ok" Color="#0F7B0F"/>
+  <SolidColorBrush x:Key="Caution" Color="#9D5D00"/>
+  <SolidColorBrush x:Key="Danger" Color="#C42B1C"/>
+  <SolidColorBrush x:Key="DangerBackground" Color="#FDE7E9"/>
+  <SolidColorBrush x:Key="FocusRing" Color="#1A1A1A"/>
+  <SolidColorBrush x:Key="MapInUse" Color="#005FB8"/>
+  <!-- Modified: accent hatching, so the part differs from in use by pattern as well as tone. -->
+  <DrawingBrush x:Key="MapModified" TileMode="Tile" Viewport="0,0,5,5" ViewportUnits="Absolute" Viewbox="0,0,5,5" ViewboxUnits="Absolute">
+    <DrawingBrush.Drawing>
+      <DrawingGroup>
+        <GeometryDrawing Brush="#FBFBFB" Geometry="M0,0 H5 V5 H0 Z"/>
+        <GeometryDrawing Geometry="M-1,6 L6,-1 M-1,1 L1,-1 M4,6 L6,4">
+          <GeometryDrawing.Pen>
+            <Pen Brush="#005FB8" Thickness="1.5"/>
+          </GeometryDrawing.Pen>
+        </GeometryDrawing>
+      </DrawingGroup>
+    </DrawingBrush.Drawing>
+  </DrawingBrush>
+  <SolidColorBrush x:Key="MapStandby" Color="#CFE1F3"/>
+  <SolidColorBrush x:Key="MapFree" Color="#FBFBFB"/>
+</ResourceDictionary>
