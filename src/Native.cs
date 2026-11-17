@@ -62,6 +62,17 @@ namespace RamOptimiser
             public ulong ullAvailExtendedVirtual;
         }
 
+        // Memory resource notifications (documented, memoryapi.h): Windows' own low and high memory signals, at fixed
+        // kernel levels. Create returns NULL on failure; SafeWaitHandle treats 0 and -1 as invalid. Read-only.
+        public const int LowMemoryResourceNotification = 0, HighMemoryResourceNotification = 1;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern SafeWaitHandle CreateMemoryResourceNotification(int notificationType);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool QueryMemoryResourceNotification(SafeWaitHandle handle, out int resourceState);
+
         [StructLayout(LayoutKind.Sequential)]
         public struct PERFORMANCE_INFORMATION
         {

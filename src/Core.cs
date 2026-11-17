@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -94,6 +95,26 @@ namespace RamOptimiser
         public ulong FreeAndZero;      // truly unused pages
         public ulong Standby;          // cached pages: counted as "available", reused on demand
         public ulong Modified;         // dirty pages waiting to be written
+        /// <summary>Standby bytes at each of the 8 priorities (0 is reused first); null when !HasLists.</summary>
+        public ulong[] StandbyByPriority;
+        /// <summary>Standby at priority 0: what the standby-low area drops. 0 when unknown.</summary>
+        public ulong StandbyLowPriority
+        {
+            get { return StandbyByPriority == null || StandbyByPriority.Length == 0 ? 0 : StandbyByPriority[0]; }
+        }
+        /// <summary>
+        /// Raw repurposed page counts per priority, most likely cumulative since boot (as RAMMap's Repurposed column), so
+        /// only the difference between two samples means anything. Not used in any advice. Null when !HasLists.
+        /// </summary>
+        public ulong[] RepurposedByPriority;
+        /// <summary>Modified pages Windows may not write yet (the modified no-write list), in bytes.</summary>
+        public ulong ModifiedNoWrite;
+        /// <summary>Modified pages bound for the page file, in bytes.</summary>
+        public ulong ModifiedPageFile;
+        /// <summary>The page size the counts were multiplied by (4096 when GetPerformanceInfo fails).</summary>
+        public ulong PageSize;
+        /// <summary>What Windows' own low and high memory signals say at this sample.</summary>
+        public MemoryCondition Condition;
         /// <summary>Memory programs have asked Windows to back (RAM plus page file); 0 when unknown.</summary>
         public ulong CommitTotal;
         /// <summary>Most that can be committed before "out of memory"; 0 when unknown.</summary>
@@ -124,17 +145,38 @@ namespace RamOptimiser
                 s.CommitLimit = pi.CommitLimit.ToUInt64() * pageSize;
             }
 
+            s.PageSize = pageSize;
+
             Native.SYSTEM_MEMORY_LIST_INFORMATION li;
-            if (TryQueryLists(out li))
-            {
-                s.HasLists = true;
-                s.FreeAndZero = (li.FreePageCount.ToUInt64() + li.ZeroPageCount.ToUInt64()) * pageSize;
-                ulong standby = 0;
-                foreach (UIntPtr p in li.PageCountByPriority) standby += p.ToUInt64();
-                s.Standby = standby * pageSize;
-                s.Modified = li.ModifiedPageCount.ToUInt64() * pageSize;
-            }
+            if (TryQueryLists(out li)) FillLists(s, li, pageSize);
+            s.Condition = MemoryPressure.Query();
             return s;
+        }
+
+        /// <summary>
+        /// Pure: copies the page-list figures into s, in bytes (repurposed counts stay in pages). Standby stays the
+        /// total of the 8 priorities. Missing priority arrays read as zero. Tests pass a fake struct.
+        /// </summary>
+        internal static void FillLists(MemorySnapshot s, Native.SYSTEM_MEMORY_LIST_INFORMATION li, ulong pageSize)
+        {
+            s.HasLists = true;
+            s.PageSize = pageSize;
+            s.FreeAndZero = (li.FreePageCount.ToUInt64() + li.ZeroPageCount.ToUInt64()) * pageSize;
+            s.StandbyByPriority = new ulong[8];
+            s.RepurposedByPriority = new ulong[8];
+            ulong standby = 0;
+            for (int i = 0; i < 8; i++)
+            {
+                if (li.PageCountByPriority != null && i < li.PageCountByPriority.Length)
+                    s.StandbyByPriority[i] = li.PageCountByPriority[i].ToUInt64() * pageSize;
+                if (li.RepurposedPagesByPriority != null && i < li.RepurposedPagesByPriority.Length)
+                    s.RepurposedByPriority[i] = li.RepurposedPagesByPriority[i].ToUInt64();
+                standby += s.StandbyByPriority[i];
+            }
+            s.Standby = standby;
+            s.Modified = li.ModifiedPageCount.ToUInt64() * pageSize;
+            s.ModifiedNoWrite = li.ModifiedNoWritePageCount.ToUInt64() * pageSize;
+            s.ModifiedPageFile = li.ModifiedPageCountPageFile.ToUInt64() * pageSize;
         }
 
         private static bool TryQueryLists(out Native.SYSTEM_MEMORY_LIST_INFORMATION info)
@@ -167,6 +209,8 @@ namespace RamOptimiser
         public string Message;
         public int NtStatus;     // the failing NTSTATUS, or 0
         public int Win32Error;   // the failing Win32 error code, or 0
+        /// <summary>Time spent on this area, every pass included (an area that threw still has its time).</summary>
+        public TimeSpan Duration;
 
         /// <summary>The one outcome the flags add up to. Skipped wins, then failed, then partial.</summary>
         public AreaOutcome Outcome
@@ -189,6 +233,10 @@ namespace RamOptimiser
         public List<ServiceAction> Services = new List<ServiceAction>();
         /// <summary>Trim-and-flush passes run (1 unless both working sets and the modified list were cleaned).</summary>
         public int Passes = 1;
+        /// <summary>The whole clean, from the before snapshot to the after snapshot.</summary>
+        public TimeSpan Duration;
+        /// <summary>What combine merged, in bytes; 0 when it did not run, merged nothing, or Windows did not say.</summary>
+        public ulong CombinedBytes;
 
         /// <summary>Drop in "in use" memory (what Task Manager shows as In use). Negative if it grew.</summary>
         public long InUseFreed { get { return (long)Before.InUse - (long)After.InUse; } }
@@ -271,14 +319,30 @@ namespace RamOptimiser
 
         public static CleanReport Clean(Areas areas, ICollection<string> services, int maxPasses)
         {
-            var report = new CleanReport();
             Privileges.Enable(SeProfileSingleProcess);
             Privileges.Enable(SeIncreaseQuota);
-            report.Before = MemorySnapshot.Take();
+            Version os = Environment.OSVersion.Version;
+            // Monotonic: DST and clock changes do not move it.
+            Stopwatch watch = Stopwatch.StartNew();
+            return Clean(areas, services, maxPasses, () => watch.Elapsed, MemorySnapshot.Take, SafeInUse,
+                (report, r) => Run(r.Area, os, r, report));
+        }
+
+        /// <summary>
+        /// The clean with its clock, snapshots, in-use reader and area runner passed in, so tests can time it with
+        /// fakes. Duration runs from before the first snapshot to after the last.
+        /// </summary>
+        internal static CleanReport Clean(Areas areas, ICollection<string> services, int maxPasses, Func<TimeSpan> clock,
+            Func<MemorySnapshot> snapshot, Func<ulong> inUse, Action<CleanReport, AreaResult> run)
+        {
+            var report = new CleanReport();
+            TimeSpan start = clock();
+            report.Before = snapshot();
 
             if ((areas & Areas.Services) != 0)
             {
                 var r = new AreaResult { Area = Areas.Services };
+                TimeSpan t0 = clock();
                 List<string> chosen = ServiceCatalog.Filter(services);
                 if (chosen.Count == 0) Skip(r, "no services chosen");
                 else
@@ -292,21 +356,30 @@ namespace RamOptimiser
                     }
                     catch (Exception ex) { r.Ok = false; r.Message = ex.Message; }
                 }
+                r.Duration += clock() - t0;
                 report.Results.Add(r);
             }
 
-            Version os = Environment.OSVersion.Version;
-            RunAreas(areas, report, maxPasses, SafeInUse, r => Run(r.Area, os, r));
+            RunAreas(areas, report, maxPasses, inUse, r => run(report, r), clock);
 
-            report.After = MemorySnapshot.Take();
+            report.After = snapshot();
+            report.Duration = clock() - start;
             return report;
+        }
+
+        /// <summary>As below, untimed (every area's Duration stays zero).</summary>
+        internal static void RunAreas(Areas areas, CleanReport report, int maxPasses, Func<ulong> inUse, Action<AreaResult> run)
+        {
+            RunAreas(areas, report, maxPasses, inUse, run, () => TimeSpan.Zero);
         }
 
         /// <summary>
         /// Runs each requested area in AreaNames.Known order and adds its result to the report, then repeats trim and
-        /// flush while it pays. inUse reads "in use" bytes (0 when unknown); run cleans r.Area into r. Tests pass fakes.
+        /// flush while it pays. inUse reads "in use" bytes (0 when unknown); run cleans r.Area into r; clock times each
+        /// area, and later passes add their time to the one trim and flush row. Tests pass fakes.
         /// </summary>
-        internal static void RunAreas(Areas areas, CleanReport report, int maxPasses, Func<ulong> inUse, Action<AreaResult> run)
+        internal static void RunAreas(Areas areas, CleanReport report, int maxPasses, Func<ulong> inUse, Action<AreaResult> run,
+            Func<TimeSpan> clock)
         {
             bool repeat = (areas & Areas.WorkingSets) != 0 && (areas & Areas.ModifiedList) != 0;
             ulong passStart = 0;
@@ -322,8 +395,8 @@ namespace RamOptimiser
                 ulong areaStart = 0;
                 if (kv.Value == Areas.WorkingSets && repeat) passStart = inUse();
                 if (between) areaStart = inUse();
-                try { run(r); }
-                catch (Exception ex) { r.Ok = false; r.Message = ex.Message; }
+                string why = Timed(run, r, r, clock);
+                if (why != null) { r.Ok = false; r.Message = why; }
                 if (between && areaStart != 0)
                 {
                     ulong areaEnd = inUse();
@@ -334,17 +407,30 @@ namespace RamOptimiser
                 if (kv.Value == Areas.ModifiedList) flush = r;
                 // Further passes run before the standby purges, so the pages they flush are purged too.
                 if (kv.Value == Areas.ModifiedList && repeat && trim.Ok && flush.Ok)
-                    report.Passes = RepeatPasses(report.Before.TotalPhys, passStart, freedBetween, maxPasses, inUse, run, trim, flush);
+                    report.Passes = RepeatPasses(report.Before.TotalPhys, passStart, freedBetween, maxPasses, inUse, run, trim, flush, clock);
             }
             if (report.Passes > 1) trim.Message = Note(report.Passes + " passes", trim.Message);
         }
 
         /// <summary>
+        /// Runs one area and adds the time it took to timeTo (the area itself, or the pass-1 row a later pass belongs
+        /// to), even when it throws. Returns the exception's message, or null.
+        /// </summary>
+        static string Timed(Action<AreaResult> run, AreaResult r, AreaResult timeTo, Func<TimeSpan> clock)
+        {
+            TimeSpan t0 = clock();
+            try { run(r); return null; }
+            catch (Exception ex) { return ex.Message; }
+            finally { timeTo.Duration += clock() - t0; }
+        }
+
+        /// <summary>
         /// Runs trim then flush again while each pass still frees enough; returns the total pass count. A pass that
         /// fails is noted on the trim or flush result ("pass 2 failed: why"); the area keeps its pass-1 outcome.
+        /// Each pass's time is added to the pass-1 trim and flush results.
         /// </summary>
         private static int RepeatPasses(ulong total, ulong passStart, long freedBetween, int maxPasses, Func<ulong> inUse,
-            Action<AreaResult> run, AreaResult trimResult, AreaResult flushResult)
+            Action<AreaResult> run, AreaResult trimResult, AreaResult flushResult, Func<TimeSpan> clock)
         {
             int passes = 1;
             ulong before = passStart;
@@ -357,13 +443,8 @@ namespace RamOptimiser
                 if (before == 0 || now == 0 || !AnotherPass(freed, total, passes, maxPasses)) return passes;
                 var trim = new AreaResult { Area = Areas.WorkingSets };
                 var flush = new AreaResult { Area = Areas.ModifiedList };
-                string why = null;
-                try
-                {
-                    run(trim);
-                    if (trim.Ok) run(flush);
-                }
-                catch (Exception ex) { why = ex.Message; }
+                string why = Timed(run, trim, trimResult, clock);
+                if (why == null && trim.Ok) why = Timed(run, flush, flushResult, clock);
                 AreaResult failed = !trim.Ok ? trim : !flush.Ok ? flush : null;
                 if (failed != null)
                 {
@@ -391,7 +472,7 @@ namespace RamOptimiser
             catch (Win32Exception) { return 0; }
         }
 
-        private static void Run(Areas area, Version os, AreaResult r)
+        private static void Run(Areas area, Version os, AreaResult r, CleanReport report)
         {
             switch (area)
             {
@@ -415,7 +496,14 @@ namespace RamOptimiser
                     break;
                 case Areas.CombinePages:
                     if (!AtLeast(os, 10, 0)) { Skip(r, "needs Windows 10 or later"); break; }
-                    SetResult(r, CombinePages());
+                    ulong pages;
+                    SetResult(r, CombinePages(out pages));
+                    if (r.Ok)
+                    {
+                        ulong pageSize = report.Before != null && report.Before.PageSize != 0 ? report.Before.PageSize : 4096;
+                        report.CombinedBytes += pages * pageSize;
+                        r.Message = CombineMessage(pages, pageSize);
+                    }
                     break;
                 case Areas.VolumeCache: FlushVolumes(r); break;
             }
@@ -497,16 +585,34 @@ namespace RamOptimiser
             finally { Marshal.FreeHGlobal(buf); }
         }
 
-        private static int CombinePages()
+        /// <summary>
+        /// Merges identical pages; pagesCombined is what the kernel writes back into the struct (phnt treats it as
+        /// in/out; not yet confirmed at runtime, so 0 may also mean Windows did not say).
+        /// </summary>
+        private static int CombinePages(out ulong pagesCombined)
         {
+            pagesCombined = 0;
             int size = Marshal.SizeOf(typeof(Native.MEMORY_COMBINE_INFORMATION_EX));
             IntPtr buf = Marshal.AllocHGlobal(size);
             try
             {
                 Marshal.StructureToPtr(new Native.MEMORY_COMBINE_INFORMATION_EX(), buf, false);
-                return Native.NtSetSystemInformation(Native.SystemCombinePhysicalMemoryInformation, buf, size);
+                int status = Native.NtSetSystemInformation(Native.SystemCombinePhysicalMemoryInformation, buf, size);
+                if (status == Native.STATUS_SUCCESS)
+                {
+                    var info = (Native.MEMORY_COMBINE_INFORMATION_EX)Marshal.PtrToStructure(buf, typeof(Native.MEMORY_COMBINE_INFORMATION_EX));
+                    pagesCombined = info.PagesCombined.ToUInt64();
+                }
+                return status;
             }
             finally { Marshal.FreeHGlobal(buf); }
+        }
+
+        /// <summary>Pure: "merged 120.0 MB", or "no identical pages found" when nothing merged.</summary>
+        internal static string CombineMessage(ulong pages, ulong pageSize)
+        {
+            if (pages == 0) return "no identical pages found";
+            return "merged " + Format.Bytes(pages * pageSize);
         }
 
         private static void SetResult(AreaResult r, int status)
@@ -636,5 +742,111 @@ namespace RamOptimiser
         }
 
         public static string Bytes(ulong bytes) { return Bytes((long)Math.Min(bytes, (ulong)long.MaxValue)); }
+
+        /// <summary>"&lt;0.1 s" under 100 ms, otherwise one decimal in the invariant culture: "1.8 s".</summary>
+        public static string Seconds(TimeSpan t)
+        {
+            if (t.TotalMilliseconds < 100) return "<0.1 s";
+            return t.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) + " s";
+        }
+    }
+
+    /// <summary>What the current sample says about cleaning now. Recomputed per sample; no stored state.</summary>
+    public enum CleanAdvice { None, CommitBound, WillHelp, Mixed, NotNeeded }
+
+    public enum EstimateKind { Bytes, Unknown, NoMemoryFigure }
+
+    /// <summary>What one area is likely to do, from a snapshot. Note says what the figure means, or why there is none.</summary>
+    public sealed class AreaEstimate
+    {
+        public Areas Area;
+        public EstimateKind Kind;
+        public ulong Bytes;
+        /// <summary>True when Bytes is a ceiling ("up to"), false when it is the likely amount ("about").</summary>
+        public bool UpperBound;
+        public string Note;
+    }
+
+    /// <summary>Pure estimates and advice from one snapshot, for the dry run, status and the app's advice line.</summary>
+    public static class CleanEstimate
+    {
+        /// <summary>At or above this commit percent, commit is the limit and cleaning cannot lower it.</summary>
+        public const int CommitBoundPercent = 90;
+
+        public const string NeedsAdmin = "needs administrator rights";
+
+        /// <summary>One row per chosen area, in AreaNames.Known order. Services is never listed.</summary>
+        public static List<AreaEstimate> For(MemorySnapshot s, Areas areas)
+        {
+            var rows = new List<AreaEstimate>();
+            if (s == null) return rows;
+            foreach (var kv in AreaNames.Known)
+                if ((areas & kv.Value) != 0) rows.Add(Estimate(s, kv.Value));
+            return rows;
+        }
+
+        static AreaEstimate Estimate(MemorySnapshot s, Areas area)
+        {
+            var e = new AreaEstimate { Area = area };
+            bool listBased = area == Areas.ModifiedList || area == Areas.LowPriorityStandby || area == Areas.StandbyList;
+            if (listBased && !s.HasLists) { e.Kind = EstimateKind.Unknown; e.Note = NeedsAdmin; return e; }
+            switch (area)
+            {
+                case Areas.CombinePages:
+                    e.Kind = EstimateKind.Unknown; e.Note = "depends on how many pages are identical"; break;
+                case Areas.WorkingSets:
+                    e.Kind = EstimateKind.Unknown; e.Note = "programs read back what they touch next"; break;
+                case Areas.SystemFileCache:
+                    e.Kind = EstimateKind.Bytes; e.Bytes = s.SystemCache; e.UpperBound = true;
+                    e.Note = "of file cache moved to standby (still counted as available)"; break;
+                case Areas.ModifiedList:
+                    e.Kind = EstimateKind.Bytes; e.Bytes = s.Modified - Math.Min(s.ModifiedNoWrite, s.Modified);
+                    e.Note = "written to disk, then counted as available"; break;
+                case Areas.LowPriorityStandby:
+                    // The purge drops priority 0 only (see Areas.LowPriorityStandby). Standby already counts as available.
+                    e.Kind = EstimateKind.Bytes; e.Bytes = s.StandbyLowPriority;
+                    e.Note = "of low-priority cache dropped (already counted as available)"; break;
+                case Areas.StandbyList:
+                    e.Kind = EstimateKind.Bytes; e.Bytes = s.Standby;
+                    e.Note = "of cache dropped (already counted as available; apps and files load slower afterwards)"; break;
+                case Areas.RegistryCache:
+                    e.Kind = EstimateKind.NoMemoryFigure; e.Note = "writes registry changes to disk"; break;
+                case Areas.VolumeCache:
+                    e.Kind = EstimateKind.NoMemoryFigure; e.Note = "writes each drive's cached file changes to disk"; break;
+                default:
+                    e.Kind = EstimateKind.Unknown; e.Note = "no estimate for this area"; break;
+            }
+            return e;
+        }
+
+        /// <summary>
+        /// The least In use is likely to drop: the modified pages written to disk. Purging standby lowers nothing,
+        /// as standby already counts as available; trimming and combining can't be estimated.
+        /// </summary>
+        public static ulong InUseDropAtLeast(IList<AreaEstimate> e)
+        {
+            ulong sum = 0;
+            if (e == null) return 0;
+            foreach (AreaEstimate a in e)
+                if (a != null && a.Area == Areas.ModifiedList && a.Kind == EstimateKind.Bytes) sum += a.Bytes;
+            return sum;
+        }
+
+        /// <summary>
+        /// Commit at or above CommitBoundPercent wins (cleaning cannot lower it), then Windows' own signal: low means
+        /// a clean helps, high means it is not needed, in between is mixed, unknown gives no advice.
+        /// </summary>
+        public static CleanAdvice Advise(MemorySnapshot s)
+        {
+            if (s == null) return CleanAdvice.None;
+            if (s.CommitLimit > 0 && s.CommitPercent >= CommitBoundPercent) return CleanAdvice.CommitBound;
+            switch (s.Condition)
+            {
+                case MemoryCondition.Low: return CleanAdvice.WillHelp;
+                case MemoryCondition.High: return CleanAdvice.NotNeeded;
+                case MemoryCondition.Neutral: return CleanAdvice.Mixed;
+                default: return CleanAdvice.None;
+            }
+        }
     }
 }
