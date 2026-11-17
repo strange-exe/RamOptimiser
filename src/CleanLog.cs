@@ -62,11 +62,20 @@ namespace RamOptimiser
         /// </summary>
         public static string FormatClean(CleanReport r, string source, string reason, string stopped, string id, DateTime utc)
         {
+            return FormatClean(r, source, reason, stopped, id, utc, null);
+        }
+
+        /// <summary>
+        /// As above, with "error": why a clean threw before it could report (its before and after are then null).
+        /// Null error: no such field, so a clean that ran reads exactly as before.
+        /// </summary>
+        public static string FormatClean(CleanReport r, string source, string reason, string stopped, string id, DateTime utc, string error)
+        {
             if (r == null) throw new ArgumentNullException("r");
             string line = null;
             for (int level = 0; level <= 3; level++)
             {
-                line = BuildClean(r, source, reason, stopped, id, utc, level);
+                line = BuildClean(r, source, reason, stopped, id, utc, level, error);
                 if (Utf8NoBom.GetByteCount(line) <= MaxLineBytes) break;
             }
             return line;
@@ -88,7 +97,7 @@ namespace RamOptimiser
         }
 
         // level 0: everything; 1: no area messages; 2: no services either; 3: no areas either.
-        static string BuildClean(CleanReport r, string source, string reason, string stopped, string id, DateTime utc, int level)
+        static string BuildClean(CleanReport r, string source, string reason, string stopped, string id, DateTime utc, int level, string error)
         {
             var w = new JsonWriter();
             w.BeginObject();
@@ -132,6 +141,7 @@ namespace RamOptimiser
                     w.EndObject();
                 }
             w.EndArray();
+            if (error != null) { w.Name("error"); w.String(Cap(error)); }
             if (level > 0) { w.Name("truncated"); w.Bool(true); }
             w.EndObject();
             return w.ToString();

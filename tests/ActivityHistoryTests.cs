@@ -329,6 +329,86 @@ namespace RamOptimiser.Tests
             report = GuiCleanLog.Run(job, null, req => null, line => lines.Add(line), () => T0);
             Check("record: a clean with no report logs nothing", report == null && lines.Count == 0);
 
+            // A clean that throws before reporting still gets its one record, with the error, and still throws.
+            lines.Clear();
+            Exception thrown = null;
+            try
+            {
+                GuiCleanLog.Run(job, null, req => { throw new InvalidOperationException("snapshot \"failed\""); }, line => lines.Add(line), () => T0);
+            }
+            catch (InvalidOperationException ex) { thrown = ex; }
+            string err = lines.Count > 0 ? lines[0] : "";
+            Check("record: a clean that throws is rethrown", thrown != null && thrown.Message == "snapshot \"failed\"");
+            Check("record: a clean that throws is logged once with its error", lines.Count == 1 && err.Contains("\"type\":\"clean\"")
+                && err.Contains("\"id\":\"7f3a9c2e\"") && err.Contains("\"stopped\":\"none\"") && err.Contains("\"before\":null")
+                && err.Contains("\"after\":null") && err.Contains("\"freed\":null") && err.Contains("\"error\":\"snapshot \\\"failed\\\"\""), err);
+            lines.Clear();
+            try
+            {
+                GuiCleanLog.Run(job, null, req => { req.UnderLock(Ran(90, 80)); throw new InvalidOperationException("late"); },
+                    line => lines.Add(line), () => T0);
+            }
+            catch (InvalidOperationException) { }
+            Check("record: a throw after the record is not logged twice", lines.Count == 1 && !lines[0].Contains("\"error\""),
+                lines.Count.ToString(Inv));
+            string plain = CleanLog.FormatClean(Ran(90, 80), "gui", "manual", "none", "a1", T0);
+            Check("record: a clean that ran has no error field", !plain.Contains("\"error\""), plain);
+
+            SerialLogTests();
+        }
+
+        static void SerialLogTests()
+        {
+            var written = new List<string>();
+            var posted = new List<Action>();
+            var log = new SerialLog(line => written.Add(line), work => posted.Add(work));
+            log.Post("paused");
+            log.Post("resumed");
+            Check("serial log: queued lines wait for the worker", written.Count == 0 && posted.Count == 1, posted.Count.ToString(Inv));
+            log.WriteNow("clean");
+            Check("serial log: WriteNow writes at once", written.Count == 1 && written[0] == "clean");
+            posted[0]();
+            Check("serial log: queued lines keep their order", written.Count == 3 && written[1] == "paused" && written[2] == "resumed",
+                string.Join(",", written.ToArray()));
+            log.Post("pause-ended");
+            Check("serial log: a new worker once the queue ran dry", posted.Count == 2);
+            posted[1]();
+            Check("serial log: the later line is written", written.Count == 4 && written[3] == "pause-ended");
+
+            // A throwing write never stops the lines after it.
+            written.Clear();
+            posted.Clear();
+            var failing = new SerialLog(line => { if (line == "bad") throw new System.IO.IOException("x"); written.Add(line); }, work => posted.Add(work));
+            failing.Post("bad");
+            failing.Post("good");
+            posted[0]();
+            Check("serial log: a failed write does not stop the queue", written.Count == 1 && written[0] == "good");
+            failing.WriteNow("bad");
+            Check("serial log: WriteNow never throws", true);
+
+            // Writes from several threads never overlap.
+            int inside = 0, overlap = 0, count = 0;
+            var shared = new SerialLog(line =>
+            {
+                if (System.Threading.Interlocked.Increment(ref inside) > 1) System.Threading.Interlocked.Increment(ref overlap);
+                System.Threading.Thread.Sleep(1);
+                count++;
+                System.Threading.Interlocked.Decrement(ref inside);
+            }, work => System.Threading.ThreadPool.QueueUserWorkItem(delegate { work(); }));
+            var threads = new List<System.Threading.Thread>();
+            for (int t = 0; t < 4; t++)
+            {
+                var th = new System.Threading.Thread(new System.Threading.ThreadStart(() =>
+                {
+                    for (int i = 0; i < 10; i++) { shared.WriteNow("now"); shared.Post("later"); }
+                }));
+                threads.Add(th);
+                th.Start();
+            }
+            foreach (var th in threads) th.Join();
+            for (int i = 0; i < 200 && System.Threading.Volatile.Read(ref count) < 80; i++) System.Threading.Thread.Sleep(10);
+            Check("serial log: writes never overlap", overlap == 0 && count == 80, overlap + " overlaps, " + count + " writes");
+
             string ev = ActivityLog.EventRecord(T0, new ActivityEvent { Kind = "paused", Text = "Auto-clean paused \"until\"\nlater." });
             Check("record: an event is one JSON line", ev.IndexOf('\n') < 0 && ev.IndexOf('\r') < 0
                 && ev.StartsWith("{\"v\":1,\"type\":\"event\",\"time\":\"2026-11-17T14:32:00Z\",\"source\":\"gui\",\"event\":\"paused\",\"text\":", StringComparison.Ordinal)
@@ -436,6 +516,17 @@ namespace RamOptimiser.Tests
             Check("error gate: a different message is", ErrorGate.ShouldLog("denied", T0, "timeout", T0.AddMinutes(1)));
             Check("error gate: same message after 10 minutes is", ErrorGate.ShouldLog("denied", T0, "denied", T0.AddMinutes(10)));
             Check("error gate: a clock set back logs", ErrorGate.ShouldLog("denied", T0, "denied", T0.AddMinutes(-1)));
+
+            // Only a sampling failure is "memory status could not be read"; a handler's error is not.
+            Check("read failure: a sample error is one", ActivityEvents.IsReadFailure(ServiceErrorSource.Sample));
+            Check("read failure: an other error is not", !ActivityEvents.IsReadFailure(ServiceErrorSource.Other));
+            Check("read failure: a clean error is not", !ActivityEvents.IsReadFailure(ServiceErrorSource.Clean));
+
+            // The note under the log path never contradicts it.
+            Check("log note: with a file", AppText.CleanLogNote(true)
+                == "Every clean the app runs is added to this file, kept under 256 KB with one older copy. The lists above show this session only.");
+            Check("log note: without a data folder", AppText.CleanLogNote(false)
+                == "This account has no local data folder, so cleans are not saved to a file. The lists above show this session only.");
         }
 
         static void EventTests()
@@ -475,8 +566,8 @@ namespace RamOptimiser.Tests
         static void TooltipTests()
         {
             MemorySnapshot s = Big(72, 11 * GB);
-            Check("tray tip: unchanged without a status line", AppText.TrayTooltip(s, null) == AppText.TrayTooltip(s)
-                && AppText.TrayTooltip(null, null) == AppText.TrayTooltip(null));
+            Check("tray tip: unchanged without a status line", AppText.TrayTooltip(s, (string)null) == AppText.TrayTooltip(s)
+                && AppText.TrayTooltip(null, (string)null) == AppText.TrayTooltip(null));
             Check("tray tip: two lines", AppText.TrayTooltip(s, "Auto-clean at 14:32 freed 1.2 GB") == "RAM Optimiser: 72%\nAuto-clean at 14:32 freed 1.2 GB",
                 AppText.TrayTooltip(s, "Auto-clean at 14:32 freed 1.2 GB"));
 
@@ -524,6 +615,54 @@ namespace RamOptimiser.Tests
             }
             Check("tray tip: within 63 for every status", allFit, worst);
             Check("tray tip: line 1 always present", line1, worst);
+
+            // A long "when" is dropped before the outcome is: the line still says what happened.
+            var partialArea = new AreaResult { Area = Areas.VolumeCache, Ok = true, Partial = true, Message = "E: refused" };
+            var cases = new List<KeyValuePair<CleanReport, string>>
+            {
+                new KeyValuePair<CleanReport, string>(null, "did not finish"),
+                new KeyValuePair<CleanReport, string>(Report(100, inUse, 99, inUse - freed, Ok(Areas.WorkingSets)), "freed " + Format.Bytes((ulong)freed)),
+                new KeyValuePair<CleanReport, string>(Report(100, inUse, 100, inUse, Ok(Areas.WorkingSets)), "freed nothing"),
+                new KeyValuePair<CleanReport, string>(Report(100, inUse, 99, inUse - freed, failedArea, failedArea), "2 areas failed"),
+                new KeyValuePair<CleanReport, string>(Report(100, inUse, 99, inUse - freed, partialArea), "1 area partly failed"),
+                new KeyValuePair<CleanReport, string>(Busy(100), "was skipped"),
+                new KeyValuePair<CleanReport, string>(timed, "hit its time limit")
+            };
+            bool kept = true, fits = true;
+            string lost = "";
+            foreach (string name in new[] { "en-US", "en-GB", "es-MX", "ko-KR" })
+            {
+                var c = new CultureInfo(name);
+                foreach (CleanReason reason in new[] { CleanReason.Manual, CleanReason.Threshold })
+                    foreach (KeyValuePair<CleanReport, string> k in cases)
+                        foreach (int days in new[] { 0, 1, 9 })
+                        {
+                            DateTime now = T0.ToLocalTime().AddDays(days);
+                            IList<string> lines = TrayStatus.TooltipLines(AutoCleanState.Armed, new AutoCleanStatus(), Last(reason, k.Key), now, c);
+                            string t = AppText.TrayTooltip(full, lines);
+                            if (t.Length > AppText.MaxTooltipLength) { fits = false; lost = t; }
+                            if (!t.EndsWith(k.Value, StringComparison.Ordinal)) { kept = false; lost = name + " " + days + ": " + t; }
+                        }
+            }
+            Check("tray tip: the outcome survives fitting", kept, lost);
+            Check("tray tip: fitted lines stay within 63", fits, lost);
+
+            DateTime yesterday = T0.ToLocalTime().AddDays(1);
+            IList<string> forms = TrayStatus.TooltipLines(AutoCleanState.Armed, new AutoCleanStatus(), Last(CleanReason.Threshold, timed), yesterday, Inv);
+            string at = T0.ToLocalTime().ToString("t", Inv);
+            Check("tray tip: forms from longest to shortest", forms.Count == 3 && forms[0] == "Auto-clean yesterday at " + at + " hit its time limit"
+                && forms[1] == "Auto-clean yesterday hit its time limit" && forms[2] == "Last auto-clean hit its time limit",
+                string.Join(" | ", new List<string>(forms).ToArray()));
+            Check("tray tip: the first form that fits whole", AppText.TrayTooltip(s, forms) == "RAM Optimiser: 72%\n" + forms[1], AppText.TrayTooltip(s, forms));
+            IList<string> todayForms = TrayStatus.TooltipLines(AutoCleanState.Armed, new AutoCleanStatus(), Last(CleanReason.Threshold, timed), T0.ToLocalTime(), Inv);
+            Check("tray tip: the full form when it fits", AppText.TrayTooltip(s, todayForms) == "RAM Optimiser: 72%\nAuto-clean at " + at + " hit its time limit",
+                AppText.TrayTooltip(s, todayForms));
+            Check("tray tip: one line per status that has no time", TrayStatus.TooltipLines(AutoCleanState.NeedsAdmin, null, null, yesterday, Inv).Count == 1
+                && TrayStatus.TooltipLines(AutoCleanState.Armed, new AutoCleanStatus(), null, yesterday, Inv).Count == 0);
+            Check("tray tip: no lines is the one-line tooltip", AppText.TrayTooltip(s, new List<string>()) == AppText.TrayTooltip(s)
+                && AppText.TrayTooltip(s, (IList<string>)null) == AppText.TrayTooltip(s));
+            string today = TrayStatus.TooltipLines(AutoCleanState.Armed, new AutoCleanStatus(), Last(CleanReason.Manual, timed), T0.ToLocalTime(), Inv)[1];
+            Check("tray tip: today's short form drops the time", today == "Last clean hit its time limit", today);
         }
 
         static void TrayStatusTests()

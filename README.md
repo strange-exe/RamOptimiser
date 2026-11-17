@@ -122,7 +122,25 @@ bin\ramopt.exe clean                       # default areas (all but full standby
 bin\ramopt.exe clean --areas workingsets,standby-low
 bin\ramopt.exe clean --all                 # adds the full standby purge and the drive flush
 bin\ramopt.exe watch --threshold 85        # clean when load reaches 85%, at most every 5 minutes
+bin\ramopt.exe status --json               # one JSON object on stdout
+bin\ramopt.exe clean --no-log              # don't add this clean to cleans.log
 ```
+
+`clean` and `watch` add one line per clean to `%LOCALAPPDATA%\RamOptimiser\cleans.log` (see Clean log below)
+unless `--no-log`; `clean --dry-run` never does. `--json` works with `status`, `clean`, `clean --dry-run` and
+`watch`, and prints JSON on stdout while messages, notes and errors go to stderr:
+
+- `status --json`: one object, `{"v":1,"time",...}` with `totalPhys`, `availablePhys`, `inUse`, `loadPercent`,
+  `systemCache`, `lists` (null when the memory lists can't be read), `commit` (null when unknown), `condition` and
+  `advice`.
+- `clean --dry-run --json`: one `"type":"estimate"` object: `areas` (each with `name`, `kind` of `bytes`,
+  `unknown` or `none`, `bytes` (null unless the kind is `bytes`), `upperBound` (true when the figure is "up to"
+  rather than "about") and `note`), `inUseDropAtLeast`, `fileCacheDropUpTo` and `advice`.
+- `clean --json`: the clean's record, the same line it adds to the log, also when it is skipped because another
+  clean is running. `watch --json`: one such line per clean, skipped turns included.
+
+`help` (or `-h`, `--help`, `/?`) ignores anything after it except `--json` and `--no-log`, which are refused with
+exit code 1.
 
 `watch` uses the same backoff as the app: a clean that leaves load at or above the threshold doubles the wait
 (up to 16 times `--cooldown`, or `--interval` when the cooldown is shorter, so `--cooldown 0` still backs off) until
@@ -140,10 +158,11 @@ flush), 3 not elevated, 4 `watch` stopped after 5 errors in a row, 5 another cle
 
 `%LOCALAPPDATA%\RamOptimiser\cleans.log` gets one JSON object per line (UTF-8, `\n`), format version 1:
 
-- `"type":"clean"`: `id`, `time` (UTC), `source` (`gui` for the app), `reason` (`manual`, `threshold` or
-  `interval`), `stopped` (`none`, `cancelled`, `timed-out` or `busy`), `ms`, `passes`, `before` and
-  `after` (load, in use, commit percent, condition), `freed`, `combinedBytes`, `areas` (name, outcome, ms, message)
-  and `services`.
+- `"type":"clean"`: `id`, `time` (UTC), `source` (`gui` for the app, `cli` for `ramopt clean`, `watch` for
+  `ramopt watch`), `reason` (`manual`, `threshold`, `interval` or, from `watch`, `low-memory`), `stopped` (`none`,
+  `cancelled`, `timed-out` or `busy`), `ms`, `passes`, `before` and `after` (load, in use, commit percent,
+  condition), `freed`, `combinedBytes`, `areas` (name, outcome, ms, message) and `services`. An app clean that
+  failed before it could report has null `before`, `after` and `freed` and an `error` with the reason.
 - `"type":"rebound"`: `ref` (the clean's `id`), `time`, `load`, `inUse`: the load about five minutes after an app
   clean.
 - `"type":"event"` (the app): `time`, `source`, `event` (`paused`, `resumed`, `pause-ended`, `backoff-started`,

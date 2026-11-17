@@ -357,10 +357,40 @@ namespace RamOptimiser.App
         /// </summary>
         public static string TrayTooltip(MemorySnapshot s, string line2)
         {
-            if (string.IsNullOrEmpty(line2)) return TrayTooltip(s);
+            return TrayTooltip(s, string.IsNullOrEmpty(line2) ? null : new[] { line2 });
+        }
+
+        /// <summary>
+        /// With the second line's forms, longest first (TrayStatus.TooltipLines): the first form that fits whole, else
+        /// the shortest cut at a word as above. Null or empty: TrayTooltip(s).
+        /// </summary>
+        public static string TrayTooltip(MemorySnapshot s, IList<string> forms)
+        {
+            if (forms == null || forms.Count == 0) return TrayTooltip(s);
             string line1 = AppName + ": " + (s == null ? "load unknown" : s.LoadPercent.ToString(CultureInfo.InvariantCulture) + "%");
-            string fit = FitWords(line2.Trim(), MaxTooltipLength - line1.Length - 1);
+            int room = MaxTooltipLength - line1.Length - 1;
+            string fit = null;
+            foreach (string form in forms)
+            {
+                if (string.IsNullOrEmpty(form)) continue;
+                string line = form.Trim();
+                if (line.Length > 0 && line.Length <= room) { fit = line; break; }
+            }
+            if (fit == null)
+            {
+                string last = forms[forms.Count - 1];
+                fit = string.IsNullOrEmpty(last) ? null : FitWords(last.Trim(), room);
+            }
             return fit == null ? TrayTooltip(s) : line1 + "\n" + fit;
+        }
+
+        /// <summary>The note under Settings > Activity's log path; without a data folder there is no file to describe.</summary>
+        public static string CleanLogNote(bool hasFile)
+        {
+            const string lists = " The lists above show this session only.";
+            return hasFile
+                ? "Every clean the app runs is added to this file, kept under 256 KB with one older copy." + lists
+                : "This account has no local data folder, so cleans are not saved to a file." + lists;
         }
 
         /// <summary>text if it is at most room characters, else its words up to the last space that fits; null if none.</summary>

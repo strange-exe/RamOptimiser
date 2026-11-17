@@ -221,6 +221,9 @@ namespace RamOptimiser
         /// The action's outcome. One built by an older caller with only a reason and no outcome reads as a skip
         /// (SkippedNotRunning for the old "not running" reason), as it did before outcomes existed; every action
         /// this app's own code builds has its outcome set. Null is Pending.
+        /// TEMPORARY (E13): the text branch exists only for tests that still build actions without an outcome
+        /// (AppTests.cs, CleanLogTests.cs, CleanControlTests.cs). Remove it, and the Stopped, Started and Failed
+        /// setters below, once package 6A moves those tests to Outcome; no logic may branch on the English text.
         /// </summary>
         public static ServiceOutcome Of(ServiceAction a)
         {

@@ -166,6 +166,7 @@ namespace RamOptimiser.App
         // Activity (settings tab, P7 and R4): this session's cleans and auto-clean events, from memory only.
         StackPanel recentCleanRows, activityRows;
         TextBox activityPath;
+        TextBlock activityPathNote;
         const int ActivityRowsShown = 20;
         readonly ActivityHistory activity = new ActivityHistory(ActivityRowsShown);
         /// <summary>The last clean, for the tray's tooltip line and status item; null before the first.</summary>
@@ -264,7 +265,9 @@ namespace RamOptimiser.App
             if (elevated && settings.AutoCleanEnabled) service.RestorePause(settings.AutoCleanPausedUntilUtc);
             RefreshAutoRow();
             string logPath = CleanLog.DefaultPath;
-            activityPath.Text = logPath ?? "This account has no local data folder, so nothing is saved.";
+            activityPath.Text = logPath ?? "";
+            activityPath.Visibility = logPath == null ? Visibility.Collapsed : Visibility.Visible;
+            activityPathNote.Text = AppText.CleanLogNote(logPath != null);
             ShowHistory();
             ShowActivity();
             // Before service.Start, so a Power Clean of this run is never mistaken for an earlier run's leftover.
@@ -507,6 +510,7 @@ namespace RamOptimiser.App
             recentCleanRows = F<StackPanel>("RecentCleanRows");
             activityRows = F<StackPanel>("ActivityRows");
             activityPath = F<TextBox>("ActivityPath");
+            activityPathNote = F<TextBlock>("ActivityPathNote");
 
             areaBoxes.Add(new KeyValuePair<CheckBox, Areas>(F<CheckBox>("AreaWorkingSets"), Areas.WorkingSets));
             areaBoxes.Add(new KeyValuePair<CheckBox, Areas>(F<CheckBox>("AreaFileCache"), Areas.SystemFileCache));
@@ -1366,15 +1370,17 @@ namespace RamOptimiser.App
         void OnServiceError(Exception ex, ServiceErrorSource source)
         {
             if (ServiceErrorRoute.IsCleanFailure(source, cleaningUi)) { cleanError = ex; return; }
-            readFailing = true;
             // Once per new message, or the same one every 10 minutes: a failure every 2 s must not fill the list.
             DateTime nowUtc = DateTime.UtcNow;
             if (ErrorGate.ShouldLog(loggedReadError, loggedReadErrorUtc, ex.Message, nowUtc))
             {
                 loggedReadError = ex.Message;
                 loggedReadErrorUtc = nowUtc;
-                AddActivity(ActivityEvents.ReadFailed(ex.Message));
+                // Only a sampling failure is "could not be read"; a handler's own error goes to the error log.
+                if (ActivityEvents.IsReadFailure(source)) AddActivity(ActivityEvents.ReadFailed(ex.Message));
+                else ErrorLog.TryWrite(ErrorLog.DefaultPath, "auto-clean error", ex);
             }
+            if (ActivityEvents.IsReadFailure(source)) readFailing = true;
             memView.SampleFailed();
             sampleErrorText.Text = AppText.SampleErrorText(ex.Message, (int)SampleInterval.TotalSeconds, memView.HasData);
             sampleError.Visibility = Visibility.Visible;
@@ -2341,7 +2347,7 @@ namespace RamOptimiser.App
             trayAutoKey = auto + "|" + menuState.AutoText;
             tray.SetMenuState(menuState, syncState == SettingsSyncState.SaveFailed, AppText.CanPause(auto), auto == AutoCleanState.Paused);
             tray.SetStatusLine(TrayStatus.MenuLine(lastClean, localNow, culture));
-            tray.Update(lastSnapshot, settings.ShowTrayPercent, taskbarLight, TrayStatus.TooltipLine(auto, autoInfo, lastClean, localNow, culture));
+            tray.Update(lastSnapshot, settings.ShowTrayPercent, taskbarLight, TrayStatus.TooltipLines(auto, autoInfo, lastClean, localNow, culture));
         }
 
         /// <summary>The tray's status item: the window, on the Memory tab, where the result line and its areas are.</summary>
@@ -2355,17 +2361,19 @@ namespace RamOptimiser.App
         // ------------------------------------------------------------------ activity (P7, R4)
 
         /// <summary>
-        /// One record into cleans.log, in the data folder of the account the app runs as. Never throws. May wait up to
-        /// about 150 ms for another writer, so it is called off the UI thread (the clean and tick threads, a pool thread).
+        /// The app's one writer to cleans.log, in the data folder of the account the app runs as. Its writes never
+        /// overlap, events keep their order, and nothing throws. A write may wait about 150 ms for ramopt, so it runs
+        /// off the UI thread: WriteNow from the clean and tick threads, Post (thread pool) from the UI.
         /// </summary>
+        static readonly SerialLog cleanLog = new SerialLog(line =>
+        {
+            string folder = AppPaths.DataFolder;
+            if (folder != null) CleanLog.TryAppend(folder, line);
+        }, work => ThreadPool.QueueUserWorkItem(delegate { work(); }));
+
         static void AppendLog(string line)
         {
-            try
-            {
-                string folder = AppPaths.DataFolder;
-                if (folder != null) CleanLog.TryAppend(folder, line);
-            }
-            catch (Exception) { }
+            cleanLog.WriteNow(line);
         }
 
         /// <summary>Adds an event to Recent activity and, off the UI thread, to cleans.log.</summary>
@@ -2374,8 +2382,7 @@ namespace RamOptimiser.App
             if (e == null) return;
             DateTime now = DateTime.Now;
             activity.Add(ActivityLog.Row(now, now, e.Text, CultureInfo.CurrentCulture));
-            string record = ActivityLog.EventRecord(DateTime.UtcNow, e);
-            ThreadPool.QueueUserWorkItem(delegate { AppendLog(record); });
+            cleanLog.Post(ActivityLog.EventRecord(DateTime.UtcNow, e));
             ShowActivity();
         }
 

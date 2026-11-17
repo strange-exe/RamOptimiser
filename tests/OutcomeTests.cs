@@ -241,8 +241,13 @@ namespace RamOptimiser.Tests
             {
                 var c = new StartupChange { Kind = k, Detail = k == StartupChangeKind.Failed ? "The service did not respond" : null };
                 string want = AppText.StartupChangeReason(k, c.Detail);
-                Check("change: Message matches the reason for " + k, c.Message == want || (k == StartupChangeKind.Failed && c.Message == c.Detail),
-                    c.Message + " / " + want);
+                if (k == StartupChangeKind.Failed)
+                {
+                    Check("change: a failure's Message is the Windows text", c.Message == c.Detail, c.Message);
+                    Check("change: the error bar reads a failure as its reason", AppText.Plain(c.Message, "unknown error") == want,
+                        AppText.Plain(c.Message, "unknown error") + " / " + want);
+                }
+                else Check("change: Message matches the reason for " + k, c.Message == want, c.Message + " / " + want);
             }
 
             Check("change: denied when elevated is protected", StartupServices.DeniedKind(true) == StartupChangeKind.RefusedProtected);
@@ -252,7 +257,8 @@ namespace RamOptimiser.Tests
             Check("reenable: delay not restored", StartupServices.ReenableKind("auto-delayed", false, true) == StartupChangeKind.TurnedOnDelayNotRestored);
             Check("reenable: plain auto ignores the delay call", StartupServices.ReenableKind("auto", false, true) == StartupChangeKind.TurnedOn);
             Check("reenable: start failed", StartupServices.ReenableKind("auto", true, false) == StartupChangeKind.TurnedOnStartFailed);
-            Check("reenable: both, the lasting one wins", StartupServices.ReenableKind("auto-delayed", false, false) == StartupChangeKind.TurnedOnDelayNotRestored);
+            // Not running now is what the user sees, so a failed start is reported even when the delay was lost too.
+            Check("reenable: both, the failed start wins", StartupServices.ReenableKind("auto-delayed", false, false) == StartupChangeKind.TurnedOnStartFailed);
         }
 
         static void StartupWordingTests()
@@ -395,6 +401,21 @@ namespace RamOptimiser.Tests
             Check("tidy: modes read only for listed, well-formed names", !asked.Contains("Unlisted1") && !asked.Contains("Malformed1")
                 && !asked.Contains("Malformed2"), string.Join(",", asked.ToArray()));
             Check("tidy: nothing in, nothing out", StartupServices.NamesToForget(null, n => true, n => StartMode.Manual).Count == 0);
+
+            // A name ServiceController refuses (ArgumentException, e.g. longer than 80 characters) keeps only that
+            // record; the rest of the tidy goes on.
+            string tooLong = "CDPUserSvc_" + new string('a', 80);
+            var odd = new List<KeyValuePair<string, string>>
+            {
+                new KeyValuePair<string, string>(tooLong, "auto"),
+                new KeyValuePair<string, string>("Auto2", "auto")
+            };
+            List<string> after = StartupServices.NamesToForget(odd, n => true, n =>
+            {
+                if (n.Length > 80) throw new ArgumentException("name too long");
+                return StartMode.Automatic;
+            });
+            Check("tidy: an argument error skips only that name", after.Count == 1 && after[0] == "Auto2", string.Join(",", after.ToArray()));
         }
     }
 }

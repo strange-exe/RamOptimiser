@@ -350,8 +350,9 @@ namespace RamOptimiser.Tests
             Throws<ArgumentException>("options: --dry-run rejected with watch", () => Options.Parse(new[] { "watch", "--dry-run" }));
             try { Options.Parse(new[] { "watch", "--dry-run" }); }
             catch (ArgumentException ex) { Check("options: --dry-run message", ex.Message == "--dry-run works only with 'clean'.", ex.Message); }
-            Check("help: lists --dry-run", Program.HelpText().Contains(
-                "  ramopt clean --dry-run [--areas LIST | --all]   show what a clean would do; changes nothing (no admin needed)"));
+            string help = Program.HelpText().Replace("\r\n", "\n");
+            Check("help: lists --dry-run", help.Contains("  ramopt clean --dry-run [--areas LIST | --all] [--json]\n"
+                + "                                         show what a clean would do; changes nothing (no admin needed)"), help);
         }
 
         // ---------------------------------------------------------------- R1: status

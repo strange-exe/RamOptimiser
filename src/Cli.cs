@@ -35,7 +35,13 @@ namespace RamOptimiser
                 case "clean": o.Command = Command.Clean; break;
                 case "watch": o.Command = Command.Watch; break;
                 case "help": case "-h": case "--help": case "/?":
-                    if (args.Length > 1) throw new ArgumentException("'help' takes no options.");
+                    // Anything after help is ignored, as before, except output options: a script asking for JSON
+                    // must not get the help text on stdout with exit 0.
+                    for (int i = 1; i < args.Length; i++)
+                    {
+                        string h = args[i].ToLowerInvariant();
+                        if (h == "--json" || h == "--no-log") throw new ArgumentException("'help' takes no options.");
+                    }
                     o.Command = Command.Help;
                     return o;
                 default: throw new ArgumentException("Unknown command '" + args[0] + "'.");
@@ -426,6 +432,26 @@ namespace RamOptimiser
         }
 
         /// <summary>The clean ramopt asks for: its areas, --timeout as the deadline, the Ctrl+C token and the lock wait.</summary>
+        /// <summary>
+        /// watch's clean: no wait for the clean lock (a busy turn is skipped), the record appended under the lock by
+        /// recorder.Write, and inClean(true) while it runs, then inClean(false), for the Ctrl+C handler.
+        /// </summary>
+        internal static Func<Areas, CleanReport> WatchClean(Options o, CancellationToken cancel, CleanRecorder recorder,
+            Func<CleanRequest, CleanReport> clean, Action<bool> inClean)
+        {
+            return areas =>
+            {
+                inClean(true);
+                try
+                {
+                    CleanRequest req = RequestFor(o, areas, cancel, TimeSpan.Zero);
+                    req.UnderLock = recorder.Write;
+                    return clean(req);
+                }
+                finally { inClean(false); }
+            };
+        }
+
         internal static CleanRequest RequestFor(Options o, Areas areas, CancellationToken cancel, TimeSpan lockWait)
         {
             return new CleanRequest
@@ -509,17 +535,7 @@ namespace RamOptimiser
             {
                 Elapsed = () => clock.Elapsed,
                 Recorder = recorder,
-                Clean = areas =>
-                {
-                    Volatile.Write(ref inClean, 1);
-                    try
-                    {
-                        CleanRequest req = RequestFor(o, areas, cancel.Token, TimeSpan.Zero);
-                        req.UnderLock = recorder.Write;
-                        return Cleaner.Clean(req);
-                    }
-                    finally { Volatile.Write(ref inClean, 0); }
-                }
+                Clean = WatchClean(o, cancel.Token, recorder, Cleaner.Clean, on => Volatile.Write(ref inClean, on ? 1 : 0))
             };
             watch.Wait = (t, includeLow) =>
             {
@@ -753,8 +769,10 @@ namespace RamOptimiser
             w.WriteLine("  ramopt status [--json]                 show memory use (no admin needed)");
             w.WriteLine("  ramopt clean [--areas LIST | --all] [--timeout S] [--no-log] [--json]");
             w.WriteLine("                                         clean once; Ctrl+C stops it after the current step");
-            w.WriteLine("  ramopt clean --dry-run [--areas LIST | --all]   show what a clean would do; changes nothing (no admin needed)");
+            w.WriteLine("  ramopt clean --dry-run [--areas LIST | --all] [--json]");
+            w.WriteLine("                                         show what a clean would do; changes nothing (no admin needed)");
             w.WriteLine("  ramopt watch [--threshold N] [--interval S] [--cooldown S] [--timeout S] [--areas LIST | --all]");
+            w.WriteLine("               [--no-log] [--json]");
             w.WriteLine("                                         clean whenever load reaches N% (default 85, every 30s, 300s apart);");
             w.WriteLine("                                         a clean that leaves load at N% or more doubles the wait (up to {0}x)",
                 1 << AutoCleanPolicy.MaxBackoffSteps);

@@ -565,7 +565,7 @@
                   <TextBox x:Name="ActivityPath" IsReadOnly="True" IsReadOnlyCaretVisible="True" Margin="-3,2,0,0" Padding="0,4"
                            Height="Auto" TextWrapping="Wrap" FontSize="12" Background="Transparent" BorderBrush="Transparent"
                            AutomationProperties.Name="Clean log file"/>
-                  <TextBlock Style="{StaticResource Small}" Margin="0,2,0,0"
+                  <TextBlock x:Name="ActivityPathNote" Style="{StaticResource Small}" Margin="0,2,0,0"
                              Text="Every clean the app runs is added to this file, kept under 256 KB with one older copy. The lists above show this session only."/>
                 </StackPanel>
               </Border>

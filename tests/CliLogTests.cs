@@ -96,6 +96,9 @@ namespace RamOptimiser.Tests
             Throws<ArgumentException>("options: --json rejected by help", () => Options.Parse(new[] { "help", "--json" }));
             Throws<ArgumentException>("options: --json rejected by --help", () => Options.Parse(new[] { "--help", "--json" }));
             Check("options: help alone still works", Options.Parse(new[] { "help" }).Command == Command.Help);
+            Throws<ArgumentException>("options: --no-log rejected by help", () => Options.Parse(new[] { "help", "--no-log" }));
+            Check("options: help with a topic still prints help", Options.Parse(new[] { "help", "clean" }).Command == Command.Help
+                && Options.Parse(new[] { "-h", "foo" }).Command == Command.Help && Options.Parse(new[] { "/?", "x" }).Command == Command.Help);
             Check("options: --no-log with clean", Options.Parse(new[] { "clean", "--no-log" }).NoLog);
             Check("options: --no-log with watch", Options.Parse(new[] { "watch", "--NO-LOG" }).NoLog);
             Throws<ArgumentException>("options: --no-log rejected by status", () => Options.Parse(new[] { "status", "--no-log" }));
@@ -313,8 +316,8 @@ namespace RamOptimiser.Tests
             Check("cli: --json clean puts the lock note on stderr", Lines(outW).Count == 1 && errW.ToString().Contains("note: ran without the clean lock"),
                 outW + "|" + errW);
 
-            Check("cli: status text goes to stdout without --json", Program.InfoWriter(Options.Parse(new[] { "clean" }), Console.Out, Console.Error) == Console.Out);
-            Check("cli: status text goes to stderr with --json", Program.InfoWriter(Options.Parse(new[] { "clean", "--json" }), Console.Out, Console.Error) == Console.Error);
+            Check("cli: progress lines go to stdout without --json", Program.InfoWriter(Options.Parse(new[] { "clean" }), Console.Out, Console.Error) == Console.Out);
+            Check("cli: progress lines go to stderr with --json", Program.InfoWriter(Options.Parse(new[] { "clean", "--json" }), Console.Out, Console.Error) == Console.Error);
         }
 
         // ---------------------------------------------------------------- watch
@@ -405,6 +408,28 @@ namespace RamOptimiser.Tests
             w.Run(Options.Parse(new[] { "watch", "--json" }), outW, new StringWriter());
             lines = Lines(outW);
             Check("watch: --json without a recorder still prints records", lines.Count == 1 && Parse(lines[0]) != null, outW.ToString());
+
+            // RunWatch's clean: no lock wait, the record appended under the clean lock, and the in-clean flag set
+            // only while the clean runs (the Ctrl+C handler reads it).
+            var fake = new FakeClean();
+            var watchLines = new List<string>();
+            bool appendedInLock = false;
+            var flags = new List<bool>();
+            var rec = new CleanRecorder(CleanRecorder.WatchSource, true, l => { watchLines.Add(l); appendedInLock = fake.InLock; return true; }, () => T0);
+            var wo = Options.Parse(new[] { "watch", "--timeout", "40" });
+            Func<Areas, CleanReport> watchClean = Program.WatchClean(wo, CancellationToken.None, rec, fake.Clean, on => flags.Add(on));
+            CleanReport wr = watchClean(Areas.WorkingSets);
+            Check("watch clean: the request has no lock wait and the areas asked for", fake.Request != null
+                && fake.Request.LockWait == TimeSpan.Zero && fake.Request.Areas == Areas.WorkingSets
+                && fake.Request.Deadline == TimeSpan.FromSeconds(40));
+            Check("watch clean: the record is appended under the clean lock", watchLines.Count == 1 && appendedInLock, watchLines.Count.ToString());
+            Check("watch clean: the report is returned", wr != null);
+            Check("watch clean: in-clean is set, then cleared", flags.Count == 2 && flags[0] && !flags[1], flags.Count.ToString());
+            flags.Clear();
+            Func<Areas, CleanReport> throwing = Program.WatchClean(wo, CancellationToken.None, rec,
+                req => { throw new InvalidOperationException("x"); }, on => flags.Add(on));
+            try { throwing(Areas.WorkingSets); } catch (InvalidOperationException) { }
+            Check("watch clean: in-clean is cleared when the clean throws", flags.Count == 2 && !flags[1]);
         }
 
         // ---------------------------------------------------------------- help
@@ -415,6 +440,20 @@ namespace RamOptimiser.Tests
             Check("help: documents --json", help.Contains("--json"));
             Check("help: documents --no-log", help.Contains("--no-log"));
             Check("help: names the clean log", help.Contains("cleans.log"));
+            Check("help: dry run shows --json", help.Contains("ramopt clean --dry-run [--areas LIST | --all] [--json]"), help);
+            Check("help: watch shows --no-log and --json", help.Contains("[--no-log] [--json]")
+                && help.IndexOf("ramopt watch", StringComparison.Ordinal) >= 0
+                && help.IndexOf("[--no-log] [--json]", help.IndexOf("ramopt watch", StringComparison.Ordinal), StringComparison.Ordinal) > 0
+                && help.IndexOf("[--no-log] [--json]", help.IndexOf("ramopt watch", StringComparison.Ordinal), StringComparison.Ordinal)
+                    < help.IndexOf("clean whenever load", StringComparison.Ordinal), help);
+            Check("help: no usage line is wider than 120", MaxLineWidth(help) <= 120, MaxLineWidth(help).ToString());
+        }
+
+        static int MaxLineWidth(string text)
+        {
+            int max = 0;
+            foreach (string line in text.Split('\n')) max = Math.Max(max, line.TrimEnd('\r').Length);
+            return max;
         }
     }
 }

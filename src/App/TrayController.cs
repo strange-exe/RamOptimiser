@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
@@ -130,8 +131,9 @@ namespace RamOptimiser.App
             Update(snapshot, showPercent, taskbarIsLight, null);
         }
 
-        /// <param name="tipLine">The tooltip's second line (TrayStatus.TooltipLine), or null for the one-line tooltip.</param>
-        public void Update(MemorySnapshot snapshot, bool showPercent, bool taskbarIsLight, string tipLine)
+        /// <param name="tipLines">The tooltip's second line in its forms, longest first (TrayStatus.TooltipLines), or
+        /// null or empty for the one-line tooltip.</param>
+        public void Update(MemorySnapshot snapshot, bool showPercent, bool taskbarIsLight, IList<string> tipLines)
         {
             if (disposed) return;
             int size = SmallIconSize();
@@ -166,7 +168,7 @@ namespace RamOptimiser.App
             }
             shownSize = size;
 
-            string tip = AppText.TrayTooltip(snapshot, tipLine);
+            string tip = AppText.TrayTooltip(snapshot, tipLines);
             if (icon.Text != tip) icon.Text = tip;
         }
 

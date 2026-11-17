@@ -34,34 +34,57 @@ namespace RamOptimiser.App
         /// <summary>
         /// The tooltip's second line, the first that applies: needs admin, paused, the last clean went wrong (failed,
         /// partly failed, hit its time limit, did not finish), backing off, the last clean's result. Null when there
-        /// is nothing to say. AppText.TrayTooltip fits it into the 63 characters NotifyIcon allows.
+        /// is nothing to say. This is the longest form; the tray uses TooltipLines, which also has shorter ones.
         /// </summary>
         public static string TooltipLine(AutoCleanState state, AutoCleanStatus st, LastCleanInfo last, DateTime localNow, CultureInfo culture)
         {
-            if (state == AutoCleanState.NeedsAdmin) return "Auto-clean paused: needs admin";
+            IList<string> lines = TooltipLines(state, st, last, localNow, culture);
+            return lines.Count == 0 ? null : lines[0];
+        }
+
+        /// <summary>
+        /// The same line in the forms AppText.TrayTooltip tries in turn to fit the 63 characters NotifyIcon allows,
+        /// longest first. A line about a clean drops its "when" before anything else, so the outcome is never what gets
+        /// cut: "Auto-clean yesterday at 2:32 PM hit its time limit", then "Auto-clean yesterday hit its time limit",
+        /// then "Last auto-clean hit its time limit". Empty when there is nothing to say.
+        /// </summary>
+        public static IList<string> TooltipLines(AutoCleanState state, AutoCleanStatus st, LastCleanInfo last, DateTime localNow, CultureInfo culture)
+        {
+            if (state == AutoCleanState.NeedsAdmin) return new[] { "Auto-clean paused: needs admin" };
             if (state == AutoCleanState.Paused)
             {
                 string paused = AppText.PausedLine(st, culture);
-                if (paused != null) return "Auto-clean p" + paused.Substring(1);
+                if (paused != null) return new[] { "Auto-clean p" + paused.Substring(1) };
             }
-            string failure = last == null ? null : FailureLine(last, localNow, culture);
-            if (failure != null) return failure;
-            if (state == AutoCleanState.BackingOff) return "Auto-clean slowed: cleans are not helping";
-            return last == null ? null : ResultLine(last, localNow, culture);
+            string outcome = last == null ? null : FailureOutcome(last.Report);
+            if (outcome == null)
+            {
+                if (state == AutoCleanState.BackingOff) return new[] { "Auto-clean slowed: cleans are not helping" };
+                if (last == null) return new string[0];
+                outcome = ResultOutcome(last.Report);
+            }
+            var lines = new List<string>();
+            foreach (string head in Heads(last, localNow, culture)) lines.Add(head + outcome);
+            return lines;
         }
 
-        static string Head(LastCleanInfo last, DateTime localNow, CultureInfo culture)
+        /// <summary>The clean's name with its time, then with its day only (an earlier day), then with neither.</summary>
+        static IEnumerable<string> Heads(LastCleanInfo last, DateTime localNow, CultureInfo culture)
         {
-            return (last.Automatic ? "Auto-clean " : "Clean ") + AppText.When(last.Utc.ToLocalTime(), localNow, culture);
+            string name = last.Automatic ? "Auto-clean " : "Clean ";
+            DateTime local = last.Utc.ToLocalTime();
+            yield return name + AppText.When(local, localNow, culture);
+            if (local.Date == localNow.Date.AddDays(-1)) yield return name + "yesterday";
+            else if (local.Date != localNow.Date) yield return name + "on " + local.ToString("d", culture);
+            yield return last.Automatic ? "Last auto-clean" : "Last clean";
         }
 
-        static string FailureLine(LastCleanInfo last, DateTime localNow, CultureInfo culture)
+        /// <summary>What went wrong, after the head (" hit its time limit", ": 2 areas failed"); null when nothing did.</summary>
+        static string FailureOutcome(CleanReport r)
         {
-            CleanReport r = last.Report;
-            string head = Head(last, localNow, culture);
-            if (r == null || r.Before == null || r.After == null) return head + " did not finish";
-            if (r.Stopped == CleanStop.TimedOut) return head + " hit its time limit";
-            if (r.Stopped == CleanStop.Cancelled) return head + " was stopped";
+            if (r == null || r.Before == null || r.After == null) return " did not finish";
+            if (r.Stopped == CleanStop.TimedOut) return " hit its time limit";
+            if (r.Stopped == CleanStop.Cancelled) return " was stopped";
             if (r.Stopped == CleanStop.Busy) return null; // nothing ran, nothing failed
             int failed = 0, partial = 0;
             foreach (AreaResult a in r.Results)
@@ -69,17 +92,15 @@ namespace RamOptimiser.App
                 if (a.Outcome == AreaOutcome.Failed) failed++;
                 else if (a.Outcome == AreaOutcome.Partial) partial++;
             }
-            if (failed > 0) return head + ": " + AreaCount(failed) + " failed";
-            if (partial > 0) return head + ": " + AreaCount(partial) + " partly failed";
+            if (failed > 0) return ": " + AreaCount(failed) + " failed";
+            if (partial > 0) return ": " + AreaCount(partial) + " partly failed";
             return null;
         }
 
-        static string ResultLine(LastCleanInfo last, DateTime localNow, CultureInfo culture)
+        static string ResultOutcome(CleanReport r)
         {
-            CleanReport r = last.Report;
-            string head = Head(last, localNow, culture);
-            if (r.Stopped == CleanStop.Busy) return head + " was skipped";
-            return head + (r.InUseFreed > 0 ? " freed " + Format.Bytes(r.InUseFreed) : " freed nothing");
+            if (r.Stopped == CleanStop.Busy) return " was skipped";
+            return r.InUseFreed > 0 ? " freed " + Format.Bytes(r.InUseFreed) : " freed nothing";
         }
 
         static string AreaCount(int n)
@@ -278,7 +299,9 @@ namespace RamOptimiser.App
         /// <summary>
         /// Runs job through clean (Cleaner.Clean in the app) with the clean lock taken without waiting (a clean already
         /// running elsewhere means this one is skipped, not queued), and appends the record while the lock is held. A
-        /// busy skip ran nothing and held no lock: its record is appended after. A failing append never fails the clean.
+        /// busy skip ran nothing and held no lock: its record is appended after. A clean that throws before its record
+        /// was written gets one with its error (no before or after) and is rethrown, so every clean leaves one line.
+        /// A failing append never fails the clean.
         /// </summary>
         public static CleanReport Run(CleanJob job, ICollection<string> services, Func<CleanRequest, CleanReport> clean,
             Action<string> append, Func<DateTime> clock)
@@ -286,17 +309,100 @@ namespace RamOptimiser.App
             if (job == null) throw new ArgumentNullException("job");
             if (clean == null) throw new ArgumentNullException("clean");
             var req = new CleanRequest { Areas = job.Areas, Services = services, Deadline = job.Deadline, LockWait = TimeSpan.Zero };
-            req.UnderLock = r => TryAppend(append, job, r, clock);
-            CleanReport report = clean(req);
-            if (report != null && report.Stopped == CleanStop.Busy) TryAppend(append, job, report, clock);
+            bool written = false;
+            req.UnderLock = r =>
+            {
+                if (r == null) return;
+                written = true;
+                TryAppend(append, () => Record(job, r, clock()));
+            };
+            CleanReport report;
+            try { report = clean(req); }
+            catch (Exception ex)
+            {
+                if (!written) TryAppend(append, () => ErrorRecord(job, ex, clock()));
+                throw;
+            }
+            if (report != null && report.Stopped == CleanStop.Busy) TryAppend(append, () => Record(job, report, clock()));
             return report;
         }
 
-        static void TryAppend(Action<string> append, CleanJob job, CleanReport r, Func<DateTime> clock)
+        /// <summary>The record of a clean that threw before reporting: no before or after, and its error. Pure.</summary>
+        public static string ErrorRecord(CleanJob job, Exception error, DateTime utc)
         {
-            if (append == null || r == null) return;
-            try { append(Record(job, r, clock())); }
+            return CleanLog.FormatClean(new CleanReport(), Source, ReasonName(job.Reason), StopName(CleanStop.None), job.Id, utc,
+                ActivityLog.Sanitise(AppText.Plain(error == null ? null : error.Message, "unknown error")));
+        }
+
+        static void TryAppend(Action<string> append, Func<string> record)
+        {
+            if (append == null) return;
+            try { append(record()); }
             catch (Exception) { } // the log is a record, never a reason for a clean to fail
+        }
+    }
+
+    /// <summary>
+    /// The app's one writer to cleans.log. The clean thread (under the clean lock), the tick thread (rebounds) and the
+    /// UI (activity events) all write; one gate means they never collide with each other, so CleanLog.TryAppend's
+    /// short retries only have to absorb ramopt. Post queues a line for one worker at a time, which writes the queue
+    /// in order, so "paused" never lands after "resumed". WriteNow writes on the caller's thread. Never throws.
+    /// </summary>
+    public sealed class SerialLog
+    {
+        readonly Action<string> write;
+        readonly Action<Action> post;
+        readonly object writeGate = new object();
+        readonly Queue<string> pending = new Queue<string>();
+        bool draining; // guarded by pending
+
+        /// <param name="write">Writes one line (CleanLog.TryAppend in the app).</param>
+        /// <param name="post">Runs work off the caller's thread (the thread pool in the app).</param>
+        public SerialLog(Action<string> write, Action<Action> post)
+        {
+            if (write == null) throw new ArgumentNullException("write");
+            if (post == null) throw new ArgumentNullException("post");
+            this.write = write;
+            this.post = post;
+        }
+
+        /// <summary>Writes line now, on this thread, after any write already under way.</summary>
+        public void WriteNow(string line)
+        {
+            lock (writeGate) Write(line);
+        }
+
+        /// <summary>Queues line; a worker writes the queue in order. Returns at once.</summary>
+        public void Post(string line)
+        {
+            lock (pending)
+            {
+                pending.Enqueue(line);
+                if (draining) return;
+                draining = true;
+            }
+            try { post(Drain); }
+            catch (Exception) { lock (pending) draining = false; }
+        }
+
+        void Drain()
+        {
+            while (true)
+            {
+                string line;
+                lock (pending)
+                {
+                    if (pending.Count == 0) { draining = false; return; }
+                    line = pending.Dequeue();
+                }
+                lock (writeGate) Write(line);
+            }
+        }
+
+        void Write(string line)
+        {
+            try { write(line); }
+            catch (Exception) { } // the log is a record, never a reason for anything else to fail
         }
     }
 
@@ -373,6 +479,15 @@ namespace RamOptimiser.App
             else if (was > 0 && now == 0)
                 list.Add(new ActivityEvent { Kind = "backoff-ended", Text = "Auto-clean is back to its normal wait." });
             return list;
+        }
+
+        /// <summary>
+        /// True only for a sampling failure: that is what "Memory status could not be read" and its recovery line
+        /// mean. An error from the service's own handlers (Other) is not about reading memory.
+        /// </summary>
+        public static bool IsReadFailure(ServiceErrorSource source)
+        {
+            return source == ServiceErrorSource.Sample;
         }
 
         public static ActivityEvent ReadFailed(string message)

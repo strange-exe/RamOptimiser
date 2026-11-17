@@ -419,8 +419,8 @@ namespace RamOptimiser
         }
 
         /// <summary>
-        /// As below, without the clean lock: the app's path until it moves to Clean(CleanRequest) (package 3A), so its
-        /// result line and back-off never see a Busy report they do not word yet.
+        /// As below, without the clean lock, so it never reports Busy. Kept for callers that do not want the lock
+        /// (the tests); the app and ramopt clean through Clean(CleanRequest), which takes it.
         /// </summary>
         public static CleanReport Clean(Areas areas, ICollection<string> services, int maxPasses)
         {

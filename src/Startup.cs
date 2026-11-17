@@ -694,7 +694,8 @@ namespace RamOptimiser
         public JournalState Journal;
         /// <summary>
         /// This app set it to Manual and recorded how it started before (Journal is OffByApp). Setting it is kept
-        /// for older callers: true records OffByApp, false clears it.
+        /// for older callers: true records OffByApp, false clears it. TEMPORARY (E12): only AppTests.cs sets it;
+        /// remove the setter once package 6A moves that test to Journal = OffByApp.
         /// </summary>
         public bool DisabledByApp
         {
@@ -791,7 +792,8 @@ namespace RamOptimiser
 
         /// <summary>
         /// Derived from Kind. Setting it is kept for older callers (AppShell's catch builds { Ok = false, Message }):
-        /// false records Failed, true on a refused or failed change records a plain TurnedOn.
+        /// false records Failed, true on a refused or failed change records a plain TurnedOn. TEMPORARY (E13):
+        /// remove the setter once package 6A builds { Kind = Failed, Detail } in that catch.
         /// </summary>
         public bool Ok
         {
@@ -974,6 +976,7 @@ namespace RamOptimiser
                     catch (Win32Exception) { continue; }
                     catch (UnauthorizedAccessException) { continue; }
                     catch (System.Security.SecurityException) { continue; }
+                    catch (ArgumentException) { continue; } // a name ServiceController refuses, e.g. over 80 characters
                 }
                 if (ShouldForget(ClassifyJournal(true, isListed, now != StartMode.Other, now))) forget.Add(name);
             }
@@ -1032,12 +1035,14 @@ namespace RamOptimiser
 
         /// <summary>
         /// How a re-enable went once its start type is Automatic again. The delayed start matters only when the record
-        /// was "auto-delayed"; when both it and the start now failed, the lasting one (the delay) is reported.
+        /// was "auto-delayed". When both it and the start now failed, the failed start is reported: the service not
+        /// running now is what the user sees, and its note says it starts at the next restart.
         /// </summary>
         internal static StartupChangeKind ReenableKind(string recorded, bool delayRestored, bool started)
         {
+            if (!started) return StartupChangeKind.TurnedOnStartFailed;
             if (recorded == "auto-delayed" && !delayRestored) return StartupChangeKind.TurnedOnDelayNotRestored;
-            return started ? StartupChangeKind.TurnedOn : StartupChangeKind.TurnedOnStartFailed;
+            return StartupChangeKind.TurnedOn;
         }
 
         /// <summary>Sets a listed service to Manual and stops it. Needs administrator rights.</summary>
