@@ -101,11 +101,7 @@ namespace RamOptimiser.Gui
 
         public static string DefaultPath
         {
-            get
-            {
-                string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                return Path.Combine(Path.Combine(local, "RamOptimiser"), "settings.ini");
-            }
+            get { return Path.Combine(AppPaths.DataFolder, "settings.ini"); }
         }
 
         /// <summary>

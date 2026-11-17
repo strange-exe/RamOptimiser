@@ -2,9 +2,9 @@ using System;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
-namespace RamOptimiser.Gui
+namespace RamOptimiser
 {
-    /// <summary>Win32 calls for ownership and link checks (single instance, safe user folder).</summary>
+    /// <summary>Win32 calls for ownership and link checks (single instance, safe user folder, clean log).</summary>
     internal static class SecurityNative
     {
         public const uint SYNCHRONIZE = 0x00100000;
