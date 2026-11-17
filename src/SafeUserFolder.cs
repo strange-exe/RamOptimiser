@@ -3,12 +3,13 @@ using System.IO;
 using System.Security.AccessControl;
 using System.Security.Principal;
 
-namespace RamOptimiser.Gui
+namespace RamOptimiser
 {
     /// <summary>
     /// Checks a per-user folder (and files in it) before an elevated instance reads, writes, moves or deletes
     /// there. %LOCALAPPDATA%\RamOptimiser belongs to the non-elevated user, so a process of that user could
     /// swap the folder for a junction or plant links that an elevated File.Replace/Move/Delete would follow.
+    /// Shared by the desktop app and ramopt.exe (the clean log), so it lives in the core namespace.
     ///
     /// Refused: a folder that is a reparse point (junction, symlink, mount point) or is not a directory; a
     /// folder whose owner is not the current user, Administrators or SYSTEM; a file that is a reparse point
