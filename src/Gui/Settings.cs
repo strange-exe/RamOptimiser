@@ -164,6 +164,27 @@ namespace RamOptimiser.Gui
             }
         }
 
+        /// <summary>
+        /// Size and write time of settings.ini, after the same folder checks as Load. Never throws: any failure
+        /// gives FileStamp.Empty, which equals no stamp, so a check it fails is never mistaken for "unchanged".
+        /// </summary>
+        public static FileStamp Stamp(string path)
+        {
+            if (path == null) return FileStamp.Empty;
+            try
+            {
+                string full = Path.GetFullPath(path);
+                SafeUserFolder.Check(Path.GetDirectoryName(full), full);
+                var info = new FileInfo(full);
+                return info.Exists ? new FileStamp(true, info.Length, info.LastWriteTimeUtc) : new FileStamp(false, 0, DateTime.MinValue);
+            }
+            catch (IOException) { return FileStamp.Empty; }
+            catch (UnauthorizedAccessException) { return FileStamp.Empty; }
+            catch (System.Security.SecurityException) { return FileStamp.Empty; }
+            catch (ArgumentException) { return FileStamp.Empty; }
+            catch (NotSupportedException) { return FileStamp.Empty; }
+        }
+
         public static string Serialize(AppSettings settings)
         {
             AppSettings s = settings.Normalized();
@@ -275,5 +296,115 @@ namespace RamOptimiser.Gui
         static void Line(StringBuilder sb, string key, string value) { sb.Append(key).Append('=').Append(value).Append("\r\n"); }
         static string Bool(bool b) { return b ? "true" : "false"; }
         static string Int(int n) { return n.ToString(CultureInfo.InvariantCulture); }
+    }
+
+    /// <summary>What settings.ini looked like at one moment. Two stamps are equal only when both were read.</summary>
+    public sealed class FileStamp
+    {
+        /// <summary>The stamp of a failed check: equal to nothing, itself included.</summary>
+        public static readonly FileStamp Empty = new FileStamp(false, 0, DateTime.MinValue, false);
+
+        public readonly bool Exists;
+        public readonly long Length;
+        public readonly DateTime LastWriteUtc;
+        readonly bool read;
+
+        public FileStamp(bool exists, long length, DateTime lastWriteUtc) : this(exists, length, lastWriteUtc, true) { }
+
+        FileStamp(bool exists, long length, DateTime lastWriteUtc, bool read)
+        {
+            Exists = exists;
+            Length = length;
+            LastWriteUtc = lastWriteUtc;
+            this.read = read;
+        }
+
+        public override bool Equals(object obj)
+        {
+            var o = obj as FileStamp;
+            return o != null && read && o.read && Exists == o.Exists && Length == o.Length && LastWriteUtc == o.LastWriteUtc;
+        }
+
+        public override int GetHashCode()
+        {
+            return read ? LastWriteUtc.GetHashCode() ^ Length.GetHashCode() ^ (Exists ? 1 : 0) : 0;
+        }
+    }
+
+    public enum SettingsSyncState { InSync, SaveFailed }
+
+    public enum SettingsSyncEvent { LocalChange, SaveOk, SaveFailed, DiskChanged, ReloadOk, ReloadFailed }
+
+    /// <summary>
+    /// Whether the running settings are on disk (P12). A failed save leaves them in force for this run only; the
+    /// next change or window activation saves again. A local change or a changed file decides nothing by itself:
+    /// the save or reload that follows does. The slider's debounce stays in the UI's timer, outside this machine.
+    /// </summary>
+    public static class SettingsSync
+    {
+        public static SettingsSyncState Next(SettingsSyncState state, SettingsSyncEvent e)
+        {
+            switch (e)
+            {
+                case SettingsSyncEvent.SaveOk:
+                case SettingsSyncEvent.ReloadOk:
+                    return SettingsSyncState.InSync;
+                case SettingsSyncEvent.SaveFailed:
+                    return SettingsSyncState.SaveFailed;
+                default:
+                    return state;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Three-way merge of the app's settings with a settings.ini edited by hand while the app runs (P12): for each
+    /// key, the app's value when the app changed it since the last load or save, else the file's. Keys come from
+    /// Serialize, so a new setting is covered without code here, and the result goes back through Parse and
+    /// Normalized, so a hand edit can never set more than the file could at start-up.
+    /// </summary>
+    public static class SettingsMerge
+    {
+        const string StartWithWindowsKey = "StartWithWindows";
+
+        /// <summary>Key to value as Serialize writes them (normalized, PowerServices in catalog order).</summary>
+        internal static Dictionary<string, string> ToMap(AppSettings settings)
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            using (var reader = new StringReader(SettingsStore.Serialize(settings)))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    if (line.Length == 0 || line[0] == '#') continue;
+                    int eq = line.IndexOf('=');
+                    if (eq > 0) map[line.Substring(0, eq)] = line.Substring(eq + 1);
+                }
+            }
+            return map;
+        }
+
+        /// <summary>
+        /// baseline: what the app last loaded or saved; mine: the app's settings now; disk: the file now. Start with
+        /// Windows is always mine: the logon task is its source of truth and a file must never steer it.
+        /// </summary>
+        public static AppSettings Merge(AppSettings baseline, AppSettings mine, AppSettings disk)
+        {
+            if (baseline == null) throw new ArgumentNullException("baseline");
+            if (mine == null) throw new ArgumentNullException("mine");
+            if (disk == null) throw new ArgumentNullException("disk");
+            Dictionary<string, string> b = ToMap(baseline), m = ToMap(mine), d = ToMap(disk);
+            var sb = new StringBuilder();
+            foreach (KeyValuePair<string, string> kv in m)
+            {
+                string before, onDisk, value = kv.Value;
+                bool mineChanged = !b.TryGetValue(kv.Key, out before) || !string.Equals(before, kv.Value, StringComparison.Ordinal);
+                if (!mineChanged && !string.Equals(kv.Key, StartWithWindowsKey,StringComparison.OrdinalIgnoreCase)
+                    && d.TryGetValue(kv.Key, out onDisk))
+                    value = onDisk;
+                sb.Append(kv.Key).Append('=').Append(value).Append("\r\n");
+            }
+            return SettingsStore.Parse(sb.ToString()).Normalized();
+        }
     }
 }

@@ -176,9 +176,9 @@
           <Border Style="{StaticResource CardBorder}" Padding="16,12" Margin="0,12,0,0">
             <StackPanel>
               <TextBlock Text="Using the most memory" FontWeight="SemiBold"/>
-              <StackPanel x:Name="TopList" Margin="0,6,0,0" AutomationProperties.Name="Apps using the most memory">
+              <app:GroupPanel x:Name="TopList" Margin="0,6,0,0" AutomationProperties.Name="Apps using the most memory">
                 <TextBlock Style="{StaticResource Muted}" Text="Reading apps..."/>
-              </StackPanel>
+              </app:GroupPanel>
             </StackPanel>
           </Border>
 
@@ -224,7 +224,7 @@
               <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <Border BorderThickness="1" CornerRadius="4" BorderBrush="{DynamicResource ControlBorder}" Background="{DynamicResource Card}">
-              <StackPanel Orientation="Horizontal" AutomationProperties.Name="Show">
+              <app:GroupPanel Orientation="Horizontal" AutomationProperties.Name="Show">
                 <RadioButton x:Name="ShowAppsButton" GroupName="StartupKind" Style="{StaticResource SegmentStyle}" IsChecked="True"
                              AutomationProperties.Name="Startup apps">
                   <TextBlock><Run Text="Apps"/><Run x:Name="AppsCount" Text="" Foreground="{DynamicResource MutedText}" FontWeight="Normal"/></TextBlock>
@@ -233,7 +233,7 @@
                              AutomationProperties.Name="Services">
                   <TextBlock><Run Text="Services"/><Run x:Name="ServicesCount" Text="" Foreground="{DynamicResource MutedText}" FontWeight="Normal"/></TextBlock>
                 </RadioButton>
-              </StackPanel>
+              </app:GroupPanel>
             </Border>
             <Grid Grid.Column="1" Margin="8,0,0,0">
               <TextBox x:Name="StartupSearch" Style="{StaticResource SearchBox}" Tag="Search" Height="36"
@@ -255,14 +255,14 @@
         <ScrollViewer x:Name="StartupView" Grid.Row="1" Focusable="False" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Margin="16,8,16,16">
             <!-- Loading: about a second while Windows lists the services -->
-            <StackPanel x:Name="StartupLoading" AutomationProperties.Name="Loading startup items">
+            <app:GroupPanel x:Name="StartupLoading" AutomationProperties.Name="Loading startup items">
               <TextBlock Style="{StaticResource Small}" Text="Reading apps and services, about a second"/>
               <Border Style="{StaticResource Skeleton}" Width="260"/>
               <Border Style="{StaticResource Skeleton}" Width="190"/>
               <Border Style="{StaticResource Skeleton}" Width="230"/>
-            </StackPanel>
+            </app:GroupPanel>
             <Border x:Name="StartupCard" Style="{StaticResource CardBorder}" Visibility="Collapsed">
-              <StackPanel x:Name="StartupList"/>
+              <app:GroupPanel x:Name="StartupList" AutomationProperties.Name="Startup items"/>
             </Border>
             <!-- Empty: nothing in this list, or nothing matches the search and filter -->
             <StackPanel x:Name="StartupEmpty" HorizontalAlignment="Center" Margin="0,24,0,0" Visibility="Collapsed">
@@ -420,9 +420,9 @@
               <Border Style="{StaticResource RowDivider}" Padding="16,4">
                 <Expander x:Name="PowerServices" Style="{StaticResource Disclosure}" Margin="0,4" Header="Services to stop"
                           AutomationProperties.Name="Services to stop">
-                  <StackPanel x:Name="PowerList" Margin="0,4,0,0" AutomationProperties.Name="Services to stop">
+                  <app:GroupPanel x:Name="PowerList" Margin="0,4,0,0" AutomationProperties.Name="Services to stop">
                     <TextBlock Style="{StaticResource Muted}" Margin="0,6" Text="Reading services..."/>
-                  </StackPanel>
+                  </app:GroupPanel>
                 </Expander>
               </Border>
               <Border Style="{StaticResource RowDivider}" Padding="16,10">

@@ -133,6 +133,23 @@ namespace RamOptimiser.Gui
             }
         }
 
+        /// <summary>
+        /// Takes the lock from a copy that is about to give it up (the copy that asked for elevation, P10). The
+        /// first try that is not first is disposed; then this waits for released (the old copy's exit) for at
+        /// most timeout and tries once more, returning that instance whether or not it is first. create's
+        /// exceptions (SingleInstanceNameTakenException) reach the caller unchanged.
+        /// </summary>
+        internal static SingleInstance AcquireAfter(Func<SingleInstance> create, WaitHandle released, TimeSpan timeout)
+        {
+            if (create == null) throw new ArgumentNullException("create");
+            if (released == null) throw new ArgumentNullException("released");
+            SingleInstance first = create();
+            if (first.IsFirstInstance) return first;
+            first.Dispose();
+            released.WaitOne(timeout);
+            return create();
+        }
+
         static SingleInstanceNameTakenException Taken(int error, string why)
         {
             return new SingleInstanceNameTakenException(error,

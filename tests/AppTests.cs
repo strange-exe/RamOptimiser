@@ -170,6 +170,20 @@ namespace RamOptimiser.Tests
             Check("theme: high contrast note", ThemeResolver.ThemeNote(true) == "High contrast is on, so Windows' own colours are used."
                 && ThemeResolver.ThemeNote(false) == null);
 
+            // P10, P12, U10: shell wording.
+            Check("waiting for approval", AppText.WaitingForApproval == "Waiting for approval..."
+                && AppText.WaitingForApprovalHelp == "Waiting for the administrator prompt.");
+            Check("restart failed wording", AppText.RestartFailed("Access is denied.") == "Could not restart as administrator: access is denied."
+                && AppText.RestartFailed(null) == "Could not restart as administrator: unknown error.", AppText.RestartFailed("Access is denied."));
+            string saveFailed = AppText.SaveFailedText("The disk is full.");
+            Check("save failed wording", saveFailed == "Settings could not be saved: the disk is full. They apply until RAM Optimiser closes."
+                && saveFailed.EndsWith("closes.") && !saveFailed.Contains("!"), saveFailed);
+            Check("save failed wording without a reason", AppText.SaveFailedText("") == "Settings could not be saved: unknown error. They apply until RAM Optimiser closes.",
+                AppText.SaveFailedText(""));
+            Check("tray settings not saved", AppText.SettingsNotSaved == "Settings not saved");
+            Check("locked startup row says on", AppText.LockedRowName("Defender", "Protected by Windows", true) == "Defender: Protected by Windows, starts with Windows");
+            Check("locked startup row says off", AppText.LockedRowName("Defender", "Protected by Windows", false) == "Defender: Protected by Windows, does not start with Windows");
+
             string main = File.ReadAllText(Path.Combine(XamlDir(), "MainWindow.xaml"));
             Check("memory tab has a last-read note", main.Contains("x:Name=\"LastReadNote\""));
             Check("settings has a theme note", main.Contains("x:Name=\"ThemeNote\""));
@@ -195,15 +209,39 @@ namespace RamOptimiser.Tests
             int mark = exit < 0 ? -1 : shell.IndexOf("exiting = true;", exit, StringComparison.Ordinal);
             Check("exit saves a pending threshold first", exit >= 0 && flush > exit && flush < mark);
             int restart = shell.IndexOf("void RestartElevated()", StringComparison.Ordinal);
-            int relaunch = restart < 0 ? -1 : shell.IndexOf("TryRelaunchElevated", restart, StringComparison.Ordinal);
-            int flush2 = restart < 0 ? -1 : shell.IndexOf("FlushThreshold();", restart, StringComparison.Ordinal);
-            Check("restart as administrator saves a pending threshold first", restart >= 0 && flush2 > restart && flush2 < relaunch);
+            int restartEnd = restart < 0 ? -1 : shell.IndexOf("\n        }", restart, StringComparison.Ordinal);
+            string restartBody = restart < 0 || restartEnd < 0 ? "" : shell.Substring(restart, restartEnd - restart);
+            int relaunch = restartBody.IndexOf("Elevation.RelaunchAsync(", StringComparison.Ordinal);
+            int flush2 = restartBody.IndexOf("FlushThreshold();", StringComparison.Ordinal);
+            Check("restart as administrator saves a pending threshold first", relaunch > 0 && flush2 > 0 && flush2 < relaunch, restartBody);
+            // P10: the prompt runs off the UI thread through the state machine, and the lock is kept while it is up.
+            int gate = restartBody.IndexOf("ElevationFlow.Next(elevationState, ElevationEvent.Requested)", StringComparison.Ordinal);
+            Check("restart as administrator goes through the state machine first", gate > 0 && gate < flush2, restartBody);
+            Check("restart as administrator keeps the single-instance lock", !restartBody.Contains("instance.Dispose()")
+                && !restartBody.Contains("new SingleInstance(") && !restartBody.Contains("TryRelaunchElevated"), restartBody);
+            Check("restart as administrator hands over its pid", restartBody.Contains("Elevation.HandoffArgs(") && restartBody.Contains("WindowInteropHelper(window).Handle"));
             // Started from the tray with the window hidden, a failed restart shows the window, so its error line is seen.
-            Match restartCatch = restart < 0 ? Match.Empty
-                : Regex.Match(shell.Substring(restart), @"TryRelaunchElevated[^;]*;\s*\}\s*catch \(Exception ex\)\s*\{(?<body>[^}]*)\}");
-            Check("a failed restart as administrator shows its error", restartCatch.Success && restartCatch.Groups["body"].Value.Contains("ShowWindow()")
-                && restartCatch.Groups["body"].Value.Contains("memoryTab.IsSelected = true"),
-                restartCatch.Success ? restartCatch.Groups["body"].Value : "catch not found");
+            Match showError = Regex.Match(shell, @"case ElevationAction\.ShowError:(?<body>(?:(?!case |default:)[\s\S])*)");
+            Check("a failed restart as administrator shows its error", showError.Success && showError.Groups["body"].Value.Contains("ShowWindow()")
+                && showError.Groups["body"].Value.Contains("memoryTab.IsSelected = true") && showError.Groups["body"].Value.Contains("AppText.RestartFailed("),
+                showError.Success ? showError.Groups["body"].Value : "ShowError case not found");
+            int exitApplies = exit < 0 ? -1 : shell.IndexOf("ElevationEvent.ExitRequested", exit, StringComparison.Ordinal);
+            Check("exit settles the elevation state", exitApplies > exit && exitApplies < mark);
+
+            // P12: hand edits are picked up when the window is activated, never while a slider value waits.
+            Check("window activation checks settings.ini", Regex.IsMatch(shell, @"window\.Activated \+= delegate \{ CheckSettingsFile\(\); \};"));
+            int check = shell.IndexOf("void CheckSettingsFile()", StringComparison.Ordinal);
+            int checkEnd = check < 0 ? -1 : shell.IndexOf("\n        }", check, StringComparison.Ordinal);
+            string checkBody = check < 0 || checkEnd < 0 ? "" : shell.Substring(check, checkEnd - check);
+            Check("settings reload waits for a pending slider value", checkBody.Contains("thresholdTimer.IsEnabled"), checkBody);
+            Check("settings reload keeps Start with Windows", checkBody.Contains("StartWithWindows = settings.StartWithWindows"), checkBody);
+            Check("settings reload retries a failed save", checkBody.Contains("SettingsSyncState.SaveFailed") && checkBody.Contains("SaveAndApply();"), checkBody);
+            Check("save merges hand edits", shell.Contains("SettingsMerge.Merge(baseline, settings,"));
+            Check("tray is told when settings are not saved", shell.Contains("syncState == SettingsSyncState.SaveFailed"));
+
+            // P10: the elevated copy waits for the copy that asked for it before taking the lock.
+            Check("start-up takes over from the copy that asked for elevation", main.Contains("options.HandoffFrom > 0")
+                && main.Contains("SingleInstance.AcquireAfter("));
         }
 
         // ---------------------------------------------------------------- services restored at start-up (P3, E10)
@@ -766,6 +804,23 @@ namespace RamOptimiser.Tests
             try { Elevation.RelaunchArgs("S-1-5-18 --tray"); }
             catch (ArgumentException) { refused = true; }
             Check("relaunch arguments refuse a malformed SID", refused);
+
+            // P10: the elevated copy is told which pid to wait for; only a single strict token counts.
+            Check("handoff: none by default", LaunchOptions.Parse(new string[0]).HandoffFrom == 0 && LaunchOptions.Parse(null).HandoffFrom == 0);
+            Check("handoff: --handoff=1234", LaunchOptions.Parse(new[] { "--handoff=1234" }).HandoffFrom == 1234);
+            Check("handoff: case-insensitive", LaunchOptions.Parse(new[] { "--HANDOFF=1234" }).HandoffFrom == 1234);
+            Check("handoff: empty value", LaunchOptions.Parse(new[] { "--handoff=" }).HandoffFrom == 0);
+            Check("handoff: negative", LaunchOptions.Parse(new[] { "--handoff=-5" }).HandoffFrom == 0);
+            Check("handoff: not digits", LaunchOptions.Parse(new[] { "--handoff=12a" }).HandoffFrom == 0
+                && LaunchOptions.Parse(new[] { "--handoff= 12" }).HandoffFrom == 0 && LaunchOptions.Parse(new[] { "--handoff=+12" }).HandoffFrom == 0);
+            Check("handoff: overflow", LaunchOptions.Parse(new[] { "--handoff=99999999999" }).HandoffFrom == 0);
+            Check("handoff: zero", LaunchOptions.Parse(new[] { "--handoff=0" }).HandoffFrom == 0);
+            Check("handoff: two tokens do not count", LaunchOptions.Parse(new[] { "--handoff", "1234" }).HandoffFrom == 0);
+            LaunchOptions tray = LaunchOptions.Parse(new[] { "--tray", "--handoff=7" });
+            Check("handoff: with --tray", tray.StartInTray && tray.HandoffFrom == 7);
+            Check("handoff: the first valid one wins", LaunchOptions.Parse(new[] { "--handoff=x", "--handoff=8", "--handoff=9" }).HandoffFrom == 8);
+            LaunchOptions all = LaunchOptions.Parse(new[] { Elevation.LauncherArgument, Sid, Elevation.HandoffArgs(42) });
+            Check("handoff: alongside the launcher SID", all.LauncherSid == Sid && all.HandoffFrom == 42);
             StartWithWindowsTextTests();
         }
 
@@ -937,6 +992,27 @@ namespace RamOptimiser.Tests
             foreach (string tag in new[] { "Button", "CheckBox", "TextBox", "ComboBox", "Expander", "ToggleButton" })
                 foreach (XmlElement e in docs["MainWindow.xaml"].SelectNodes("//w:" + tag, ns))
                     Check(tag + " " + e.GetAttribute("x:Name") + " has AutomationProperties.Name", e.HasAttribute("AutomationProperties.Name"));
+
+            // U10: a plain StackPanel has no automation peer, so a name on it never reaches UI Automation.
+            XmlNodeList namedStacks = docs["MainWindow.xaml"].SelectNodes("//w:StackPanel[@AutomationProperties.Name]", ns);
+            Check("no named StackPanel", namedStacks.Count == 0, namedStacks.Count > 0 ? ((XmlElement)namedStacks[0]).GetAttribute("AutomationProperties.Name") : null);
+            ns.AddNamespace("app", "clr-namespace:RamOptimiser.App;assembly=RamOptimiser");
+            ns.AddNamespace("x", "http://schemas.microsoft.com/winfx/2006/xaml");
+            foreach (string[] g in new[] { new[] { "TopList", "Apps using the most memory" }, new[] { "PowerList", "Services to stop" },
+                         new[] { "StartupLoading", "Loading startup items" }, new[] { "StartupList", "Startup items" } })
+            {
+                var e = docs["MainWindow.xaml"].SelectSingleNode("//app:GroupPanel[@x:Name='" + g[0] + "']", ns) as XmlElement;
+                Check("named group " + g[0] + " is a GroupPanel", e != null && e.GetAttribute("AutomationProperties.Name") == g[1],
+                    e == null ? "not a GroupPanel" : e.GetAttribute("AutomationProperties.Name"));
+            }
+            var show = docs["MainWindow.xaml"].SelectSingleNode("//app:GroupPanel[@AutomationProperties.Name='Show']", ns) as XmlElement;
+            Check("startup segment group is a GroupPanel", show != null && show.GetAttribute("Orientation") == "Horizontal");
+            string automation = File.ReadAllText(Path.Combine(dir, Path.Combine("..", "Automation.cs")));
+            Check("GroupPanel exposes a Group peer", Regex.IsMatch(automation, @"class GroupPanel : StackPanel")
+                && automation.Contains("return new GroupPanelPeer(this);") && automation.Contains("AutomationControlType.Group; }"));
+            // A locked startup row reads as one Text element whose name says whether it starts with Windows.
+            Check("locked startup rows are SummaryPanels", shellCode.Contains("var lockedRow = new SummaryPanel")
+                && shellCode.Contains("AutomationProperties.SetName(lockedRow, AppText.LockedRowName(it.Label, it.LockText, it.On));"));
         }
 
         /// <summary>A SolidColorBrush token's Color, or null.</summary>
