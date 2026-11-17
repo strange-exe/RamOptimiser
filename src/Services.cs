@@ -160,15 +160,118 @@ namespace RamOptimiser
         public bool OtherSession;
     }
 
+    /// <summary>
+    /// What happened to one service in a Power Clean or a Restore. Pending: planned, nothing done yet. The Skipped
+    /// values are planned or safe skips; the failure values are a stop or start that was tried and did not finish.
+    /// </summary>
+    public enum ServiceOutcome
+    {
+        Pending, Stopped, Started,
+        SkippedOtherSession, SkippedNotRunning, SkippedCannotStop, SkippedDependents, SkippedDependentStarted,
+        /// <summary>The clean was stopped (cancel or time limit) before this service was sent a stop.</summary>
+        SkippedCancelled,
+        /// <summary>Restore found the service uninstalled (or a per-user instance from an earlier sign-in).</summary>
+        SkippedNotInstalled,
+        StopFailed, StopTimedOut, StartFailed, StartTimedOut, StillStopping
+    }
+
+    /// <summary>Rules over ServiceOutcome, so no caller decides anything from an action's message text. Pure.</summary>
+    public static class ServiceOutcomes
+    {
+        /// <summary>A stop or start was tried and did not finish.</summary>
+        public static bool IsFailure(ServiceOutcome o)
+        {
+            switch (o)
+            {
+                case ServiceOutcome.StopFailed:
+                case ServiceOutcome.StopTimedOut:
+                case ServiceOutcome.StartFailed:
+                case ServiceOutcome.StartTimedOut:
+                case ServiceOutcome.StillStopping:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        public static bool IsSkip(ServiceOutcome o)
+        {
+            switch (o)
+            {
+                case ServiceOutcome.SkippedOtherSession:
+                case ServiceOutcome.SkippedNotRunning:
+                case ServiceOutcome.SkippedCannotStop:
+                case ServiceOutcome.SkippedDependents:
+                case ServiceOutcome.SkippedDependentStarted:
+                case ServiceOutcome.SkippedCancelled:
+                case ServiceOutcome.SkippedNotInstalled:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>The clean result names failures and skips; a service that was not running needs no word.</summary>
+        public static bool ShownInSummary(ServiceOutcome o)
+        {
+            return IsFailure(o) || (IsSkip(o) && o != ServiceOutcome.SkippedNotRunning);
+        }
+
+        /// <summary>
+        /// The action's outcome. One built by an older caller with only a reason and no outcome reads as a skip
+        /// (SkippedNotRunning for the old "not running" reason), as it did before outcomes existed; every action
+        /// this app's own code builds has its outcome set. Null is Pending.
+        /// </summary>
+        public static ServiceOutcome Of(ServiceAction a)
+        {
+            if (a == null) return ServiceOutcome.Pending;
+            if (a.Outcome != ServiceOutcome.Pending || a.Message == null) return a.Outcome;
+            return a.Message == ServiceTrimmer.NotRunning ? ServiceOutcome.SkippedNotRunning : ServiceOutcome.SkippedCannotStop;
+        }
+    }
+
     public sealed class ServiceAction
     {
         public string Name;
         public string Label;
-        public bool Stopped;
-        public bool Started;
-        /// <summary>A stop or start was tried and did not finish; a planned skip is not a failure.</summary>
-        public bool Failed;
-        public string Message;   // why it was skipped or failed; null when it worked
+        public ServiceOutcome Outcome;
+        /// <summary>The detail behind the outcome: the Win32 reason, the dependents, the timeout. Null when it worked.</summary>
+        public string Message;
+
+        /// <summary>Derived from Outcome. Setting it is kept for older callers: true records Stopped.</summary>
+        public bool Stopped
+        {
+            get { return Outcome == ServiceOutcome.Stopped; }
+            set { SetFlag(ServiceOutcome.Stopped, value); }
+        }
+
+        /// <summary>Derived from Outcome. Setting it is kept for older callers: true records Started.</summary>
+        public bool Started
+        {
+            get { return Outcome == ServiceOutcome.Started; }
+            set { SetFlag(ServiceOutcome.Started, value); }
+        }
+
+        /// <summary>
+        /// A stop or start was tried and did not finish; a planned skip is not a failure. Derived from Outcome.
+        /// Setting it is kept for older callers: true records StopFailed unless a failure is already recorded,
+        /// false clears a failure.
+        /// </summary>
+        public bool Failed
+        {
+            get { return ServiceOutcomes.IsFailure(Outcome); }
+            set
+            {
+                if (value && !ServiceOutcomes.IsFailure(Outcome)) Outcome = ServiceOutcome.StopFailed;
+                else if (!value && ServiceOutcomes.IsFailure(Outcome)) Outcome = ServiceOutcome.Pending;
+            }
+        }
+
+        void SetFlag(ServiceOutcome flag, bool value)
+        {
+            if (value) Outcome = flag;
+            else if (Outcome == flag) Outcome = ServiceOutcome.Pending;
+        }
     }
 
     /// <summary>
@@ -404,14 +507,20 @@ namespace RamOptimiser
             {
                 if (s.Rule == null || !s.Rule.Matches(s.Name) || !picked.Contains(s.Rule.Name)) continue;
                 var a = new ServiceAction { Name = s.Name, Label = s.Rule.Label };
-                if (s.OtherSession) a.Message = "belongs to another signed-in user";
-                else if (!s.Running) a.Message = "not running";
-                else if (!s.CanStop) a.Message = "does not accept a stop right now";
-                else if (s.RunningDependents.Count > 0) a.Message = "needed by " + string.Join(", ", s.RunningDependents.ToArray());
+                if (s.OtherSession) Mark(a, ServiceOutcome.SkippedOtherSession, "belongs to another signed-in user");
+                else if (!s.Running) Mark(a, ServiceOutcome.SkippedNotRunning, NotRunning);
+                else if (!s.CanStop) Mark(a, ServiceOutcome.SkippedCannotStop, "does not accept a stop right now");
+                else if (s.RunningDependents.Count > 0)
+                    Mark(a, ServiceOutcome.SkippedDependents, "needed by " + string.Join(", ", s.RunningDependents.ToArray()));
                 plan.Add(a);
             }
             return plan;
         }
+
+        /// <summary>The reason shown for a service that was not running. Display only; outcomes decide.</summary>
+        internal const string NotRunning = "not running";
+
+        static void Mark(ServiceAction a, ServiceOutcome outcome, string message) { a.Outcome = outcome; a.Message = message; }
 
         /// <summary>
         /// Held by every action that stops, starts or reconfigures a service (Power Clean, Restore, the Startup
@@ -465,13 +574,13 @@ namespace RamOptimiser
         {
             foreach (ServiceAction a in plan)
             {
-                if (a.Message != null) continue;
-                if (cancel.IsCancellationRequested) { a.Message = "left running: clean was stopped"; continue; }
+                if (ServiceOutcomes.Of(a) != ServiceOutcome.Pending) continue;
+                if (cancel.IsCancellationRequested) { Mark(a, ServiceOutcome.SkippedCancelled, "left running: clean was stopped"); continue; }
                 int err = stopOne(a.Name);
-                if (err == JournalWriteFailed) { a.Failed = true; a.Message = "left running: the list of stopped services could not be saved"; continue; }
-                if (err == NativeService.ErrorDependentServicesRunning) { a.Message = "needed by a service that just started"; continue; }
-                if (err == NativeService.ErrorServiceNotActive) { a.Message = "not running"; continue; }
-                if (err != 0) { a.Failed = true; a.Message = new System.ComponentModel.Win32Exception(err).Message.TrimEnd('.'); continue; }
+                if (err == JournalWriteFailed) { Mark(a, ServiceOutcome.StopFailed, "left running: the list of stopped services could not be saved"); continue; }
+                if (err == NativeService.ErrorDependentServicesRunning) { Mark(a, ServiceOutcome.SkippedDependentStarted, "needed by a service that just started"); continue; }
+                if (err == NativeService.ErrorServiceNotActive) { Mark(a, ServiceOutcome.SkippedNotRunning, NotRunning); continue; }
+                if (err != 0) { Mark(a, ServiceOutcome.StopFailed, new System.ComponentModel.Win32Exception(err).Message.TrimEnd('.')); continue; }
                 // The stop was accepted: from here Restore must be able to start it again, even if the wait times out.
                 accepted(a.Name);
                 try
@@ -482,12 +591,12 @@ namespace RamOptimiser
                         TimeSpan left = StopTimeout - (elapsed() - start);
                         TimeSpan slice = left < StopSlice ? left : StopSlice;
                         if (slice < TimeSpan.Zero) slice = TimeSpan.Zero;
-                        if (waitStopped(a.Name, slice)) { a.Stopped = true; break; }
-                        if (elapsed() - start >= StopTimeout) { a.Failed = true; a.Message = "still stopping after " + StopTimeout.TotalSeconds + " s"; break; }
-                        if (cancel.IsCancellationRequested) { a.Failed = true; a.Message = "still stopping; clean was stopped"; break; }
+                        if (waitStopped(a.Name, slice)) { a.Outcome = ServiceOutcome.Stopped; break; }
+                        if (elapsed() - start >= StopTimeout) { Mark(a, ServiceOutcome.StopTimedOut, "still stopping after " + StopTimeout.TotalSeconds + " s"); break; }
+                        if (cancel.IsCancellationRequested) { Mark(a, ServiceOutcome.StillStopping, "still stopping; clean was stopped"); break; }
                     }
                 }
-                catch (InvalidOperationException ex) { a.Failed = true; a.Message = Describe(ex); }
+                catch (InvalidOperationException ex) { Mark(a, ServiceOutcome.StopFailed, Describe(ex)); }
             }
         }
 
@@ -532,8 +641,8 @@ namespace RamOptimiser
                 catch (InvalidOperationException ex)
                 {
                     // Uninstalled, or a per-user instance from an earlier sign-in: nothing left to start.
-                    if (IsMissingService(ex)) { a.Message = "no longer installed"; Forget(name); }
-                    else { a.Failed = true; a.Message = Describe(ex); }
+                    if (IsMissingService(ex)) { Mark(a, ServiceOutcome.SkippedNotInstalled, "no longer installed"); Forget(name); }
+                    else Mark(a, ServiceOutcome.StartFailed, Describe(ex));
                 }
                 done.Add(a);
             }
@@ -552,8 +661,7 @@ namespace RamOptimiser
                 try { sc.WaitForStatus(ServiceControllerStatus.Stopped, timeout); }
                 catch (System.ServiceProcess.TimeoutException)
                 {
-                    a.Failed = true;
-                    a.Message = "was still stopping after " + timeout.TotalSeconds + " s";
+                    Mark(a, ServiceOutcome.StillStopping, "was still stopping after " + timeout.TotalSeconds + " s");
                     return;
                 }
                 status = ServiceControllerStatus.Stopped;
@@ -563,9 +671,9 @@ namespace RamOptimiser
                 if (status == ServiceControllerStatus.Stopped) sc.Start();
                 else if (status == ServiceControllerStatus.Paused) sc.Continue();
                 sc.WaitForStatus(ServiceControllerStatus.Running, timeout);
-                a.Started = true;
+                a.Outcome = ServiceOutcome.Started;
             }
-            catch (System.ServiceProcess.TimeoutException) { a.Failed = true; a.Message = "still starting after " + timeout.TotalSeconds + " s"; }
+            catch (System.ServiceProcess.TimeoutException) { Mark(a, ServiceOutcome.StartTimedOut, "still starting after " + timeout.TotalSeconds + " s"); }
         }
 
         /// <summary>The ServiceController calls RestoreOne makes.</summary>
@@ -594,15 +702,19 @@ namespace RamOptimiser
             return inner.Message.TrimEnd('.');
         }
 
-        /// <summary>One line for the clean result: "stopped 3 services" plus what was skipped and why.</summary>
+        /// <summary>
+        /// One line for the clean result: "stopped 3 services" plus what was skipped or failed and why. Which actions
+        /// are named follows their outcome (ServiceOutcomes.ShownInSummary), never their text.
+        /// </summary>
         public static string Summarise(IList<ServiceAction> actions)
         {
             int stopped = 0;
             var notes = new List<string>();
             foreach (ServiceAction a in actions)
             {
-                if (a.Stopped) stopped++;
-                else if (a.Message != null && a.Message != "not running") notes.Add(a.Label + ": " + a.Message);
+                ServiceOutcome o = ServiceOutcomes.Of(a);
+                if (o == ServiceOutcome.Stopped) stopped++;
+                else if (ServiceOutcomes.ShownInSummary(o)) notes.Add(a.Label + ": " + a.Message);
             }
             string head = stopped == 0 ? "no services needed stopping"
                 : "stopped " + stopped + (stopped == 1 ? " service" : " services");

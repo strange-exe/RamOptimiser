@@ -289,20 +289,27 @@ namespace RamOptimiser.Tests
             var svc = new FakeService { Status = System.ServiceProcess.ServiceControllerStatus.StopPending };
             var act = new ServiceAction { Name = "x" };
             ServiceTrimmer.RestoreOne(svc, act, TimeSpan.FromSeconds(10));
-            Check("restore: stop-pending waits, then starts", act.Started && !act.Failed && svc.Calls == "wait:Stopped,start,wait:Running,", svc.Calls + " " + act.Message);
+            Check("restore: stop-pending waits, then starts", act.Started && !act.Failed && act.Outcome == ServiceOutcome.Started
+                && svc.Calls == "wait:Stopped,start,wait:Running,", svc.Calls + " " + act.Message);
             svc = new FakeService { Status = System.ServiceProcess.ServiceControllerStatus.StopPending, Stuck = true };
             act = new ServiceAction { Name = "x" };
             ServiceTrimmer.RestoreOne(svc, act, TimeSpan.FromSeconds(10));
-            Check("restore: still stopping is its own message", act.Failed && !act.Started && act.Message == "was still stopping after 10 s"
-                && !svc.Calls.Contains("start"), svc.Calls + " " + act.Message);
+            Check("restore: still stopping is its own message", act.Failed && !act.Started && act.Outcome == ServiceOutcome.StillStopping
+                && act.Message == "was still stopping after 10 s" && !svc.Calls.Contains("start"), svc.Calls + " " + act.Message);
             svc = new FakeService { Status = System.ServiceProcess.ServiceControllerStatus.Paused };
             act = new ServiceAction { Name = "x" };
             ServiceTrimmer.RestoreOne(svc, act, TimeSpan.FromSeconds(10));
-            Check("restore: paused continues", act.Started && svc.Calls == "continue,wait:Running,", svc.Calls);
+            Check("restore: paused continues", act.Started && act.Outcome == ServiceOutcome.Started && svc.Calls == "continue,wait:Running,", svc.Calls);
             svc = new FakeService { Status = System.ServiceProcess.ServiceControllerStatus.Stopped };
             act = new ServiceAction { Name = "x" };
             ServiceTrimmer.RestoreOne(svc, act, TimeSpan.FromSeconds(10));
-            Check("restore: stopped starts", act.Started && svc.Calls == "start,wait:Running,", svc.Calls);
+            Check("restore: stopped starts", act.Started && act.Outcome == ServiceOutcome.Started && svc.Calls == "start,wait:Running,", svc.Calls);
+            // A service stuck pausing never reaches Running: the start timed out.
+            svc = new FakeService { Status = System.ServiceProcess.ServiceControllerStatus.PausePending };
+            act = new ServiceAction { Name = "x" };
+            ServiceTrimmer.RestoreOne(svc, act, TimeSpan.FromSeconds(10));
+            Check("restore: a start that never finishes timed out", act.Failed && !act.Started && act.Outcome == ServiceOutcome.StartTimedOut
+                && act.Message == "still starting after 10 s", act.Outcome + " " + act.Message);
 
             // Backoff policy, now in Core for both the CLI and the app.
             var five = TimeSpan.FromMinutes(5);

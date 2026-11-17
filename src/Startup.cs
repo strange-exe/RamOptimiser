@@ -690,17 +690,125 @@ namespace RamOptimiser
         public long MemoryBytes = -1;
         public int SharedWith;
         public KnownItem Known;
-        /// <summary>This app set it to Manual and recorded how it started before.</summary>
-        public bool DisabledByApp;
+        /// <summary>What this app's journal says about the service, checked against its start type now.</summary>
+        public JournalState Journal;
+        /// <summary>
+        /// This app set it to Manual and recorded how it started before (Journal is OffByApp). Setting it is kept
+        /// for older callers: true records OffByApp, false clears it.
+        /// </summary>
+        public bool DisabledByApp
+        {
+            get { return Journal == JournalState.OffByApp; }
+            set
+            {
+                if (value) Journal = JournalState.OffByApp;
+                else if (Journal == JournalState.OffByApp) Journal = JournalState.Untouched;
+            }
+        }
         /// <summary>The service's own permissions deny administrators a startup change (e.g. Gaming Services).</summary>
         public bool Protected;
         public bool CanDisable { get { return Mode == StartMode.Automatic || Mode == StartMode.AutomaticDelayed; } }
     }
 
+    /// <summary>
+    /// A service's journal entry against its start type now. Untouched: no entry. OffByApp: this app set it to Manual
+    /// and it still is. TurnedBackOn: something set it back to start with Windows. OffElsewhere: someone Disabled it.
+    /// Orphan: the service is no longer listed, no longer installed, or can't be read. Only OffByApp can be undone;
+    /// the last three are tidied away by an elevated session (StartupServices.TidyJournal).
+    /// </summary>
+    public enum JournalState { Untouched, OffByApp, TurnedBackOn, OffElsewhere, Orphan }
+
+    /// <summary>
+    /// How a Startup-tab change of a service went. TurnedOff* and TurnedOn* other than the plain ones are partial:
+    /// the start type changed, but stopping or starting it now did not go as asked. Refused* and Failed changed nothing.
+    /// </summary>
+    public enum StartupChangeKind
+    {
+        TurnedOff, TurnedOffWasNotRunning, TurnedOffStillRunningDependents, TurnedOffStopFailed, TurnedOffStillStopping,
+        TurnedOn, TurnedOnStartFailed,
+        /// <summary>Starts with Windows again, but the delayed start it had could not be put back.</summary>
+        TurnedOnDelayNotRestored,
+        AlreadyOn,
+        RefusedNotListed, RefusedNotAtStartup, RefusedNotChangedByApp, RefusedChangedElsewhere, RefusedProtected, RefusedNeedsAdmin,
+        Failed
+    }
+
+    public static class StartupChanges
+    {
+        /// <summary>False for the refusals and Failed (nothing changed); true otherwise, partial changes included.</summary>
+        public static bool IsOk(StartupChangeKind k)
+        {
+            switch (k)
+            {
+                case StartupChangeKind.RefusedNotListed:
+                case StartupChangeKind.RefusedNotAtStartup:
+                case StartupChangeKind.RefusedNotChangedByApp:
+                case StartupChangeKind.RefusedChangedElsewhere:
+                case StartupChangeKind.RefusedProtected:
+                case StartupChangeKind.RefusedNeedsAdmin:
+                case StartupChangeKind.Failed:
+                    return false;
+                default:
+                    return true;
+            }
+        }
+
+        /// <summary>
+        /// Today's words for a change, display only, so the Startup tab reads as before until it shows the kind
+        /// itself (AppText.StartupChangeReason and StartupChangeNote, package 6A). A test keeps the refusal words
+        /// equal to StartupChangeReason's. Nothing may branch on this text.
+        /// </summary>
+        internal static string DisplayMessage(StartupChangeKind k, string detail)
+        {
+            switch (k)
+            {
+                case StartupChangeKind.RefusedNotListed: return "not in the list of services that are safe to change";
+                case StartupChangeKind.RefusedNotAtStartup: return "does not start with Windows";
+                case StartupChangeKind.RefusedNotChangedByApp: return "was not changed by this app";
+                case StartupChangeKind.RefusedChangedElsewhere: return "its start type was changed after this app turned it off, so it was left as it is";
+                case StartupChangeKind.RefusedProtected: return "Windows protects this service, so its startup can't be changed";
+                case StartupChangeKind.RefusedNeedsAdmin: return "needs administrator rights";
+                case StartupChangeKind.Failed: return detail;
+                case StartupChangeKind.TurnedOff: return "won't start with Windows; stopped";
+                case StartupChangeKind.TurnedOffWasNotRunning: return "won't start with Windows";
+                case StartupChangeKind.TurnedOffStillRunningDependents: return "won't start with Windows; still running until restart";
+                case StartupChangeKind.TurnedOffStopFailed: return "won't start with Windows; could not stop it now";
+                case StartupChangeKind.TurnedOffStillStopping: return "won't start with Windows; still stopping";
+                case StartupChangeKind.TurnedOn: return "starts with Windows again";
+                case StartupChangeKind.TurnedOnStartFailed: return "starts with Windows again; start it now failed";
+                case StartupChangeKind.TurnedOnDelayNotRestored: return "starts with Windows again; not delayed as before";
+                case StartupChangeKind.AlreadyOn: return "already starts with Windows";
+                default: return detail;
+            }
+        }
+    }
+
     public sealed class StartupChange
     {
-        public bool Ok;
-        public string Message;
+        public StartupChangeKind Kind;
+        /// <summary>The Windows error text, for Failed only.</summary>
+        public string Detail;
+
+        /// <summary>
+        /// Derived from Kind. Setting it is kept for older callers (AppShell's catch builds { Ok = false, Message }):
+        /// false records Failed, true on a refused or failed change records a plain TurnedOn.
+        /// </summary>
+        public bool Ok
+        {
+            get { return StartupChanges.IsOk(Kind); }
+            set
+            {
+                if (!value) Kind = StartupChangeKind.Failed;
+                else if (!StartupChanges.IsOk(Kind)) Kind = StartupChangeKind.TurnedOn;
+            }
+        }
+
+        /// <summary>Display only, derived from Kind and Detail (see StartupChanges.DisplayMessage). Setting it sets Detail.</summary>
+        public string Message
+        {
+            get { return StartupChanges.DisplayMessage(Kind, Detail); }
+            set { Detail = value; }
+        }
     }
 
     /// <summary>
@@ -742,7 +850,8 @@ namespace RamOptimiser
                             DisplayName = mo["DisplayName"] as string ?? name,
                             Running = running,
                             Known = known,
-                            DisabledByApp = recorded, // confirmed against the current start type below
+                            // Classified against the current start type below.
+                            Journal = recorded ? JournalState.OffByApp : JournalState.Untouched,
                         };
                         if (running && pid > 0) pids[name] = pid;
                         result.Add(s);
@@ -756,8 +865,9 @@ namespace RamOptimiser
                 // Only meaningful with admin rights: without them every service would look protected.
                 s.Protected = elevated && StartupKnowledge.CanDisableService(s.Name) && !CanChangeConfig(s.Name);
                 // The journal only says this app once set it to Manual. If it is no longer Manual (another admin,
-                // a policy, or a Disable whose change failed), the row shows the real start type instead.
-                s.DisabledByApp = JournalStillHolds(s.DisabledByApp, s.Mode);
+                // a policy, an updater, or a Disable whose change failed), the row shows the real start type and
+                // the state says what happened. ReadJournal keeps listed names only, so listed is true here.
+                s.Journal = ClassifyJournal(s.Journal != JournalState.Untouched, true, s.Mode != StartMode.Other, s.Mode);
                 int pid;
                 if (!pids.TryGetValue(s.Name, out pid)) continue;
                 int n; runningPerPid.TryGetValue(pid, out n); s.SharedWith = n;
@@ -789,26 +899,145 @@ namespace RamOptimiser
 
         static StartMode ReadMode(string name)
         {
-            try
+            try { return ReadModeOrThrow(name); }
+            catch (InvalidOperationException) { return StartMode.Other; }
+        }
+
+        /// <summary>As ReadMode, but a service that can't be opened throws InvalidOperationException instead of reading as Other.</summary>
+        static StartMode ReadModeOrThrow(string name)
+        {
+            using (var sc = new ServiceController(name))
             {
-                using (var sc = new ServiceController(name))
+                switch (sc.StartType)
                 {
-                    switch (sc.StartType)
-                    {
-                        case ServiceStartMode.Automatic: return IsDelayed(name) ? StartMode.AutomaticDelayed : StartMode.Automatic;
-                        case ServiceStartMode.Manual: return StartMode.Manual;
-                        case ServiceStartMode.Disabled: return StartMode.Disabled;
-                        default: return StartMode.Other;
-                    }
+                    case ServiceStartMode.Automatic: return IsDelayed(name) ? StartMode.AutomaticDelayed : StartMode.Automatic;
+                    case ServiceStartMode.Manual: return StartMode.Manual;
+                    case ServiceStartMode.Disabled: return StartMode.Disabled;
+                    default: return StartMode.Other;
                 }
             }
-            catch (InvalidOperationException) { return StartMode.Other; }
         }
 
         /// <summary>A journal entry counts only while the service is still at the Manual start this app set. Pure.</summary>
         public static bool JournalStillHolds(bool recorded, StartMode now)
         {
-            return recorded && now == StartMode.Manual;
+            return ClassifyJournal(recorded, true, true, now) == JournalState.OffByApp;
+        }
+
+        /// <summary>
+        /// The journal state machine, pure. Untouched -(Disable)-> OffByApp -(Reenable)-> Untouched; OffByApp becomes
+        /// TurnedBackOn or OffElsewhere when something else sets Automatic or Disabled; any record becomes Orphan when
+        /// the service leaves the list or is uninstalled; TidyJournal returns the last three to Untouched. Someone
+        /// setting it to Manual again can't be told apart from OffByApp: Windows keeps no reliable change history.
+        /// </summary>
+        public static JournalState ClassifyJournal(bool recorded, bool listed, bool installed, StartMode now)
+        {
+            if (!recorded) return JournalState.Untouched;
+            if (!listed || !installed) return JournalState.Orphan;
+            switch (now)
+            {
+                case StartMode.Manual: return JournalState.OffByApp;
+                case StartMode.Automatic:
+                case StartMode.AutomaticDelayed: return JournalState.TurnedBackOn;
+                case StartMode.Disabled: return JournalState.OffElsewhere;
+                default: return JournalState.Orphan; // the start type can't be read
+            }
+        }
+
+        /// <summary>Entries this app can no longer act on: their record is dead and is removed by TidyJournal.</summary>
+        public static bool ShouldForget(JournalState s)
+        {
+            return s == JournalState.TurnedBackOn || s == JournalState.OffElsewhere || s == JournalState.Orphan;
+        }
+
+        /// <summary>
+        /// TidyJournal's decision, pure: the value names to delete, in the order given. Data other than "auto" or
+        /// "auto-delayed" is malformed and goes; a name not listed goes without its service being read; otherwise
+        /// the start type decides (ShouldForget). A mode function that throws keeps that one name for the next tidy.
+        /// </summary>
+        internal static List<string> NamesToForget(IEnumerable<KeyValuePair<string, string>> values, Func<string, bool> listed,
+            Func<string, StartMode> mode)
+        {
+            var forget = new List<string>();
+            if (values == null) return forget;
+            foreach (KeyValuePair<string, string> v in values)
+            {
+                string name = v.Key;
+                if (string.IsNullOrEmpty(name)) continue; // the key's default value is not a record
+                if (v.Value != "auto" && v.Value != "auto-delayed") { forget.Add(name); continue; }
+                bool isListed = listed(name);
+                StartMode now = StartMode.Other;
+                if (isListed)
+                {
+                    try { now = mode(name); }
+                    catch (InvalidOperationException) { continue; }
+                    catch (Win32Exception) { continue; }
+                    catch (UnauthorizedAccessException) { continue; }
+                    catch (System.Security.SecurityException) { continue; }
+                }
+                if (ShouldForget(ClassifyJournal(true, isListed, now != StartMode.Other, now))) forget.Add(name);
+            }
+            return forget;
+        }
+
+        /// <summary>
+        /// Deletes the journal entries this app can no longer act on (ShouldForget): back on Automatic, Disabled by
+        /// someone else, no longer listed, uninstalled, or malformed. Elevated only (returns 0 otherwise). Deletes
+        /// values inside the journal key and nothing else: never the key, never a service change. Returns the count.
+        /// </summary>
+        public static int TidyJournal()
+        {
+            if (!Privileges.IsElevated()) return 0;
+            lock (ServiceTrimmer.Operation)
+            {
+                int deleted = 0;
+                try
+                {
+                    using (RegistryKey key = Registry.LocalMachine.OpenSubKey(JournalPath, true))
+                    {
+                        if (key == null) return 0;
+                        var values = new List<KeyValuePair<string, string>>();
+                        foreach (string name in key.GetValueNames())
+                            values.Add(new KeyValuePair<string, string>(name, key.GetValue(name) as string));
+                        foreach (string name in NamesToForget(values, StartupKnowledge.CanDisableService, ModeForTidy))
+                        {
+                            key.DeleteValue(name, false);
+                            deleted++;
+                        }
+                    }
+                }
+                catch (UnauthorizedAccessException) { }
+                catch (System.Security.SecurityException) { }
+                catch (IOException) { }
+                return deleted;
+            }
+        }
+
+        /// <summary>Other only when the service is not installed; any other read failure throws, so tidy keeps that record.</summary>
+        static StartMode ModeForTidy(string name)
+        {
+            try { return ReadModeOrThrow(name); }
+            catch (InvalidOperationException ex)
+            {
+                if (ServiceTrimmer.IsMissingService(ex)) return StartMode.Other;
+                throw;
+            }
+        }
+
+        /// <summary>"Access denied" from an elevated process means the service's own permissions say no, not missing rights.</summary>
+        internal static StartupChangeKind DeniedKind(bool elevated)
+        {
+            return elevated ? StartupChangeKind.RefusedProtected : StartupChangeKind.RefusedNeedsAdmin;
+        }
+
+        /// <summary>
+        /// How a re-enable went once its start type is Automatic again. The delayed start matters only when the record
+        /// was "auto-delayed"; when both it and the start now failed, the lasting one (the delay) is reported.
+        /// </summary>
+        internal static StartupChangeKind ReenableKind(string recorded, bool delayRestored, bool started)
+        {
+            if (recorded == "auto-delayed" && !delayRestored) return StartupChangeKind.TurnedOnDelayNotRestored;
+            return started ? StartupChangeKind.TurnedOn : StartupChangeKind.TurnedOnStartFailed;
         }
 
         /// <summary>Sets a listed service to Manual and stops it. Needs administrator rights.</summary>
@@ -819,9 +1048,9 @@ namespace RamOptimiser
 
         static StartupChange DisableLocked(string name)
         {
-            if (!StartupKnowledge.CanDisableService(name)) return Fail("not in the list of services that are safe to change");
+            if (!StartupKnowledge.CanDisableService(name)) return Change(StartupChangeKind.RefusedNotListed);
             StartMode before = ReadMode(name);
-            if (before != StartMode.Automatic && before != StartMode.AutomaticDelayed) return Fail("does not start with Windows");
+            if (before != StartMode.Automatic && before != StartMode.AutomaticDelayed) return Change(StartupChangeKind.RefusedNotAtStartup);
             bool journaled = false;
             try
             {
@@ -829,24 +1058,23 @@ namespace RamOptimiser
                 using (RegistryKey key = Registry.LocalMachine.CreateSubKey(JournalPath))
                     key.SetValue(name, before == StartMode.AutomaticDelayed ? "auto-delayed" : "auto", RegistryValueKind.String);
                 journaled = true;
-                SetStart(name, SERVICE_DEMAND_START, false);
+                SetStartType(name, SERVICE_DEMAND_START);
             }
-            catch (UnauthorizedAccessException) { if (journaled) ForgetJournal(name); return Fail(DeniedMessage()); }
-            catch (Win32Exception ex) { if (journaled) ForgetJournal(name); return Fail(ex.Message.TrimEnd('.')); }
+            catch (UnauthorizedAccessException) { if (journaled) ForgetJournal(name); return Change(DeniedKind(Privileges.IsElevated())); }
+            catch (Win32Exception ex) { if (journaled) ForgetJournal(name); return Failed(ex); }
 
             // ControlService stops this service only; it refuses when a running service depends on it.
             int err = NativeService.StopOnly(name);
-            if (err == NativeService.ErrorServiceNotActive) return new StartupChange { Ok = true, Message = "won't start with Windows" };
-            if (err == NativeService.ErrorDependentServicesRunning)
-                return new StartupChange { Ok = true, Message = "won't start with Windows; still running until restart" };
-            if (err != 0) return new StartupChange { Ok = true, Message = "won't start with Windows; could not stop it now" };
+            if (err == NativeService.ErrorServiceNotActive) return Change(StartupChangeKind.TurnedOffWasNotRunning);
+            if (err == NativeService.ErrorDependentServicesRunning) return Change(StartupChangeKind.TurnedOffStillRunningDependents);
+            if (err != 0) return Change(StartupChangeKind.TurnedOffStopFailed);
             try
             {
                 using (var sc = new ServiceController(name)) sc.WaitForStatus(ServiceControllerStatus.Stopped, ServiceTrimmer.StopTimeout);
             }
-            catch (InvalidOperationException) { return new StartupChange { Ok = true, Message = "won't start with Windows; could not stop it now" }; }
-            catch (System.ServiceProcess.TimeoutException) { return new StartupChange { Ok = true, Message = "won't start with Windows; still stopping" }; }
-            return new StartupChange { Ok = true, Message = "won't start with Windows; stopped" };
+            catch (InvalidOperationException) { return Change(StartupChangeKind.TurnedOffStopFailed); }
+            catch (System.ServiceProcess.TimeoutException) { return Change(StartupChangeKind.TurnedOffStillStopping); }
+            return Change(StartupChangeKind.TurnedOff);
         }
 
         /// <summary>Puts back the start type recorded by Disable. Only for services this app changed and that are still Manual.</summary>
@@ -858,30 +1086,32 @@ namespace RamOptimiser
         static StartupChange ReenableLocked(string name)
         {
             string recorded;
-            if (!ReadJournal().TryGetValue(name, out recorded)) return Fail("was not changed by this app");
-            if (!StartupKnowledge.CanDisableService(name)) return Fail("not in the list of services this app may change");
+            if (!ReadJournal().TryGetValue(name, out recorded)) return Change(StartupChangeKind.RefusedNotChangedByApp);
+            if (!StartupKnowledge.CanDisableService(name)) return Change(StartupChangeKind.RefusedNotListed);
             StartMode now = ReadMode(name);
             if (now == StartMode.Automatic || now == StartMode.AutomaticDelayed)
             {
                 ForgetJournal(name); // someone already turned it back on
-                return new StartupChange { Ok = true, Message = "already starts with Windows" };
+                return Change(StartupChangeKind.AlreadyOn);
             }
             // Only undo this app's own change: a service someone has since Disabled is left exactly as it is.
-            if (now != StartMode.Manual) return Fail("its start type was changed after this app turned it off, so it was left as it is");
-            try
-            {
-                SetStart(name, SERVICE_AUTO_START, recorded == "auto-delayed");
-                ForgetJournal(name);
-            }
-            catch (UnauthorizedAccessException) { return Fail(DeniedMessage()); }
-            catch (Win32Exception ex) { return Fail(ex.Message.TrimEnd('.')); }
+            if (now != StartMode.Manual) return Change(StartupChangeKind.RefusedChangedElsewhere);
+            try { SetStartType(name, SERVICE_AUTO_START); }
+            catch (UnauthorizedAccessException) { return Change(DeniedKind(Privileges.IsElevated())); }
+            catch (Win32Exception ex) { return Failed(ex); }
+            // It starts with Windows from here, whatever follows, so the record goes now: a failed delay setting
+            // must not leave a record that makes the row say it is still off.
+            ForgetJournal(name);
+            // "auto" asks for no delay, which clears a delay flag left over; a failure there changes nothing that matters.
+            bool delayRestored = TrySetDelayed(name, recorded == "auto-delayed");
+            bool started = true;
             try
             {
                 using (var sc = new ServiceController(name))
                     if (sc.Status == ServiceControllerStatus.Stopped) sc.Start();
             }
-            catch (InvalidOperationException) { return new StartupChange { Ok = true, Message = "starts with Windows again; start it now failed" }; }
-            return new StartupChange { Ok = true, Message = "starts with Windows again" };
+            catch (InvalidOperationException) { started = false; }
+            return Change(ReenableKind(recorded, delayRestored, started));
         }
 
         static void ForgetJournal(string name)
@@ -912,7 +1142,12 @@ namespace RamOptimiser
             return map;
         }
 
-        static StartupChange Fail(string message) { return new StartupChange { Ok = false, Message = message }; }
+        static StartupChange Change(StartupChangeKind kind) { return new StartupChange { Kind = kind }; }
+
+        static StartupChange Failed(Win32Exception ex)
+        {
+            return new StartupChange { Kind = StartupChangeKind.Failed, Detail = ex.Message.TrimEnd('.') };
+        }
 
         // ------------------------------------------------------------------ winsvc.h
         const uint SC_MANAGER_CONNECT = 0x0001, SERVICE_QUERY_CONFIG = 0x0001, SERVICE_CHANGE_CONFIG = 0x0002;
@@ -970,12 +1205,6 @@ namespace RamOptimiser
             }
         }
 
-        /// <summary>"Access denied" from an elevated process means the service's own permissions say no, not missing rights.</summary>
-        static string DeniedMessage()
-        {
-            return Privileges.IsElevated() ? "Windows protects this service, so its startup can't be changed" : "needs administrator rights";
-        }
-
         static bool IsDelayed(string name)
         {
             IntPtr scm = IntPtr.Zero, svc = IntPtr.Zero;
@@ -995,7 +1224,8 @@ namespace RamOptimiser
             }
         }
 
-        static void SetStart(string name, uint start, bool delayed)
+        /// <summary>Sets the start type (ChangeServiceConfigW). Throws UnauthorizedAccessException or Win32Exception.</summary>
+        static void SetStartType(string name, uint start)
         {
             IntPtr scm;
             IntPtr svc = Open(name, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG, out scm);
@@ -1003,16 +1233,33 @@ namespace RamOptimiser
             {
                 if (!ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, start, SERVICE_NO_CHANGE, null, null, IntPtr.Zero, null, null, null, null))
                     throw Error();
-                if (start == SERVICE_AUTO_START)
-                {
-                    var info = new SERVICE_DELAYED_AUTO_START_INFO { fDelayedAutostart = delayed ? 1 : 0 };
-                    if (!ChangeServiceConfig2W(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, ref info)) throw Error();
-                }
             }
             finally
             {
                 CloseServiceHandle(svc);
                 CloseServiceHandle(scm);
+            }
+        }
+
+        /// <summary>
+        /// Sets or clears the delayed automatic start (ChangeServiceConfig2W). False when it could not be set; it never
+        /// throws, because the start type is already changed by then and that change stands.
+        /// </summary>
+        static bool TrySetDelayed(string name, bool delayed)
+        {
+            IntPtr scm = IntPtr.Zero, svc = IntPtr.Zero;
+            try
+            {
+                svc = Open(name, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG, out scm);
+                var info = new SERVICE_DELAYED_AUTO_START_INFO { fDelayedAutostart = delayed ? 1 : 0 };
+                return ChangeServiceConfig2W(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, ref info);
+            }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (Win32Exception) { return false; }
+            finally
+            {
+                if (svc != IntPtr.Zero) CloseServiceHandle(svc);
+                if (scm != IntPtr.Zero) CloseServiceHandle(scm);
             }
         }
 
