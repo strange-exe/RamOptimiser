@@ -350,6 +350,30 @@ namespace RamOptimiser.App
             return text.Length <= MaxTooltipLength ? text : text.Substring(0, MaxTooltipLength);
         }
 
+        /// <summary>
+        /// With a second line (TrayStatus.TooltipLine): "RAM Optimiser: 72%", a line break, then that line, cut at the
+        /// last space that keeps the whole within MaxTooltipLength (long time formats such as "12:32 p. m." can need
+        /// it). Never cut mid-word: a line with no such space is left out. line2 null: TrayTooltip(s).
+        /// </summary>
+        public static string TrayTooltip(MemorySnapshot s, string line2)
+        {
+            if (string.IsNullOrEmpty(line2)) return TrayTooltip(s);
+            string line1 = AppName + ": " + (s == null ? "load unknown" : s.LoadPercent.ToString(CultureInfo.InvariantCulture) + "%");
+            string fit = FitWords(line2.Trim(), MaxTooltipLength - line1.Length - 1);
+            return fit == null ? TrayTooltip(s) : line1 + "\n" + fit;
+        }
+
+        /// <summary>text if it is at most room characters, else its words up to the last space that fits; null if none.</summary>
+        static string FitWords(string text, int room)
+        {
+            if (room <= 0 || text.Length == 0) return null;
+            if (text.Length <= room) return text;
+            int cut = text.LastIndexOf(' ', room);
+            if (cut <= 0) return null;
+            string fit = text.Substring(0, cut).TrimEnd(' ', ',', ';', ':');
+            return fit.Length == 0 ? null : fit;
+        }
+
         /// <summary>The auto-clean row's second line, e.g. "when load reaches 85%, and every 30 minutes".</summary>
         public static string AutoDescription(AppSettings s)
         {
@@ -416,9 +440,14 @@ namespace RamOptimiser.App
             return "on " + localTime.ToString("d", culture) + " " + time;
         }
 
-        /// <summary>The result line: the last clean, plus why it stopped when it threw before reporting anything.</summary>
+        /// <summary>
+        /// The result line: the last clean, plus why it stopped when it threw before reporting anything. A clean that
+        /// hit its time limit or was skipped because another clean was running says so (StoppedCleanLine).
+        /// </summary>
         public static string ResultLine(DateTime localTime, DateTime localNow, CleanReport report, Exception error, bool automatic, CultureInfo culture)
         {
+            string stopped = StoppedCleanLine(localTime, localNow, report, automatic, culture);
+            if (stopped != null) return stopped;
             string line = LastClean(localTime, localNow, report, automatic, culture);
             if (report == null && error != null) line += " " + FailedSummary(error);
             return line;
@@ -470,10 +499,12 @@ namespace RamOptimiser.App
         }
 
         /// <summary>True when the clean ran every area it tried in full (skips are fine): the line gets a check, else a
-        /// warning. An area that only partly worked (some drives not flushed) gets the warning too.</summary>
+        /// warning. An area that only partly worked (some drives not flushed), and a clean stopped by its time limit,
+        /// get the warning too. A busy skip ran nothing and failed nothing: it gets the dash for nothing freed.</summary>
         public static bool CleanWentWell(CleanReport report)
         {
-            return report != null && report.Before != null && report.After != null && report.AllOk;
+            return report != null && report.Before != null && report.After != null && report.AllOk
+                && (report.Completed || report.Stopped == CleanStop.Busy);
         }
 
         /// <summary>"18.2 GB of 24.0 GB", or "unknown" when Windows did not report the commit limit.</summary>
@@ -912,7 +943,16 @@ namespace RamOptimiser.App
 
         public static string LastAutoClean(DateTime localTime, CleanReport report, CultureInfo culture)
         {
-            string at = "Last auto-clean at " + localTime.ToString("t", culture);
+            return LastAutoClean(localTime, localTime, report, culture);
+        }
+
+        /// <summary>
+        /// The tray's status item for an automatic clean, read at localNow: "Last auto-clean at 14:32: freed 1.2 GB",
+        /// "Last auto-clean yesterday at 14:32: ..." (When), since the tray can sit unopened for days.
+        /// </summary>
+        public static string LastAutoClean(DateTime localTime, DateTime localNow, CleanReport report, CultureInfo culture)
+        {
+            string at = "Last auto-clean " + When(localTime, localNow, culture);
             if (report == null) return at + " did not finish";
             int failed = CountOutcome(report, AreaOutcome.Failed), partial = CountOutcome(report, AreaOutcome.Partial);
             string text = at + ": " + (report.InUseFreed > 0 ? "freed " + Format.Bytes(report.InUseFreed) : "nothing freed");

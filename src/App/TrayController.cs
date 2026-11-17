@@ -12,15 +12,17 @@ namespace RamOptimiser.App
     /// in the taskbar's text colour) or the static app icon. The icon is redrawn only when the percent, the
     /// taskbar colour or the size changes, and every replaced icon is disposed. Never shows balloons.
     /// Lives on the UI thread: WPF's dispatcher pumps the messages NotifyIcon needs.
-    /// Menu: Open, Clean memory, Auto-clean (ticked when on, "(paused until 15:41)" while paused), then either
-    /// Pause auto-clean for 1 hour or Resume auto-clean (both hidden, never greyed, when auto-clean is off or needs
-    /// admin), Restart as administrator (not elevated), Settings not saved (a failed save), and Exit.
+    /// Menu: Open, Clean memory, the last clean's result (hidden before the first clean; enabled, so keyboard and
+    /// Narrator users reach it, and it opens the Memory tab), Auto-clean (ticked when on, "(paused until 15:41)" while
+    /// paused), then either Pause auto-clean for 1 hour or Resume auto-clean (both hidden, never greyed, when
+    /// auto-clean is off or needs admin), Restart as administrator (not elevated), Settings not saved (a failed save),
+    /// and Exit. The tooltip has a second line for what auto-clean or the last clean needs the user to know (P7).
     /// </summary>
     internal sealed class TrayController : IDisposable
     {
         readonly NotifyIcon icon;
         readonly ContextMenuStrip menu;
-        readonly ToolStripMenuItem openItem, cleanItem, autoItem, pauseItem, resumeItem, restartItem, unsavedItem, exitItem;
+        readonly ToolStripMenuItem openItem, cleanItem, statusItem, autoItem, pauseItem, resumeItem, restartItem, unsavedItem, exitItem;
         readonly Font boldFont;
         Icon appIcon;          // static icon at the current small-icon size
         Icon percentIcon;      // last rendered percent icon (owned)
@@ -28,7 +30,7 @@ namespace RamOptimiser.App
         bool shownLight, showingPercent;
         bool disposed;
 
-        public event EventHandler OpenRequested, CleanRequested, AutoCleanToggled, PauseRequested, ResumeRequested, RestartRequested, ExitRequested;
+        public event EventHandler OpenRequested, CleanRequested, StatusClicked, AutoCleanToggled, PauseRequested, ResumeRequested, RestartRequested, ExitRequested;
 
         public TrayController()
         {
@@ -37,6 +39,7 @@ namespace RamOptimiser.App
             boldFont = new Font(openItem.Font, System.Drawing.FontStyle.Bold);
             openItem.Font = boldFont;
             cleanItem = new ToolStripMenuItem("Clean memory");
+            statusItem = new ToolStripMenuItem("") { Visible = false };
             autoItem = new ToolStripMenuItem("Auto-clean") { CheckOnClick = false };
             pauseItem = new ToolStripMenuItem(AppText.PauseMenuText) { Visible = false };
             resumeItem = new ToolStripMenuItem(AppText.ResumeMenuText) { Visible = false };
@@ -46,6 +49,7 @@ namespace RamOptimiser.App
             exitItem = new ToolStripMenuItem("Exit");
             openItem.Click += delegate { Raise(OpenRequested); };
             cleanItem.Click += delegate { Raise(CleanRequested); };
+            statusItem.Click += delegate { Raise(StatusClicked); };
             autoItem.Click += delegate { Raise(AutoCleanToggled); };
             pauseItem.Click += delegate { Raise(PauseRequested); };
             resumeItem.Click += delegate { Raise(ResumeRequested); };
@@ -53,7 +57,7 @@ namespace RamOptimiser.App
             exitItem.Click += delegate { Raise(ExitRequested); };
             menu.Items.AddRange(new ToolStripItem[]
             {
-                openItem, cleanItem, autoItem, pauseItem, resumeItem, restartItem, unsavedItem, new ToolStripSeparator(), exitItem
+                openItem, cleanItem, statusItem, autoItem, pauseItem, resumeItem, restartItem, unsavedItem, new ToolStripSeparator(), exitItem
             });
 
             shownSize = SmallIconSize();
@@ -110,8 +114,24 @@ namespace RamOptimiser.App
             unsavedItem.Visible = settingsUnsaved;
         }
 
+        /// <summary>The last clean's result (TrayStatus.MenuLine), or null to hide the item (before the first clean).</summary>
+        public void SetStatusLine(string text)
+        {
+            if (disposed) return;
+            statusItem.Visible = !string.IsNullOrEmpty(text);
+            // An ampersand would mark a mnemonic and vanish from the text: double it so it shows.
+            string shown = text == null ? "" : text.Replace("&", "&&");
+            if (statusItem.Text != shown) statusItem.Text = shown;
+        }
+
         /// <summary>snapshot null = status unavailable (static icon, plain tooltip).</summary>
         public void Update(MemorySnapshot snapshot, bool showPercent, bool taskbarIsLight)
+        {
+            Update(snapshot, showPercent, taskbarIsLight, null);
+        }
+
+        /// <param name="tipLine">The tooltip's second line (TrayStatus.TooltipLine), or null for the one-line tooltip.</param>
+        public void Update(MemorySnapshot snapshot, bool showPercent, bool taskbarIsLight, string tipLine)
         {
             if (disposed) return;
             int size = SmallIconSize();
@@ -146,7 +166,7 @@ namespace RamOptimiser.App
             }
             shownSize = size;
 
-            string tip = AppText.TrayTooltip(snapshot);
+            string tip = AppText.TrayTooltip(snapshot, tipLine);
             if (icon.Text != tip) icon.Text = tip;
         }
 

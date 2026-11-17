@@ -201,7 +201,35 @@ streak above 0), Armed. It drives four places:
   cooldown line reads "At most every 5 minutes; now every 20 minutes because recent cleans did not help." while
   backing off; the minutes come from `AutoCleanService.ThresholdCooldown`, so the words match the policy.
 - **Tray**: "Auto-clean (paused until 15:41)", then "Pause auto-clean for 1 hour" or "Resume auto-clean", hidden
-  (not greyed) when auto-clean is off or needs admin. The back-off tooltip line is P7's (wave 3A).
+  (not greyed) when auto-clean is off or needs admin. The back-off tooltip line is P7's (wave 3A, below).
+
+### What happened to the clean (wave 3A: P7, E9, E22, R4+E21)
+
+- **Tray tooltip**: one line ("RAM Optimiser: 72% (11.0 GB of 16.0 GB)") until there is something to say; then
+  "RAM Optimiser: 72%", a line break, and the first that applies (`TrayStatus.TooltipLine`): "Auto-clean paused:
+  needs admin" > "Auto-clean paused until 15:41" > the last clean went wrong ("Clean at 14:32: 2 areas failed",
+  "... 1 area partly failed", "Auto-clean at 14:32 hit its time limit", "... did not finish") > "Auto-clean slowed:
+  cleans are not helping" > the last result ("Auto-clean at 14:32 freed 1.2 GB", "Clean at 14:32 freed nothing",
+  "Auto-clean at 14:32 was skipped"). An older clean says "yesterday at" or the date. The whole tip stays within the
+  63 characters .NET Framework's NotifyIcon allows: line 2 is cut at the last space that fits, never mid-word, and
+  left out if no space fits; line 1 is never cut.
+- **Tray status item** after Clean memory: the window's own result wording ("Last auto-clean at 14:32: freed 1.2 GB",
+  "Last clean at 14:32 freed 2.8 GB. Load went from 81% to 74%.", or the stopped and skipped lines). Hidden before the
+  first clean, enabled (a disabled item reads as unavailable), and it opens the window on the Memory tab.
+- **Result line** for the two new endings: "Auto-clean at 14:32 hit its 2-minute limit after 3 of 6 areas. Load went
+  from 81% to 79%." (warning glyph) and "Last clean at 14:32 was skipped: another RamOptimiser clean was running."
+  (dash glyph: nothing ran, nothing failed). No Stop or Cancel button anywhere (owner, 2026-11-17): only automatic
+  cleans have a limit, 120 s, checked between steps.
+- **Settings > Activity**: two disclosures, "Recent cleans" (this session's last 20 cleans, newest first: "14:32
+  Auto-clean (high load): freed 1.2 GB; load 91% to 78%, 80% five minutes later; 4 of 4 areas ok") and "Recent
+  activity" (pauses, the back-off starting and ending, memory status failing and recovering; 20 rows). Rows are
+  13 px Text with the time in MutedText; empty states read "No cleans yet this session." and "Nothing yet this
+  session.". Under them, the cleans.log path as a read-only, selectable TextBox (no Open button: the app may run as
+  administrator, and opening a user-writable file from there could start a program another process chose).
+- Both lists come from memory; the app never reads cleans.log back. The "five minutes later" figure is the first
+  sample 5 to 7 minutes after the clean; a later clean, sleep or a clock change drops it rather than mislabel it.
+- No new motion: rows appear in place. No new tokens: Text and MutedText on Card (16.82 and 6.46 light, 14.16 and 8.46
+  dark) and the existing TextBox focus line.
 
 Decisions: the pause is 1 hour only and is saved (`AutoCleanPausedUntil=` in settings.ini, UTC, round-trip format),
 so it outlasts a restart; on start it is cut to at most an hour from then, because the file is user-writable. A

@@ -541,6 +541,36 @@
               </Border>
             </StackPanel>
           </Border>
+
+          <!-- Activity: this session's cleans and auto-clean events, from memory (the app never reads cleans.log back) -->
+          <TextBlock Text="Activity" Style="{StaticResource SectionHeading}"/>
+          <Border Style="{StaticResource CardBorder}">
+            <StackPanel>
+              <Border Padding="16,4">
+                <Expander x:Name="RecentCleans" Style="{StaticResource Disclosure}" Margin="0,4" Header="Recent cleans"
+                          AutomationProperties.Name="Recent cleans">
+                  <app:GroupPanel x:Name="RecentCleanRows" Margin="0,4,0,6" AutomationProperties.Name="Recent cleans"/>
+                </Expander>
+              </Border>
+              <Border Style="{StaticResource RowDivider}" Padding="16,4">
+                <Expander x:Name="ActivityList" Style="{StaticResource Disclosure}" Margin="0,4" Header="Recent activity"
+                          AutomationProperties.Name="Recent activity">
+                  <app:GroupPanel x:Name="ActivityRows" Margin="0,4,0,6" AutomationProperties.Name="Recent activity"/>
+                </Expander>
+              </Border>
+              <Border Style="{StaticResource RowDivider}" Padding="16,10">
+                <StackPanel>
+                  <TextBlock Text="Clean log file"/>
+                  <!-- Selectable, never opened from here: the app may run as administrator (README, Security). -->
+                  <TextBox x:Name="ActivityPath" IsReadOnly="True" IsReadOnlyCaretVisible="True" Margin="-3,2,0,0" Padding="0,4"
+                           Height="Auto" TextWrapping="Wrap" FontSize="12" Background="Transparent" BorderBrush="Transparent"
+                           AutomationProperties.Name="Clean log file"/>
+                  <TextBlock Style="{StaticResource Small}" Margin="0,2,0,0"
+                             Text="Every clean the app runs is added to this file, kept under 256 KB with one older copy. The lists above show this session only."/>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </Border>
         </StackPanel>
       </ScrollViewer>
     </TabItem>
