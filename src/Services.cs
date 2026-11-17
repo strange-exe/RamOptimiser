@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Management;
 using System.ServiceProcess;
+using System.Threading;
 
 namespace RamOptimiser
 {
@@ -421,28 +422,68 @@ namespace RamOptimiser
         /// <summary>Stops every planned service that has no skip reason. Needs administrator rights.</summary>
         public static List<ServiceAction> Stop(ICollection<string> chosen)
         {
+            return Stop(chosen, CancellationToken.None);
+        }
+
+        /// <summary>The wait for one service to stop is cut into slices this long, so a cancel ends it soon.</summary>
+        public static readonly TimeSpan StopSlice = TimeSpan.FromMilliseconds(250);
+
+        /// <summary>As above; cancel is checked before each service and between the slices of each wait.</summary>
+        public static List<ServiceAction> Stop(ICollection<string> chosen, CancellationToken cancel)
+        {
             lock (Operation)
             {
                 List<ServiceAction> plan = Plan(Query(), chosen);
-                foreach (ServiceAction a in plan)
-                {
-                    if (a.Message != null) continue;
-                    int err = StopRecorded(a.Name, Journal, IsStoppedByUs(a.Name), NativeService.StopOnly);
-                    if (err == JournalWriteFailed) { a.Failed = true; a.Message = "left running: the list of stopped services could not be saved"; continue; }
-                    if (err == NativeService.ErrorDependentServicesRunning) { a.Message = "needed by a service that just started"; continue; }
-                    if (err == NativeService.ErrorServiceNotActive) { a.Message = "not running"; continue; }
-                    if (err != 0) { a.Failed = true; a.Message = new System.ComponentModel.Win32Exception(err).Message.TrimEnd('.'); continue; }
-                    // The stop was accepted: from here Restore must be able to start it again, even if the wait times out.
-                    lock (gate) if (!stoppedThisSession.Contains(a.Name)) stoppedThisSession.Add(a.Name);
-                    try
-                    {
-                        using (var sc = new ServiceController(a.Name)) sc.WaitForStatus(ServiceControllerStatus.Stopped, StopTimeout);
-                        a.Stopped = true;
-                    }
-                    catch (System.ServiceProcess.TimeoutException) { a.Failed = true; a.Message = "still stopping after " + StopTimeout.TotalSeconds + " s"; }
-                    catch (InvalidOperationException ex) { a.Failed = true; a.Message = Describe(ex); }
-                }
+                StopPlanned(plan, name => StopRecorded(name, Journal, IsStoppedByUs(name), NativeService.StopOnly), WaitStopped, cancel,
+                    name => { lock (gate) if (!stoppedThisSession.Contains(name)) stoppedThisSession.Add(name); });
                 return plan;
+            }
+        }
+
+        /// <summary>
+        /// Stops each planned service that has no skip reason, recording the outcome in its action. stopOne sends the
+        /// stop (0 or a Win32 error, or JournalWriteFailed); waitStopped waits up to one slice and says whether the
+        /// service stopped (it may throw InvalidOperationException); accepted records a stop Windows accepted, before
+        /// any wait, so Restore can start it again whatever happens next. A cancel leaves the services not yet sent a
+        /// stop running, and ends a wait under way as "still stopping; clean was stopped" (failed, and still recorded).
+        /// Tests pass fakes.
+        /// </summary>
+        internal static void StopPlanned(List<ServiceAction> plan, Func<string, int> stopOne, Func<string, TimeSpan, bool> waitStopped,
+            CancellationToken cancel, Action<string> accepted)
+        {
+            foreach (ServiceAction a in plan)
+            {
+                if (a.Message != null) continue;
+                if (cancel.IsCancellationRequested) { a.Message = "left running: clean was stopped"; continue; }
+                int err = stopOne(a.Name);
+                if (err == JournalWriteFailed) { a.Failed = true; a.Message = "left running: the list of stopped services could not be saved"; continue; }
+                if (err == NativeService.ErrorDependentServicesRunning) { a.Message = "needed by a service that just started"; continue; }
+                if (err == NativeService.ErrorServiceNotActive) { a.Message = "not running"; continue; }
+                if (err != 0) { a.Failed = true; a.Message = new System.ComponentModel.Win32Exception(err).Message.TrimEnd('.'); continue; }
+                // The stop was accepted: from here Restore must be able to start it again, even if the wait times out.
+                accepted(a.Name);
+                try
+                {
+                    TimeSpan waited = TimeSpan.Zero;
+                    while (true)
+                    {
+                        if (waitStopped(a.Name, StopSlice)) { a.Stopped = true; break; }
+                        waited += StopSlice;
+                        if (waited >= StopTimeout) { a.Failed = true; a.Message = "still stopping after " + StopTimeout.TotalSeconds + " s"; break; }
+                        if (cancel.IsCancellationRequested) { a.Failed = true; a.Message = "still stopping; clean was stopped"; break; }
+                    }
+                }
+                catch (InvalidOperationException ex) { a.Failed = true; a.Message = Describe(ex); }
+            }
+        }
+
+        /// <summary>Waits up to slice for the service to stop; false when it has not yet.</summary>
+        static bool WaitStopped(string name, TimeSpan slice)
+        {
+            using (var sc = new ServiceController(name))
+            {
+                try { sc.WaitForStatus(ServiceControllerStatus.Stopped, slice); return true; }
+                catch (System.ServiceProcess.TimeoutException) { return false; }
             }
         }
 
