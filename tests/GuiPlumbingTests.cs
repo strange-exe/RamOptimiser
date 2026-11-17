@@ -49,6 +49,8 @@ namespace RamOptimiser.Tests
             }
             DecideTests();
             ServiceTests();
+            SnapshotTests();
+            HoldTests();
             IdleWaitTests();
             StartupTaskTests();
             ElevationTests();
@@ -600,6 +602,277 @@ namespace RamOptimiser.Tests
             var disposedSvc = new AutoCleanService(() => Snap(1), a => null, () => DateTime.UtcNow);
             disposedSvc.Dispose();
             Throws<ObjectDisposedException>("CleanNow after Dispose", () => disposedSvc.CleanNow());
+        }
+
+        /// <summary>P15: one settings snapshot per decision, used for the whole clean; policy changes reset the backoff.</summary>
+        static void SnapshotTests()
+        {
+            AppSettings auto85 = new AppSettings { AutoCleanEnabled = true, ThresholdPercent = 85, CooldownSeconds = 300, Areas = Areas.WorkingSets };
+
+            // The futility verdict uses the threshold the clean started under, not one saved while it ran.
+            {
+                DateTime t = new DateTime(2026, 2, 1, 12, 0, 0, DateTimeKind.Utc);
+                using (var svc = new AutoCleanService(() => Snap(95),
+                    a => new CleanReport { Before = Snap(95), After = Snap(90) }, () => t))
+                {
+                    svc.Update(auto85);
+                    AppSettings raised = auto85.Clone();
+                    raised.ThresholdPercent = 95;
+                    svc.CleanStarted += why => svc.Update(raised);
+                    svc.RunTick();
+                    Check("p15: futility judged against the threshold the clean started under", svc.FutileStreak == 1,
+                        "streak " + svc.FutileStreak);
+                }
+            }
+
+            // The areas come from the decision's snapshot. The clock is read after the decision snapshot and
+            // before the clean starts, so a save from there stands in for one racing the tick.
+            {
+                DateTime t = new DateTime(2026, 2, 1, 12, 0, 0, DateTimeKind.Utc);
+                Areas seen = Areas.None;
+                AutoCleanService svc = null;
+                bool armed = false;
+                AppSettings standby = auto85.Clone();
+                standby.Areas = Areas.StandbyList;
+                Func<DateTime> clock = () =>
+                {
+                    if (armed) { armed = false; svc.Update(standby); }
+                    return t;
+                };
+                using (svc = new AutoCleanService(() => Snap(95), a => { seen = a; return FakeReport(); }, clock))
+                {
+                    svc.Update(auto85);
+                    svc.CleanStarted += why => svc.Update(standby);
+                    armed = true;
+                    svc.RunTick();
+                    Check("p15: areas come from the snapshot", seen == Areas.WorkingSets, seen.ToString());
+                }
+            }
+
+            // A manual clean uses the settings in force at the click; saves after it are too late.
+            {
+                Areas seen = Areas.None;
+                AutoCleanService svc = null;
+                AppSettings standby = auto85.Clone();
+                standby.Areas = Areas.StandbyList;
+                using (var done = new ManualResetEvent(false))
+                using (svc = new AutoCleanService(() => Snap(10), a => { seen = a; svc.Update(standby); return FakeReport(); }, () => DateTime.UtcNow))
+                {
+                    svc.Update(auto85);
+                    svc.CleanCompleted += (r, why) => done.Set();
+                    Check("p15: manual clean started", svc.CleanNow());
+                    svc.Update(standby);
+                    Check("p15: manual clean uses settings at the click", done.WaitOne(5000) && seen == Areas.WorkingSets, seen.ToString());
+                    WaitUntil(() => !svc.IsCleaning, 5000);
+                }
+            }
+
+            // A new policy (threshold, cooldown, master switch) starts from the normal cooldown; a theme change does not.
+            foreach (string change in new[] { "threshold", "theme" })
+            {
+                DateTime t = new DateTime(2026, 2, 2, 12, 0, 0, DateTimeKind.Utc);
+                using (var svc = new AutoCleanService(() => Snap(95),
+                    a => new CleanReport { Before = Snap(95), After = Snap(92) }, () => t))
+                {
+                    svc.Update(auto85);
+                    svc.RunTick();
+                    t = t.AddSeconds(600);
+                    svc.RunTick();
+                    bool atTwo = svc.FutileStreak == 2;
+                    AppSettings next = auto85.Clone();
+                    if (change == "threshold") next.ThresholdPercent = 90;
+                    else next.Theme = ThemeMode.Dark;
+                    svc.Update(next);
+                    if (change == "threshold")
+                        Check("p15: threshold change resets streak", atTwo && svc.FutileStreak == 0, "streak " + svc.FutileStreak);
+                    else
+                        Check("p15: theme change keeps streak", atTwo && svc.FutileStreak == 2, "streak " + svc.FutileStreak);
+                }
+            }
+
+            // PolicyChanged: only the three fields that decide when a threshold clean may run.
+            AppSettings b = new AppSettings();
+            Func<Action<AppSettings>, bool> changed = edit =>
+            {
+                AppSettings n = b.Clone();
+                edit(n);
+                return AutoCleanService.PolicyChanged(b, n);
+            };
+            Check("p15: policy same settings", !AutoCleanService.PolicyChanged(b, b.Clone()));
+            Check("p15: policy threshold", changed(n => n.ThresholdPercent = 90));
+            Check("p15: policy cooldown", changed(n => n.CooldownSeconds = 600));
+            Check("p15: policy master switch", changed(n => n.AutoCleanEnabled = !n.AutoCleanEnabled));
+            Check("p15: policy not areas", !changed(n => n.Areas = Areas.StandbyList));
+            Check("p15: policy not theme", !changed(n => n.Theme = ThemeMode.Dark));
+            Check("p15: policy not interval", !changed(n => n.IntervalMinutes = 30));
+        }
+
+        /// <summary>
+        /// P5: a service on fake wall and awake clocks and fake conditions. Wall time running far ahead of awake
+        /// time is a sleep; the two clocks move together otherwise.
+        /// </summary>
+        sealed class HoldRig : IDisposable
+        {
+            public DateTime Wall = new DateTime(2026, 3, 1, 12, 0, 0, DateTimeKind.Utc);
+            public TimeSpan Awake = TimeSpan.FromHours(5);
+            public Conditions Now = Conditions.Unknown;
+            public uint Load = 10;
+            public int Cleans, Errors, AwakeReads;
+            public bool AwakeThrows, ConditionsThrow;
+            public readonly AutoCleanService Svc;
+
+            public HoldRig(AppSettings s)
+            {
+                Svc = new AutoCleanService(() => Snap(Load), a => { Interlocked.Increment(ref Cleans); return FakeReport(); }, () => Wall,
+                    () => { AwakeReads++; if (AwakeThrows) throw new InvalidOperationException("no awake clock"); return Awake; },
+                    () => { if (ConditionsThrow) throw new InvalidOperationException("no conditions"); return Now; },
+                    new GateOptions());
+                Svc.Error += ex => Interlocked.Increment(ref Errors);
+                Svc.Update(s);
+            }
+
+            /// <summary>Both clocks move on together: the PC was awake throughout.</summary>
+            public void Pass(TimeSpan t) { Wall += t; Awake += t; }
+
+            public void Dispose() { Svc.Dispose(); }
+        }
+
+        static void HoldTests()
+        {
+            var interval10 = new AppSettings { AutoCleanEnabled = true, ThresholdPercent = 99, IntervalMinutes = 10 };
+            var threshold85 = new AppSettings { AutoCleanEnabled = true, ThresholdPercent = 85, CooldownSeconds = 300 };
+
+            // No clean on the first tick after sleep, and the schedule restarts from the wake.
+            using (var rig = new HoldRig(interval10))
+            {
+                rig.Svc.RunTick();
+                rig.Wall += TimeSpan.FromHours(8);
+                rig.Awake += TimeSpan.FromSeconds(2);
+                rig.Svc.RunTick();
+                Check("service: no clean on the first tick after sleep", rig.Cleans == 0 && rig.Svc.Hold == HoldReason.Resuming,
+                    rig.Cleans + " cleans, " + rig.Svc.Hold);
+                rig.Pass(TimeSpan.FromSeconds(121));
+                rig.Svc.RunTick();
+                Check("service: grace over, the schedule counts from the wake", rig.Cleans == 0, rig.Cleans + " cleans");
+                rig.Pass(TimeSpan.FromMinutes(10));
+                rig.Svc.RunTick();
+                Check("service: interval cleans one interval after waking", rig.Cleans == 1, rig.Cleans + " cleans");
+            }
+
+            // A threshold clean waits out the grace, then runs.
+            using (var rig = new HoldRig(new AppSettings()))
+            {
+                rig.Load = 95;
+                rig.Svc.RunTick();
+                rig.Svc.Update(threshold85);
+                rig.Wall += TimeSpan.FromHours(8);
+                rig.Awake += TimeSpan.FromSeconds(2);
+                rig.Svc.RunTick();
+                rig.Pass(TimeSpan.FromSeconds(119));
+                rig.Svc.RunTick();
+                Check("service: threshold clean waits out the grace", rig.Cleans == 0, rig.Cleans + " cleans");
+                rig.Pass(TimeSpan.FromSeconds(1));
+                rig.Svc.RunTick();
+                Check("service: threshold clean after the grace", rig.Cleans == 1, rig.Cleans + " cleans");
+            }
+
+            // The suspend message holds a due clean; the resume message starts the grace.
+            using (var rig = new HoldRig(threshold85))
+            {
+                rig.Load = 95;
+                rig.Svc.NotifySuspend();
+                rig.Svc.RunTick();
+                Check("service: NotifySuspend blocks a due clean", rig.Cleans == 0 && rig.Svc.Hold == HoldReason.Sleeping,
+                    rig.Cleans + " cleans, " + rig.Svc.Hold);
+                rig.Svc.NotifyResume();
+                rig.Pass(TimeSpan.FromSeconds(2));
+                rig.Svc.RunTick();
+                Check("service: NotifyResume holds for the grace", rig.Cleans == 0 && rig.Svc.Hold == HoldReason.Resuming,
+                    rig.Cleans + " cleans, " + rig.Svc.Hold);
+                rig.Pass(TimeSpan.FromSeconds(120));
+                rig.Svc.RunTick();
+                Check("service: cleans after the resume grace", rig.Cleans == 1 && rig.Svc.Hold == HoldReason.None, rig.Cleans + " cleans");
+                Check("service: notify raises no error", rig.Errors == 0);
+            }
+
+            // The resume message alone (both clocks moved together, so no gap shows) restarts the schedule from the wake.
+            using (var rig = new HoldRig(interval10))
+            {
+                rig.Svc.RunTick();
+                rig.Svc.NotifySuspend();
+                rig.Pass(TimeSpan.FromHours(8));
+                rig.Svc.NotifyResume();
+                rig.Pass(TimeSpan.FromSeconds(121));
+                rig.Svc.RunTick();
+                Check("service: NotifyResume restarts the schedule", rig.Cleans == 0, rig.Cleans + " cleans");
+                rig.Pass(TimeSpan.FromMinutes(10));
+                rig.Svc.RunTick();
+                Check("service: interval cleans one interval after the resume message", rig.Cleans == 1, rig.Cleans + " cleans");
+            }
+
+            // Failing system readers: no Error every tick, nothing held, and a broken awake clock is not read again.
+            using (var rig = new HoldRig(threshold85))
+            {
+                rig.Load = 95;
+                rig.ConditionsThrow = true;
+                rig.AwakeThrows = true;
+                rig.Svc.RunTick();
+                Check("service: conditions func throws -> no Error raised, clean proceeds", rig.Cleans == 1 && rig.Errors == 0,
+                    rig.Cleans + " cleans, " + rig.Errors + " errors");
+                rig.Pass(TimeSpan.FromMinutes(10));
+                rig.Svc.RunTick();
+                rig.Svc.RunTick();
+                Check("service: a failing awake clock is dropped for the service's life", rig.AwakeReads == 1 && rig.Errors == 0,
+                    rig.AwakeReads + " reads");
+            }
+
+            // HoldChanged: once per change, never per tick.
+            using (var rig = new HoldRig(interval10))
+            {
+                var seen = new System.Collections.Generic.List<HoldReason>();
+                rig.Svc.HoldChanged += r => seen.Add(r);
+                rig.Now = new Conditions(Presence.Busy, PowerSource.Mains);
+                rig.Svc.RunTick();
+                rig.Pass(TimeSpan.FromSeconds(2));
+                rig.Svc.RunTick();
+                rig.Now = new Conditions(Presence.Present, PowerSource.Mains);
+                rig.Pass(TimeSpan.FromSeconds(2));
+                rig.Svc.RunTick();
+                rig.Pass(TimeSpan.FromSeconds(2));
+                rig.Svc.RunTick();
+                Check("service: HoldChanged raised once per change",
+                    seen.Count == 2 && seen[0] == HoldReason.Busy && seen[1] == HoldReason.None && rig.Svc.Hold == HoldReason.None,
+                    string.Join(",", seen));
+            }
+
+            // An interval due while on battery waits; plugging in restarts the schedule instead of cleaning at once.
+            using (var rig = new HoldRig(interval10))
+            {
+                rig.Now = new Conditions(Presence.Present, PowerSource.Battery);
+                rig.Svc.RunTick();
+                rig.Pass(TimeSpan.FromMinutes(30));
+                rig.Svc.RunTick();
+                Check("service: battery holds the schedule", rig.Cleans == 0);
+                rig.Now = new Conditions(Presence.Present, PowerSource.Mains);
+                rig.Pass(TimeSpan.FromSeconds(2));
+                rig.Svc.RunTick();
+                Check("service: plugging in does not fire the overdue clean", rig.Cleans == 0);
+                rig.Pass(TimeSpan.FromMinutes(10));
+                rig.Svc.RunTick();
+                Check("service: schedule counts from plugging in", rig.Cleans == 1, rig.Cleans + " cleans");
+            }
+
+            // A manual clean ignores every hold.
+            using (var rig = new HoldRig(threshold85))
+            using (var done = new ManualResetEvent(false))
+            {
+                rig.Now = new Conditions(Presence.Busy, PowerSource.Battery);
+                rig.Svc.RunTick();
+                rig.Svc.CleanCompleted += (r, why) => done.Set();
+                Check("service: manual CleanNow ignores Busy", rig.Svc.Hold == HoldReason.Busy && rig.Svc.CleanNow() && done.WaitOne(5000)
+                    && rig.Cleans == 1);
+                WaitUntil(() => !rig.Svc.IsCleaning, 5000);
+            }
         }
 
         static bool WaitUntil(Func<bool> condition, int timeoutMs)
