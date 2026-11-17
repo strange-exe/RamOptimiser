@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 using System.Security.Principal;
 
@@ -206,6 +207,8 @@ namespace RamOptimiser
         public bool Skipped;
         /// <summary>Set together with Ok when only part of the work succeeded; Message says what failed.</summary>
         public bool Partial;
+        /// <summary>Set together with Skipped when the clean stopped before this area (Message says why).</summary>
+        public bool NotRun;
         public string Message;
         public int NtStatus;     // the failing NTSTATUS, or 0
         public int Win32Error;   // the failing Win32 error code, or 0
@@ -251,7 +254,105 @@ namespace RamOptimiser
                 return true;
             }
         }
+
+        /// <summary>Why the clean ended early, or None. The first cause seen wins.</summary>
+        public CleanStop Stopped;
+        /// <summary>True when nothing stopped the clean (AllOk still says how its areas went).</summary>
+        public bool Completed { get { return Stopped == CleanStop.None; } }
+        /// <summary>The time limit the clean ran under, or null for none.</summary>
+        public TimeSpan? Deadline;
+        /// <summary>Why the clean ran without the clean lock, or that the last holder ended without finishing; else null.</summary>
+        public string LockNote;
+
+        /// <summary>Areas chosen for this clean (the Power Clean services row is not an area).</summary>
+        public int AreasTotal
+        {
+            get
+            {
+                int n = 0;
+                foreach (var r in Results) if (r.Area != Areas.Services) n++;
+                return n;
+            }
+        }
+
+        /// <summary>Areas that ran before any stop.</summary>
+        public int AreasRun
+        {
+            get
+            {
+                int n = 0;
+                foreach (var r in Results) if (r.Area != Areas.Services && !r.NotRun) n++;
+                return n;
+            }
+        }
     }
+
+    /// <summary>Why a clean ended early. Busy: another clean held the clean lock, so this one ran no area.</summary>
+    public enum CleanStop { None, Cancelled, TimedOut, Busy }
+
+    /// <summary>Everything one clean needs, so the Clean overloads stop multiplying.</summary>
+    public sealed class CleanRequest
+    {
+        public Areas Areas = Areas.Default;
+        /// <summary>Catalog services to stop first when Areas has Services (Power Clean).</summary>
+        public ICollection<string> Services;
+        public int MaxPasses = Cleaner.DefaultMaxPasses;
+        /// <summary>Stops the clean at its next safe point. default(CancellationToken) never fires.</summary>
+        public CancellationToken Cancel;
+        /// <summary>Stops the clean at the first safe point after this long; null for no limit.</summary>
+        public TimeSpan? Deadline;
+        /// <summary>How long to wait for a clean in another process to finish before skipping (Busy).</summary>
+        public TimeSpan LockWait = TimeSpan.Zero;
+        /// <summary>Runs after the after snapshot, before the lock is released, so log appends never interleave.</summary>
+        public Action<CleanReport> UnderLock;
+    }
+
+    /// <summary>
+    /// The stop condition of one clean: the token, or the clock past the deadline. Checked only at safe points (between
+    /// steps), and latched, so the first cause seen wins. Used on the cleaning thread only.
+    /// </summary>
+    internal sealed class CleanStopper
+    {
+        readonly CancellationToken cancel;
+        readonly TimeSpan? deadline;
+        readonly Func<TimeSpan> clock;
+        readonly TimeSpan start;
+        CleanStop stopped;
+
+        internal CleanStopper(CancellationToken cancel, TimeSpan? deadline, Func<TimeSpan> clock)
+        {
+            this.cancel = cancel;
+            this.deadline = deadline;
+            this.clock = clock;
+            start = clock();
+        }
+
+        /// <summary>What the clean should do now: go on (None), or stop and why.</summary>
+        public CleanStop Check()
+        {
+            if (stopped != CleanStop.None) return stopped;
+            if (cancel.IsCancellationRequested) stopped = CleanStop.Cancelled;
+            else if (deadline != null && clock() - start >= deadline.Value) stopped = CleanStop.TimedOut;
+            return stopped;
+        }
+
+        /// <summary>The cause seen so far, without checking again.</summary>
+        public CleanStop Stopped { get { return stopped; } }
+
+        /// <summary>Time left before the deadline (zero once past it); TimeSpan.MaxValue with no deadline.</summary>
+        public TimeSpan Remaining
+        {
+            get
+            {
+                if (deadline == null) return TimeSpan.MaxValue;
+                TimeSpan left = deadline.Value - (clock() - start);
+                return left < TimeSpan.Zero ? TimeSpan.Zero : left;
+            }
+        }
+    }
+
+    /// <summary>Takes the clean lock (CleanLock.TryAcquire in a clean; a fake in tests). held is released after the clean.</summary>
+    internal delegate LockState LockTaker(TimeSpan wait, out IDisposable held, out string note);
 
     public static class Privileges
     {
@@ -317,54 +418,165 @@ namespace RamOptimiser
             return freedLastPass >= floor;
         }
 
+        /// <summary>
+        /// As below, without the clean lock: the app's path until it moves to Clean(CleanRequest) (package 3A), so its
+        /// result line and back-off never see a Busy report they do not word yet.
+        /// </summary>
         public static CleanReport Clean(Areas areas, ICollection<string> services, int maxPasses)
         {
+            return Clean(new CleanRequest { Areas = areas, Services = services, MaxPasses = maxPasses }, false);
+        }
+
+        /// <summary>
+        /// The primary clean. Takes the cross-process clean lock first (waiting up to req.LockWait), so two front ends
+        /// never clean at once: if another clean holds it, nothing runs and the report says Busy. The clean stops at
+        /// the next safe point when req.Cancel fires or req.Deadline passes; the areas left are reported as not run,
+        /// and the after snapshot is always taken, so the freed figure stays honest.
+        /// </summary>
+        public static CleanReport Clean(CleanRequest req)
+        {
+            return Clean(req, true);
+        }
+
+        static CleanReport Clean(CleanRequest req, bool takeLock)
+        {
+            if (req == null) throw new ArgumentNullException("req");
             Privileges.Enable(SeProfileSingleProcess);
             Privileges.Enable(SeIncreaseQuota);
             Version os = Environment.OSVersion.Version;
             // Monotonic: DST and clock changes do not move it.
             Stopwatch watch = Stopwatch.StartNew();
-            return Clean(areas, services, maxPasses, () => watch.Elapsed, MemorySnapshot.Take, SafeInUse,
-                (report, r) => Run(r.Area, os, r, report));
+            return Clean(req, () => watch.Elapsed, MemorySnapshot.Take, SafeInUse,
+                (report, r, stop) => Run(r.Area, os, r, report, stop), takeLock ? new LockTaker(TakeCleanLock) : null, ServiceTrimmer.Stop);
+        }
+
+        static LockState TakeCleanLock(TimeSpan wait, out IDisposable held, out string note)
+        {
+            CleanLock l;
+            LockState state = CleanLock.TryAcquire(wait, out l, out note);
+            held = l;
+            return state;
         }
 
         /// <summary>
         /// The clean with its clock, snapshots, in-use reader and area runner passed in, so tests can time it with
-        /// fakes. Duration runs from before the first snapshot to after the last.
+        /// fakes. Duration runs from before the first snapshot to after the last. Takes no lock and cannot be stopped.
         /// </summary>
         internal static CleanReport Clean(Areas areas, ICollection<string> services, int maxPasses, Func<TimeSpan> clock,
             Func<MemorySnapshot> snapshot, Func<ulong> inUse, Action<CleanReport, AreaResult> run)
         {
-            var report = new CleanReport();
-            TimeSpan start = clock();
-            report.Before = snapshot();
+            return Clean(new CleanRequest { Areas = areas, Services = services, MaxPasses = maxPasses }, clock, snapshot, inUse,
+                (report, r, stop) => run(report, r), null, ServiceTrimmer.Stop);
+        }
 
-            if ((areas & Areas.Services) != 0)
+        /// <summary>
+        /// The whole clean with every outside part passed in: the clock (which also times the deadline), snapshots,
+        /// the in-use reader, the area runner (given the stop condition, for steps inside an area), the lock taker
+        /// (null: run unguarded) and the service stopper. The lock is held from before the first snapshot until
+        /// UnderLock has run, and released even when the clean throws.
+        /// </summary>
+        internal static CleanReport Clean(CleanRequest req, Func<TimeSpan> clock, Func<MemorySnapshot> snapshot, Func<ulong> inUse,
+            Action<CleanReport, AreaResult, CleanStopper> run, LockTaker takeLock,
+            Func<ICollection<string>, CancellationToken, List<ServiceAction>> stopServices)
+        {
+            IDisposable held = null;
+            string lockNote = null;
+            if (takeLock != null && takeLock(req.LockWait, out held, out lockNote) == LockState.Busy)
             {
-                var r = new AreaResult { Area = Areas.Services };
-                TimeSpan t0 = clock();
-                List<string> chosen = ServiceCatalog.Filter(services);
-                if (chosen.Count == 0) Skip(r, "no services chosen");
-                else
-                {
-                    try
-                    {
-                        report.Services = ServiceTrimmer.Stop(chosen);
-                        r.Ok = true;
-                        foreach (ServiceAction a in report.Services) if (a.Failed) r.Ok = false;
-                        r.Message = ServiceTrimmer.Summarise(report.Services);
-                    }
-                    catch (Exception ex) { r.Ok = false; r.Message = ex.Message; }
-                }
-                r.Duration += clock() - t0;
-                report.Results.Add(r);
+                if (held != null) held.Dispose();
+                // Nothing ran: one snapshot is both, so the report claims nothing freed and nothing lost.
+                MemorySnapshot now = snapshot();
+                return new CleanReport { Before = now, After = now, Stopped = CleanStop.Busy, Deadline = req.Deadline, LockNote = lockNote };
             }
+            try
+            {
+                var report = new CleanReport { Deadline = req.Deadline, LockNote = lockNote };
+                TimeSpan start = clock();
+                var stopper = new CleanStopper(req.Cancel, req.Deadline, clock);
+                report.Before = snapshot();
 
-            RunAreas(areas, report, maxPasses, inUse, r => run(report, r), clock);
+                if ((req.Areas & Areas.Services) != 0)
+                {
+                    var r = new AreaResult { Area = Areas.Services };
+                    CleanStop stop = stopper.Check();
+                    if (stop != CleanStop.None) MarkNotRun(r, stop);
+                    else
+                    {
+                        TimeSpan t0 = clock();
+                        List<string> chosen = ServiceCatalog.Filter(req.Services);
+                        if (chosen.Count == 0) Skip(r, "no services chosen");
+                        else
+                        {
+                            try
+                            {
+                                report.Services = StopServices(chosen, req.Cancel, stopper.Remaining, stopServices);
+                                r.Ok = true;
+                                foreach (ServiceAction a in report.Services) if (a.Failed) r.Ok = false;
+                                r.Message = ServiceTrimmer.Summarise(report.Services);
+                            }
+                            catch (Exception ex) { r.Ok = false; r.Message = ex.Message; }
+                        }
+                        r.Duration += clock() - t0;
+                    }
+                    report.Results.Add(r);
+                }
 
-            report.After = snapshot();
-            report.Duration = clock() - start;
-            return report;
+                RunAreas(req.Areas, report, req.MaxPasses, inUse, r => run(report, r, stopper), clock, stopper.Check);
+
+                report.After = snapshot();
+                report.Duration = clock() - start;
+                report.Stopped = stopper.Stopped;
+                if (req.UnderLock != null) req.UnderLock(report);
+                return report;
+            }
+            finally
+            {
+                if (held != null) held.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Stops the services with a token that fires on a cancel or when the time left runs out, so a slow stop's
+        /// wait ends too. Each stop already accepted stays recorded for Restore (see ServiceTrimmer.StopPlanned).
+        /// </summary>
+        static List<ServiceAction> StopServices(List<string> chosen, CancellationToken cancel, TimeSpan left,
+            Func<ICollection<string>, CancellationToken, List<ServiceAction>> stopServices)
+        {
+            using (CancellationTokenSource limit = CancellationTokenSource.CreateLinkedTokenSource(cancel))
+            {
+                if (left != TimeSpan.MaxValue)
+                    limit.CancelAfter(left > MaxTimerWait ? MaxTimerWait : left);
+                return stopServices(chosen, limit.Token);
+            }
+        }
+
+        static readonly TimeSpan MaxTimerWait = TimeSpan.FromMilliseconds(int.MaxValue);
+
+        /// <summary>The time limit for automatic cleans (the app's threshold and interval cleans); manual ones have none.</summary>
+        public static readonly TimeSpan AutoCleanDeadline = TimeSpan.FromSeconds(120);
+
+        /// <summary>
+        /// How long one drive's flush may take before the clean goes on without it. A sleeping external disk can report
+        /// Fixed and block in FlushFileBuffers for a long time.
+        /// </summary>
+        public static readonly TimeSpan MaxFlushWait = TimeSpan.FromSeconds(15);
+
+        /// <summary>"not run: stopped" or "not run: time limit reached".</summary>
+        internal static string NotRunMessage(CleanStop why)
+        {
+            return "not run: " + StopReason(why);
+        }
+
+        static string StopReason(CleanStop why)
+        {
+            return why == CleanStop.TimedOut ? "time limit reached" : "stopped";
+        }
+
+        static void MarkNotRun(AreaResult r, CleanStop why)
+        {
+            r.Skipped = true;
+            r.NotRun = true;
+            r.Message = NotRunMessage(why);
         }
 
         /// <summary>As below, untimed (every area's Duration stays zero).</summary>
@@ -381,6 +593,17 @@ namespace RamOptimiser
         internal static void RunAreas(Areas areas, CleanReport report, int maxPasses, Func<ulong> inUse, Action<AreaResult> run,
             Func<TimeSpan> clock)
         {
+            RunAreas(areas, report, maxPasses, inUse, run, clock, () => CleanStop.None);
+        }
+
+        /// <summary>
+        /// As above, checking stop before each area and each extra pass. Once it says stop, every area left is added
+        /// as not run (Skipped, NotRun, "not run: why"); an area already under way finishes, as its system call cannot
+        /// be interrupted.
+        /// </summary>
+        internal static void RunAreas(Areas areas, CleanReport report, int maxPasses, Func<ulong> inUse, Action<AreaResult> run,
+            Func<TimeSpan> clock, Func<CleanStop> stop)
+        {
             bool repeat = (areas & Areas.WorkingSets) != 0 && (areas & Areas.ModifiedList) != 0;
             ulong passStart = 0;
             // What the areas between the trim and the flush (file cache, drives) freed: later passes repeat only trim and
@@ -391,6 +614,13 @@ namespace RamOptimiser
             {
                 if ((areas & kv.Value) == 0) continue;
                 var r = new AreaResult { Area = kv.Value };
+                CleanStop stopNow = stop();
+                if (stopNow != CleanStop.None)
+                {
+                    MarkNotRun(r, stopNow);
+                    report.Results.Add(r);
+                    continue;
+                }
                 bool between = repeat && trim != null && kv.Value != Areas.ModifiedList && flush == null;
                 ulong areaStart = 0;
                 if (kv.Value == Areas.WorkingSets && repeat) passStart = inUse();
@@ -407,7 +637,7 @@ namespace RamOptimiser
                 if (kv.Value == Areas.ModifiedList) flush = r;
                 // Further passes run before the standby purges, so the pages they flush are purged too.
                 if (kv.Value == Areas.ModifiedList && repeat && trim.Ok && flush.Ok)
-                    report.Passes = RepeatPasses(report.Before.TotalPhys, passStart, freedBetween, maxPasses, inUse, run, trim, flush, clock);
+                    report.Passes = RepeatPasses(report.Before.TotalPhys, passStart, freedBetween, maxPasses, inUse, run, trim, flush, clock, stop);
             }
             if (report.Passes > 1) trim.Message = Note(report.Passes + " passes", trim.Message);
         }
@@ -427,10 +657,11 @@ namespace RamOptimiser
         /// <summary>
         /// Runs trim then flush again while each pass still frees enough; returns the total pass count. A pass that
         /// fails is noted on the trim or flush result ("pass 2 failed: why"); the area keeps its pass-1 outcome.
-        /// Each pass's time is added to the pass-1 trim and flush results.
+        /// Each pass's time is added to the pass-1 trim and flush results. A stop before a pass that would have run is
+        /// noted on the trim result ("pass 2 not run: stopped").
         /// </summary>
         private static int RepeatPasses(ulong total, ulong passStart, long freedBetween, int maxPasses, Func<ulong> inUse,
-            Action<AreaResult> run, AreaResult trimResult, AreaResult flushResult, Func<TimeSpan> clock)
+            Action<AreaResult> run, AreaResult trimResult, AreaResult flushResult, Func<TimeSpan> clock, Func<CleanStop> stop)
         {
             int passes = 1;
             ulong before = passStart;
@@ -441,6 +672,12 @@ namespace RamOptimiser
                 long freed = (long)before - (long)now - leaveOut;
                 leaveOut = 0;
                 if (before == 0 || now == 0 || !AnotherPass(freed, total, passes, maxPasses)) return passes;
+                CleanStop stopNow = stop();
+                if (stopNow != CleanStop.None)
+                {
+                    trimResult.Message = Note(trimResult.Message, "pass " + (passes + 1) + " " + NotRunMessage(stopNow));
+                    return passes;
+                }
                 var trim = new AreaResult { Area = Areas.WorkingSets };
                 var flush = new AreaResult { Area = Areas.ModifiedList };
                 string why = Timed(run, trim, trimResult, clock);
@@ -472,7 +709,7 @@ namespace RamOptimiser
             catch (Win32Exception) { return 0; }
         }
 
-        private static void Run(Areas area, Version os, AreaResult r, CleanReport report)
+        private static void Run(Areas area, Version os, AreaResult r, CleanReport report, CleanStopper stop)
         {
             switch (area)
             {
@@ -505,15 +742,16 @@ namespace RamOptimiser
                         r.Message = CombineRowMessage(pages, pageSize);
                     }
                     break;
-                case Areas.VolumeCache: FlushVolumes(r); break;
+                case Areas.VolumeCache: FlushVolumes(r, stop); break;
             }
         }
 
         /// <summary>
         /// FlushFileBuffers on a volume handle writes every open file's cached data on that volume
-        /// (documented; needs administrator rights). Drives that refuse are reported, not fatal.
+        /// (documented; needs administrator rights). Drives that refuse are reported, not fatal. Each drive's flush may
+        /// take MaxFlushWait (or the time the clean has left, if less); the stop condition is checked between drives.
         /// </summary>
-        private static void FlushVolumes(AreaResult r)
+        private static void FlushVolumes(AreaResult r, CleanStopper stop)
         {
             var drives = new List<KeyValuePair<string, bool>>();
             foreach (DriveInfo d in DriveInfo.GetDrives())
@@ -521,39 +759,105 @@ namespace RamOptimiser
                 if (d.DriveType != DriveType.Fixed) continue;
                 drives.Add(new KeyValuePair<string, bool>(d.Name.Substring(0, 2), d.IsReady)); // "C:", ready
             }
-            FlushVolumes(r, drives, FlushVolume);
+            FlushVolumes(r, drives, FlushVolume, stop.Check, () =>
+            {
+                TimeSpan left = stop.Remaining;
+                return left < MaxFlushWait ? left : MaxFlushWait;
+            });
+        }
+
+        /// <summary>As below, with no stop and each flush run inline (no time limit).</summary>
+        internal static void FlushVolumes(AreaResult r, IEnumerable<KeyValuePair<string, bool>> drives, Func<string, int> flush)
+        {
+            FlushVolumes(r, drives, flush, () => CleanStop.None, null);
         }
 
         /// <summary>
         /// Flushes each fixed drive (letter, ready) with flush, which returns 0 or a Win32 error. Tests pass fakes.
         /// A drive that is not ready (locked, offline, no media) is skipped, not flushed and not a failure. Some drives
-        /// refusing makes the area partial; all of them refusing makes it fail.
+        /// refusing makes the area partial; all of them refusing makes it fail. stop is checked before each drive; once
+        /// it says stop, the drives left are noted as not flushed. With flushLimit set, each flush runs on a thread of
+        /// its own and is left to finish when it takes longer ("E: still writing; left to finish"), which counts like a
+        /// refusal, since the flush was not confirmed.
         /// </summary>
-        internal static void FlushVolumes(AreaResult r, IEnumerable<KeyValuePair<string, bool>> drives, Func<string, int> flush)
+        internal static void FlushVolumes(AreaResult r, IEnumerable<KeyValuePair<string, bool>> drives, Func<string, int> flush,
+            Func<CleanStop> stop, Func<TimeSpan> flushLimit)
         {
             var flushed = new List<string>();
             var failed = new List<string>();
             var notReady = new List<string>();
+            var notRun = new List<string>();
             foreach (var d in drives)
             {
                 string letter = d.Key;
+                CleanStop stopNow = stop();
+                if (stopNow != CleanStop.None) { notRun.Add(letter + " not flushed: " + StopReason(stopNow)); continue; }
                 if (!d.Value) { notReady.Add(letter + " not ready"); continue; }
-                int err = flush(letter);
+                int err;
+                if (flushLimit == null) err = flush(letter);
+                else
+                {
+                    bool hung;
+                    err = RunWithTimeout(() => flush(letter), flushLimit(), out hung);
+                    if (hung) { failed.Add(letter + " still writing; left to finish"); continue; }
+                }
                 if (err == 0) flushed.Add(letter);
                 else failed.Add(letter + " " + new Win32Exception(err).Message.TrimEnd('.').ToLowerInvariant());
                 if (err != 0 && r.Win32Error == 0) r.Win32Error = err;
             }
             if (flushed.Count == 0 && failed.Count == 0)
             {
-                Skip(r, notReady.Count == 0 ? "no fixed drives found" : "no fixed drive ready; " + string.Join("; ", notReady));
+                if (notRun.Count > 0)
+                {
+                    var left = new List<string>(notRun);
+                    left.AddRange(notReady);
+                    Skip(r, "no drive flushed; " + string.Join("; ", left));
+                }
+                else Skip(r, notReady.Count == 0 ? "no fixed drives found" : "no fixed drive ready; " + string.Join("; ", notReady));
                 return;
             }
             r.Ok = flushed.Count > 0;
             r.Partial = r.Ok && failed.Count > 0;
             var notes = new List<string>(failed);
             notes.AddRange(notReady);
+            notes.AddRange(notRun);
             r.Message = SummariseVolumes(flushed, notes);
             if (r.Ok && !r.Partial) r.Win32Error = 0;
+        }
+
+        /// <summary>
+        /// Runs work on a background thread of its own and waits up to limit. On time it returns work's result (or
+        /// throws its exception); late, it sets timedOut and returns 0, and the work is left to finish by itself.
+        /// That is the price of not blocking the clean on a drive that will not answer: at most one thread is left
+        /// behind per hung drive per clean. The thread holds its own volume handle and closes it when the call
+        /// returns; as a background thread it never keeps the process alive. The event is not disposed here when the
+        /// work is late, because the thread still sets it.
+        /// </summary>
+        internal static int RunWithTimeout(Func<int> work, TimeSpan limit, out bool timedOut)
+        {
+            if (limit < TimeSpan.Zero) limit = TimeSpan.Zero;
+            if (limit > MaxTimerWait) limit = MaxTimerWait;
+            var done = new ManualResetEvent(false);
+            int result = 0;
+            Exception error = null;
+            var worker = new Thread(() =>
+            {
+                try { result = work(); }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            worker.IsBackground = true;
+            worker.Name = "RamOptimiser drive flush";
+            worker.Start();
+            if (!done.WaitOne(limit))
+            {
+                timedOut = true;
+                return 0;
+            }
+            done.Close();
+            timedOut = false;
+            if (error != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
+            return result;
         }
 
         /// <summary>FlushFileBuffers on the "\\.\C:" volume handle: 0, or the Win32 error.</summary>

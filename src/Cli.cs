@@ -18,6 +18,8 @@ namespace RamOptimiser
         public int CooldownSeconds = 300;
         /// <summary>clean --dry-run: show what a clean would do, change nothing, need no admin.</summary>
         public bool DryRun;
+        /// <summary>clean and watch --timeout: each clean stops after this many seconds; 0 means no limit.</summary>
+        public int TimeoutSeconds;
 
         public static Options Parse(string[] args)
         {
@@ -42,6 +44,7 @@ namespace RamOptimiser
                     case "--interval": o.IntervalSeconds = Int(args, ref i, 1, 86400); break;
                     case "--cooldown": o.CooldownSeconds = Int(args, ref i, 0, 86400); break;
                     case "--dry-run": o.DryRun = true; break;
+                    case "--timeout": o.TimeoutSeconds = Int(args, ref i, 1, 3600); break;
                     default: throw new ArgumentException("Unknown option '" + args[i] + "'.");
                 }
             }
@@ -148,14 +151,23 @@ namespace RamOptimiser
                         cleaning = true;
                         CleanReport report = Clean(o.Areas);
                         cleaning = false;
-                        // Only a clean that ran counts for the low signal: a failed one must not be retried at once.
-                        cleanedThisTick = true;
-                        failedCleans = 0;
-                        Program.PrintReport(output, report);
-                        if (CleanEstimate.Advise(s) == CleanAdvice.CommitBound)
-                            output.WriteLine("  note: committed memory is {0}% of the limit; cleaning does not lower it. Close programs you are not using.",
-                                s.CommitPercent);
-                        futileStreak = AutoCleanPolicy.NextStreak(futileStreak, report.After.LoadPercent, o.ThresholdPercent);
+                        if (report.Stopped == CleanStop.Busy)
+                        {
+                            // Another clean (ramopt or the app) was running. Not an error, and not futile: before
+                            // equals after only because nothing ran, so it must not double the wait.
+                            output.WriteLine("[{0:HH:mm:ss}] another clean is running: skipped this one", Now());
+                        }
+                        else
+                        {
+                            // Only a clean that ran counts for the low signal: a failed one must not be retried at once.
+                            cleanedThisTick = true;
+                            failedCleans = 0;
+                            Program.PrintReport(output, report);
+                            if (CleanEstimate.Advise(s) == CleanAdvice.CommitBound)
+                                output.WriteLine("  note: committed memory is {0}% of the limit; cleaning does not lower it. Close programs you are not using.",
+                                    s.CommitPercent);
+                            futileStreak = AutoCleanPolicy.NextStreak(futileStreak, report.After.LoadPercent, o.ThresholdPercent);
+                        }
                     }
                     errorsInARow = 0;
                 }
@@ -190,7 +202,12 @@ namespace RamOptimiser
 
     public static class Program
     {
-        public const int ExitOk = 0, ExitUsage = 1, ExitPartial = 2, ExitNotElevated = 3, ExitWatchFailed = 4;
+        public const int ExitOk = 0, ExitUsage = 1, ExitPartial = 2, ExitNotElevated = 3, ExitWatchFailed = 4, ExitBusy = 5;
+
+        /// <summary>How long ramopt clean waits for another clean to finish before giving up with ExitBusy.</summary>
+        internal static readonly TimeSpan CliLockWait = TimeSpan.FromSeconds(2);
+
+        internal const string BusyMessage = "error: another clean is running (ramopt or RamOptimiser). Try again when it finishes.";
 
         public static int Main(string[] args)
         {
@@ -204,7 +221,7 @@ namespace RamOptimiser
                 return ExitUsage;
             }
 
-            return Dispatch(o, Console.Out, MemorySnapshot.Take, RunClean, RunWatch);
+            return Dispatch(o, Console.Out, MemorySnapshot.Take, areas => RunClean(o), RunWatch);
         }
 
         /// <summary>
@@ -226,16 +243,90 @@ namespace RamOptimiser
             }
         }
 
-        private static int RunClean(Areas areas)
+        private static int RunClean(Options o)
         {
             if (!Privileges.IsElevated())
             {
                 Console.Error.WriteLine("error: cleaning needs administrator rights. Open an elevated terminal and run it again.");
                 return ExitNotElevated;
             }
-            CleanReport report = Cleaner.Clean(areas);
-            PrintReport(Console.Out, report);
-            return report.AllOk ? ExitOk : ExitPartial;
+            // Not disposed: the Ctrl+C handler runs on a thread of its own and may still touch it as the clean ends.
+            var cancel = new CancellationTokenSource();
+            ConsoleCancelEventHandler onKey = (s, e) => { e.Cancel = OnCancelKey(cancel, Console.Out); };
+            Console.CancelKeyPress += onKey;
+            CleanReport report;
+            try { report = Cleaner.Clean(RequestFor(o, o.Areas, cancel.Token, CliLockWait)); }
+            finally { Console.CancelKeyPress -= onKey; }
+            return ReportClean(report, Console.Out, Console.Error);
+        }
+
+        /// <summary>
+        /// Ctrl+C during a clean: the first press asks the clean to stop at its next safe point and keeps the process
+        /// (returns true, for e.Cancel); a later press returns false, so Windows ends the process.
+        /// </summary>
+        internal static bool OnCancelKey(CancellationTokenSource cancel, TextWriter output)
+        {
+            if (cancel.IsCancellationRequested) return false;
+            output.WriteLine("Stopping after the current step...");
+            cancel.Cancel();
+            return true;
+        }
+
+        /// <summary>The clean ramopt asks for: its areas, --timeout as the deadline, the Ctrl+C token and the lock wait.</summary>
+        internal static CleanRequest RequestFor(Options o, Areas areas, CancellationToken cancel, TimeSpan lockWait)
+        {
+            return new CleanRequest
+            {
+                Areas = areas,
+                Cancel = cancel,
+                Deadline = o.TimeoutSeconds > 0 ? TimeSpan.FromSeconds(o.TimeoutSeconds) : (TimeSpan?)null,
+                LockWait = lockWait
+            };
+        }
+
+        /// <summary>Prints a clean's outcome (a busy one as an error) and returns ramopt clean's exit code.</summary>
+        internal static int ReportClean(CleanReport r, TextWriter output, TextWriter errors)
+        {
+            if (r.Stopped == CleanStop.Busy)
+            {
+                errors.WriteLine(BusyMessage);
+                return ExitBusy;
+            }
+            PrintReport(output, r);
+            return ExitCodeFor(r);
+        }
+
+        /// <summary>Busy: ExitBusy. Stopped (Ctrl+C or the time limit), or an area failed or partly worked: ExitPartial.</summary>
+        internal static int ExitCodeFor(CleanReport r)
+        {
+            if (r.Stopped == CleanStop.Busy) return ExitBusy;
+            if (!r.Completed) return ExitPartial;
+            return r.AllOk ? ExitOk : ExitPartial;
+        }
+
+        /// <summary>
+        /// The line after a stopped clean's report: "Stopped after workingsets; not run: modified, registry." or
+        /// "Hit the 120 s limit after 3 of 6 areas; not run: ...". Null for a complete or busy clean. Pure.
+        /// </summary>
+        internal static string StopLine(CleanReport r)
+        {
+            if (r == null || r.Completed || r.Stopped == CleanStop.Busy) return null;
+            var notRun = new List<string>();
+            string lastRan = null;
+            foreach (AreaResult a in r.Results)
+            {
+                string name = a.Area == Areas.Services ? "services" : AreaNames.NameOf(a.Area);
+                if (a.NotRun) notRun.Add(name);
+                else if (a.Area != Areas.Services) lastRan = name;
+            }
+            string rest = notRun.Count == 0 ? "." : "; not run: " + string.Join(", ", notRun) + ".";
+            if (r.Stopped == CleanStop.TimedOut)
+            {
+                string limit = r.Deadline == null ? "time"
+                    : Math.Round(r.Deadline.Value.TotalSeconds).ToString(CultureInfo.InvariantCulture) + " s";
+                return "Hit the " + limit + " limit after " + r.AreasRun + " of " + r.AreasTotal + " areas" + rest;
+            }
+            return (lastRan == null ? "Stopped before any area ran" : "Stopped after " + lastRan) + rest;
         }
 
         private static int RunWatch(Options o)
@@ -245,24 +336,30 @@ namespace RamOptimiser
                 Console.Error.WriteLine("error: watch mode cleans memory and needs administrator rights.");
                 return ExitNotElevated;
             }
-            using (var stop = new ManualResetEvent(false))
+            // One source for Ctrl+C: it ends the wait, and stops a clean under way at its next safe point. Not disposed:
+            // the Ctrl+C handler runs on a thread of its own.
+            var cancel = new CancellationTokenSource();
+            WaitHandle stop = cancel.Token.WaitHandle;
+            Console.CancelKeyPress += (s, e) => { e.Cancel = OnCancelKey(cancel, Console.Out); };
+            Console.WriteLine("Watching memory: clean when load >= {0}%, check every {1}s, wait {2}s between cleans. Ctrl+C stops.",
+                o.ThresholdPercent, o.IntervalSeconds, o.CooldownSeconds);
+            Stopwatch clock = Stopwatch.StartNew();
+            // Windows' low-memory signal can end a wait early; the interval poll stays, because the signal fires at
+            // a fixed kernel level, not at --threshold. Null when the signal is unavailable.
+            WaitHandle low = MemoryPressure.LowWaitHandle();
+            // No lock wait: a clean that finds another one running skips this turn and tries again later.
+            var watch = new Watcher
             {
-                Console.CancelKeyPress += (s, e) => { e.Cancel = true; stop.Set(); };
-                Console.WriteLine("Watching memory: clean when load >= {0}%, check every {1}s, wait {2}s between cleans. Ctrl+C stops.",
-                    o.ThresholdPercent, o.IntervalSeconds, o.CooldownSeconds);
-                Stopwatch clock = Stopwatch.StartNew();
-                // Windows' low-memory signal can end a wait early; the interval poll stays, because the signal fires at
-                // a fixed kernel level, not at --threshold. Null when the signal is unavailable.
-                WaitHandle low = MemoryPressure.LowWaitHandle();
-                var watch = new Watcher { Elapsed = () => clock.Elapsed };
-                watch.Wait = (t, includeLow) =>
-                {
-                    WaitHandle[] handles = includeLow && low != null ? new WaitHandle[] { stop, low } : new WaitHandle[] { stop };
-                    int i = WaitHandle.WaitAny(handles, t);
-                    return i == WaitHandle.WaitTimeout ? WakeReason.Interval : i == 0 ? WakeReason.Stop : WakeReason.LowMemory;
-                };
-                return watch.Run(o, Console.Out, Console.Error);
-            }
+                Elapsed = () => clock.Elapsed,
+                Clean = areas => Cleaner.Clean(RequestFor(o, areas, cancel.Token, TimeSpan.Zero))
+            };
+            watch.Wait = (t, includeLow) =>
+            {
+                WaitHandle[] handles = includeLow && low != null ? new WaitHandle[] { stop, low } : new WaitHandle[] { stop };
+                int i = WaitHandle.WaitAny(handles, t);
+                return i == WaitHandle.WaitTimeout ? WakeReason.Interval : i == 0 ? WakeReason.Stop : WakeReason.LowMemory;
+            };
+            return watch.Run(o, Console.Out, Console.Error);
         }
 
         public static void PrintStatus(TextWriter w, MemorySnapshot s)
@@ -366,11 +463,12 @@ namespace RamOptimiser
             foreach (AreaResult a in r.Results)
             {
                 AreaOutcome outcome = a.Outcome;
-                string state = outcome == AreaOutcome.Skipped ? "skipped" : outcome == AreaOutcome.Partial ? "partial"
+                string state = a.NotRun ? "not run" : outcome == AreaOutcome.Skipped ? "skipped" : outcome == AreaOutcome.Partial ? "partial"
                     : outcome == AreaOutcome.Ok ? "ok" : "FAILED";
-                // Skipped areas did no work, so they show no time.
+                // Skipped areas did no work, so they show no time; the stop line says why the rest did not run.
                 string time = outcome == AreaOutcome.Skipped ? "" : " (" + Format.Seconds(a.Duration) + ")";
-                w.WriteLine("  {0,-12} {1}{2}{3}", AreaNames.NameOf(a.Area), state, a.Message == null ? "" : ": " + a.Message, time);
+                string message = a.NotRun || a.Message == null ? "" : ": " + a.Message;
+                w.WriteLine("  {0,-12} {1}{2}{3}", AreaNames.NameOf(a.Area), state, message, time);
             }
             w.WriteLine("In use: {0} -> {1} ({2} freed)",
                 Format.Bytes(r.Before.InUse), Format.Bytes(r.After.InUse), Format.Bytes(r.InUseFreed));
@@ -379,6 +477,9 @@ namespace RamOptimiser
                     Format.Bytes(r.Before.FreeAndZero), Format.Bytes(r.After.FreeAndZero),
                     Format.Bytes(r.Before.Standby), Format.Bytes(r.After.Standby));
             w.WriteLine("Took {0}.", Format.Seconds(r.Duration));
+            string stopLine = StopLine(r);
+            if (stopLine != null) w.WriteLine(stopLine);
+            if (r.LockNote != null) w.WriteLine("note: " + r.LockNote);
         }
 
         private static void PrintHelp()
@@ -394,21 +495,26 @@ namespace RamOptimiser
             w.WriteLine();
             w.WriteLine("Usage:");
             w.WriteLine("  ramopt status                          show memory use (no admin needed)");
-            w.WriteLine("  ramopt clean [--areas LIST | --all]    clean once");
+            w.WriteLine("  ramopt clean [--areas LIST | --all] [--timeout S]");
+            w.WriteLine("                                         clean once; Ctrl+C stops it after the current step");
             w.WriteLine("  ramopt clean --dry-run [--areas LIST | --all]   show what a clean would do; changes nothing (no admin needed)");
-            w.WriteLine("  ramopt watch [--threshold N] [--interval S] [--cooldown S] [--areas LIST | --all]");
+            w.WriteLine("  ramopt watch [--threshold N] [--interval S] [--cooldown S] [--timeout S] [--areas LIST | --all]");
             w.WriteLine("                                         clean whenever load reaches N% (default 85, every 30s, 300s apart);");
             w.WriteLine("                                         a clean that leaves load at N% or more doubles the wait (up to {0}x)",
                 1 << AutoCleanPolicy.MaxBackoffSteps);
+            w.WriteLine("  --timeout S                            end each clean after S seconds (1-3600), once the step under way finishes");
+            w.WriteLine("If another clean is running, clean waits up to {0} s for it and then gives up; watch skips that turn.",
+                CliLockWait.TotalSeconds.ToString(CultureInfo.InvariantCulture));
             w.WriteLine();
             var optIn = new List<string>();
             foreach (var kv in AreaNames.Known) if ((Areas.Default & kv.Value) == 0) optIn.Add("'" + kv.Key + "'");
             w.WriteLine("Areas (comma separated; default = all but {0}):", JoinAnd(optIn));
             foreach (var kv in AreaNames.Known) w.WriteLine("  {0,-13} {1}", kv.Key, AreaHelp(kv.Value));
             w.WriteLine();
-            w.WriteLine("Exit codes: {0} ok, {1} bad arguments, {2} some area failed or only partly worked, {3} not elevated,",
-                ExitOk, ExitUsage, ExitPartial, ExitNotElevated);
-            w.Write("            {0} watch stopped after {1} errors in a row.", ExitWatchFailed, Watcher.MaxConsecutiveErrors);
+            w.WriteLine("Exit codes: {0} ok, {1} bad arguments, {2} some area failed or only partly worked, or the clean was stopped,",
+                ExitOk, ExitUsage, ExitPartial);
+            w.Write("            {0} not elevated, {1} watch stopped after {2} errors in a row, {3} another clean is running.",
+                ExitNotElevated, ExitWatchFailed, Watcher.MaxConsecutiveErrors, ExitBusy);
             return w.ToString();
         }
 
