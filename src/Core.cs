@@ -305,7 +305,19 @@ namespace RamOptimiser
         public TimeSpan LockWait = TimeSpan.Zero;
         /// <summary>Runs after the after snapshot, before the lock is released, so log appends never interleave.</summary>
         public Action<CleanReport> UnderLock;
+        /// <summary>How the workingsets area trims: all at once (the default), or app by app (ProcessTrimmer).</summary>
+        public TrimMode Trim;
+        /// <summary>EachProcess only: exe names to leave alone (from ProcessTrimmer.ParseExclusions); null for none.</summary>
+        public ICollection<string> TrimExclusions;
+        /// <summary>EachProcess only: leave the app in front alone, with all its processes.</summary>
+        public bool SpareForeground = true;
     }
+
+    /// <summary>
+    /// System: one call empties every working set and the compression store (frees most). EachProcess: app by app,
+    /// sparing the app in front and a list, without touching services or protected processes (frees less).
+    /// </summary>
+    public enum TrimMode { System, EachProcess }
 
     /// <summary>
     /// The stop condition of one clean: the token, or the clock past the deadline. Checked only at safe points (between
@@ -446,8 +458,19 @@ namespace RamOptimiser
             Version os = Environment.OSVersion.Version;
             // Monotonic: DST and clock changes do not move it.
             Stopwatch watch = Stopwatch.StartNew();
+            // Extra trim-and-flush passes come through here too, so a per-process trim spares the same apps every pass.
             return Clean(req, () => watch.Elapsed, MemorySnapshot.Take, SafeInUse,
-                (report, r, stop) => Run(r.Area, os, r, report, stop), takeLock ? new LockTaker(TakeCleanLock) : null, ServiceTrimmer.Stop);
+                (report, r, stop) =>
+                {
+                    if (TrimsEachProcess(req, r.Area)) ProcessTrimmer.TrimEach(req, r, stop.Check);
+                    else Run(r.Area, os, r, report, stop);
+                }, takeLock ? new LockTaker(TakeCleanLock) : null, ServiceTrimmer.Stop);
+        }
+
+        /// <summary>True when this area is the working-set trim and the request asks for it app by app. Pure.</summary>
+        internal static bool TrimsEachProcess(CleanRequest req, Areas area)
+        {
+            return area == Areas.WorkingSets && req != null && req.Trim == TrimMode.EachProcess;
         }
 
         static LockState TakeCleanLock(TimeSpan wait, out IDisposable held, out string note)
@@ -567,7 +590,7 @@ namespace RamOptimiser
             return "not run: " + StopReason(why);
         }
 
-        static string StopReason(CleanStop why)
+        internal static string StopReason(CleanStop why)
         {
             return why == CleanStop.TimedOut ? "time limit reached" : "stopped";
         }
@@ -992,23 +1015,52 @@ namespace RamOptimiser
         public int Processes;
         /// <summary>Working set: RAM the processes hold now, shared pages included (as Task Manager's details view).</summary>
         public ulong Bytes;
+        /// <summary>Private bytes: memory only these processes use. Unlike the working set, a clean does not lower it.</summary>
+        public ulong PrivateBytes;
     }
+
+    /// <summary>How top ranks apps: by private bytes (the default for ramopt top) or by working set.</summary>
+    public enum AppSort { Private, WorkingSet }
 
     public static class AppMemoryList
     {
         /// <summary>The n apps holding the most RAM right now. Needs no elevation; processes it cannot read are skipped.</summary>
         public static List<AppMemory> Top(int n)
         {
-            var samples = new List<KeyValuePair<string, ulong>>();
-            foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcesses())
+            return Top(n, AppSort.WorkingSet);
+        }
+
+        /// <summary>The n apps using the most memory by the chosen figure, private bytes included. Needs no elevation.</summary>
+        public static List<AppMemory> Top(int n, AppSort by)
+        {
+            return Aggregate(ProcessTrimmer.Gather(), n, by);
+        }
+
+        /// <summary>
+        /// Groups by name (case-insensitive), adding up processes, working sets and private bytes; largest first by the
+        /// chosen figure, ties by name; Idle and empty names left out; capped at n. Pure.
+        /// </summary>
+        public static List<AppMemory> Aggregate(IEnumerable<ProcessSample> samples, int n, AppSort by)
+        {
+            var map = new Dictionary<string, AppMemory>(StringComparer.OrdinalIgnoreCase);
+            foreach (ProcessSample p in samples)
             {
-                using (p)
-                {
-                    try { samples.Add(new KeyValuePair<string, ulong>(p.ProcessName, (ulong)p.WorkingSet64)); }
-                    catch (InvalidOperationException) { } // exited meanwhile
-                }
+                if (p == null || string.IsNullOrEmpty(p.Name) || p.Name == "Idle") continue;
+                AppMemory a;
+                if (!map.TryGetValue(p.Name, out a)) map[p.Name] = a = new AppMemory { Name = p.Name };
+                a.Processes++;
+                a.Bytes += p.WorkingSet;
+                a.PrivateBytes += p.Private;
             }
-            return Aggregate(samples, n);
+            var list = new List<AppMemory>(map.Values);
+            list.Sort((x, y) =>
+            {
+                ulong xv = by == AppSort.Private ? x.PrivateBytes : x.Bytes;
+                ulong yv = by == AppSort.Private ? y.PrivateBytes : y.Bytes;
+                return xv != yv ? yv.CompareTo(xv) : string.Compare(x.Name, y.Name, StringComparison.OrdinalIgnoreCase);
+            });
+            if (n >= 0 && list.Count > n) list.RemoveRange(n, list.Count - n);
+            return list;
         }
 
         /// <summary>Groups by name (case-insensitive), largest first, ties by name; Idle and empty names left out. Pure.</summary>

@@ -178,6 +178,24 @@ namespace RamOptimiser
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool CloseHandle(IntPtr handle);
 
+        // Per-process trim (ramopt --trim each). EmptyWorkingSet needs PROCESS_QUERY_(LIMITED_)INFORMATION and
+        // PROCESS_SET_QUOTA; from Windows 7 it is exported by kernel32 as K32EmptyWorkingSet (documented, psapi.h).
+        public const uint PROCESS_SET_QUOTA = 0x0100, PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, int pid);
+
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "K32EmptyWorkingSet")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EmptyWorkingSet(IntPtr process);
+
+        // The app in front, so per-process trim can spare it (winuser.h; user32 is loaded from System32 only).
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int pid);
+
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
