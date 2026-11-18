@@ -11,7 +11,9 @@ namespace RamOptimiser.App
     /// <summary>
     /// The notification-area icon. Shows the load as digits (TrayIconRenderer, transparent background, digits
     /// in the taskbar's text colour) or the static app icon. The icon is redrawn only when the percent, the
-    /// taskbar colour or the size changes, and every replaced icon is disposed. Never shows balloons.
+    /// taskbar colour or the size changes, and every replaced icon is disposed. Shows a balloon only when the user
+    /// turned on problem notices in Settings (owner decision 2026-11-17: opt-in, off by default; AppShell decides when,
+    /// through Notices and NoticeGate); clicking it opens the window on the Memory tab.
     /// Lives on the UI thread: WPF's dispatcher pumps the messages NotifyIcon needs.
     /// Menu: Open, Clean memory, the last clean's result (hidden before the first clean; enabled, so keyboard and
     /// Narrator users reach it, and it opens the Memory tab), Auto-clean (ticked when on, "(paused until 15:41)" while
@@ -32,6 +34,8 @@ namespace RamOptimiser.App
         bool disposed;
 
         public event EventHandler OpenRequested, CleanRequested, StatusClicked, AutoCleanToggled, PauseRequested, ResumeRequested, RestartRequested, ExitRequested;
+        /// <summary>The user clicked a problem notice.</summary>
+        public event EventHandler NoticeClicked;
 
         public TrayController()
         {
@@ -65,7 +69,31 @@ namespace RamOptimiser.App
             appIcon = LoadAppIcon(shownSize);
             icon = new NotifyIcon { Icon = appIcon, Text = AppText.AppName, ContextMenuStrip = menu };
             icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) Raise(OpenRequested); };
+            icon.BalloonTipClicked += delegate { Raise(NoticeClicked); };
             icon.Visible = true;
+        }
+
+        /// <summary>
+        /// A Windows notification from the tray icon (R6), with the warning icon. The timeout is ignored by current
+        /// Windows (display time follows the accessibility settings). Plain text only; never throws.
+        /// </summary>
+        public bool ShowNotice(string title, string text)
+        {
+            if (disposed || string.IsNullOrEmpty(text)) return false;
+            try
+            {
+                icon.ShowBalloonTip(10000, title ?? "", text, ToolTipIcon.Warning);
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        /// <summary>The Clean memory item shows the global shortcut on its right ("Ctrl+Shift+M"), or nothing when null.</summary>
+        public void SetCleanShortcut(string keys)
+        {
+            if (disposed) return;
+            cleanItem.ShortcutKeyDisplayString = keys ?? "";
+            cleanItem.ShowShortcutKeys = !string.IsNullOrEmpty(keys);
         }
 
         void Raise(EventHandler h)

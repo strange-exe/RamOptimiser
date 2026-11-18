@@ -311,6 +311,48 @@ called directly, without starting the app) of the calm and under-pressure Memory
 clear button and the top-app tooltip, light and dark. Not verified: high contrast, a live hover, Narrator, an
 elevated session, and that real samples keep the top-app order stable across a clean.
 
+### Notices, shortcut, reset and read-out status lines (wave 4A: R6, R7, P16 reset, U9)
+
+- **Notifications (R6).** Owner decision, 2026-11-17: "Opt-in, off by default (Recommended)". A SwitchStyle row in
+  the App card, "Notify me when auto-clean has a problem", with the Small note "A Windows notification when an
+  automatic clean fails or stops helping. Never for routine cleans." While it is off the old rule holds: no balloon
+  ever. On, `Notices` (pure) decides: an automatic clean that failed, partly failed or did not finish ("At 14:32, 2
+  areas failed. Open RAM Optimiser to see which."), or the step into the longest back-off ("The last 4 cleans left
+  load at 85% or more. Closing an app will free more memory than cleaning."). Never for a manual clean, a good clean,
+  a busy skip, or while the window shows (it says the same already). `NoticeGate`: one of each kind an hour. Shown
+  through `NotifyIcon.ShowBalloonTip` with the warning icon (Windows turns it into a toast; display time follows the
+  accessibility setting); a click opens the Memory tab. Each one shown is logged as `notice-shown`.
+- **Shortcut (R7).** No default (owner). Row "Shortcut for Clean memory": a read-only recorder box (150 px, Tag
+  "None" placeholder; help text "Press a key combination. Press Delete to remove the shortcut."), a "Remove" link
+  while one is set, and a polite live line for refusals. `HotkeyRecorder.Decide` (pure): a modifier alone is
+  ignored, Tab and Shift+Tab move on, Alt+F4 and Alt+Space reach Windows, Delete or Backspace removes, Esc cancels;
+  anything else must be two of Ctrl, Alt, Shift with A-Z, 0-9, F1-F11 or F13-F24 (no Windows key: reserved; no F12:
+  reserved for debuggers). Ctrl+Alt combinations get the AltGr warning. `HotkeyBinding` registers through
+  `IHotkeyRegistrar` (only `HotkeyListener` calls RegisterHotKey, on a message-only window, elevated only, with
+  MOD_NOREPEAT); a refusal (1409: taken) keeps the previous shortcut and saves nothing. Owner floor: a press within
+  60 s of the last clean (the later of the service's last clean and the last shortcut clean) is skipped, logged as
+  `hotkey-skipped`, and the tray status item says "Shortcut ignored: the last clean was less than a minute ago." for
+  a minute; a clean it starts is logged as `hotkey-clean`. The Clean memory tooltip reads "Clean memory
+  (Ctrl+Shift+M)" (5A carry-over, `AppText.CleanButtonTip`), the button's AcceleratorKey is the same keys, and the
+  tray item shows them at its right. The window's own Ctrl+1/2/3 and Ctrl+F are not taken while the box has focus.
+- **Reset (P16, reset only).** An OutlineButton "Reset" (name "Reset settings") opens an inline GroupPanel, not a
+  dialog: "Reset all settings? This cannot be undone." with "Reset settings" and "Cancel"; focus goes to Cancel, Esc
+  or focus leaving the panel cancels. A reset keeps Start with Windows (the logon task is its record), ends any pause
+  (auto-clean goes off), clears the shortcut and notifications, saves, re-applies the theme, and says "Settings were
+  reset." in a polite live line, adding that services Power Clean stopped stay stopped when there are any. Logged as
+  `settings-reset`.
+- **Read-out status lines (U9).** Each status line sits in an `app:LiveRegion`: the sample error bar, the startup
+  summary, error, empty state and search count, Power Clean's status and the new shortcut and reset lines are Polite;
+  the restart failure and the settings save failure are Assertive. `AnnounceGate` reads a line only when its text is
+  new since it was last hidden, so a sample error repeated every 2 s is read once. The search count ("12 shown",
+  "Nothing matches") shows only while the list is narrowed and is read 300 ms after typing stops.
+
+Verified: unit and static tests only (tests/HotkeyResetTests.cs: parsing, recorder decisions, the 60 s floor, the
+binding state machine with a fake registrar, notice rules and gate, settings round trip and reset, announce gate and
+the XAML live regions and names). Mutation checks: a one-modifier rule and a zero floor each fail the tests. Not
+verified: no run of the app, so no real RegisterHotKey, no real notification, no Narrator pass, no render of the new
+rows, no high contrast.
+
 ## Website (download page), started 2026-11-17
 
 Owner's pick, in their words: "Instrument is good but colour palette not so good, try obsidian alongside
