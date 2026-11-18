@@ -287,7 +287,7 @@ namespace RamOptimiser.Tests
             var plan = new List<ServiceAction>
             {
                 new ServiceAction { Name = "A", Label = "Alpha" },
-                new ServiceAction { Name = "S", Label = "Skipped", Message = "not running" },
+                new ServiceAction { Name = "S", Label = "Skipped", Outcome = ServiceOutcome.SkippedNotRunning, Message = "not running" },
                 new ServiceAction { Name = "B", Label = "Beta" },
                 new ServiceAction { Name = "C", Label = "Gamma" },
             };

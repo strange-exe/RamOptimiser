@@ -150,14 +150,15 @@ namespace RamOptimiser.App
         RadioButton showApps, showServices;
         Run appsCount, servicesCount;
         TextBox startupSearch;
-        Button clearSearchButton;
+        Button clearSearchButton, openStartupSettings;
         ComboBox verdictBox, sortBox;
         List<StartupApp> startupApps;
         List<StartupService> startupServices;
         /// <summary>Loading, ready, or applying a change (and the reload after it): switches work only when ready.</summary>
         readonly StartupFlow startupFlow = new StartupFlow();
         /// <summary>Errors shown under the row that failed, by row key, until dismissed or the row changes again.</summary>
-        readonly Dictionary<string, KeyValuePair<string, string>> rowErrors = new Dictionary<string, KeyValuePair<string, string>>();
+        /// <summary>The error or note under a Startup row, by row key (E13): shown until dismissed or the next change.</summary>
+        readonly Dictionary<string, RowNote> rowErrors = new Dictionary<string, RowNote>();
         /// <summary>Row errors already read out, so a rebuild (each search keystroke) does not repeat them.</summary>
         readonly AnnouncedErrors announcedErrors = new AnnouncedErrors();
         /// <summary>Tag of the control to focus after the list is rebuilt (a row's switch, by key).</summary>
@@ -532,6 +533,7 @@ namespace RamOptimiser.App
             startupSummary = F<TextBlock>("StartupSummary");
             startupSummaryRegion = F<LiveRegion>("StartupSummaryRegion");
             startupNote = F<TextBlock>("StartupNote");
+            openStartupSettings = F<Button>("OpenStartupSettings");
             startupError = F<TextBlock>("StartupError");
             startupErrorRegion = F<LiveRegion>("StartupErrorRegion");
             startupEmptyRegion = F<LiveRegion>("StartupEmptyRegion");
@@ -659,6 +661,7 @@ namespace RamOptimiser.App
                 startupSearch.Text = "";
                 startupSearch.Focus();
             };
+            openStartupSettings.Click += delegate { OpenStartupSettings(); };
             // U16: Esc clears a search that has text and keeps focus in the box; on an empty box the key is left alone.
             startupSearch.PreviewKeyDown += (s, e) =>
             {
@@ -866,10 +869,18 @@ namespace RamOptimiser.App
             ThreadPool.QueueUserWorkItem(delegate
             {
                 List<StartupApp> apps = null; List<StartupService> services = null; string failure = null;
-                try { apps = StartupApps.Query(); }
+                // E24: packaged and run-once rows too, shown read-only.
+                try { apps = StartupApps.Query(true); }
                 catch (Exception ex) { failure = AppText.Plain(ex.Message, "unknown error"); }
                 try { services = StartupServices.Query(); }
                 catch (Exception ex) { failure = failure ?? AppText.Plain(ex.Message, "unknown error"); }
+                // E12: after the read, so this one load still shows "turned back on" or "turned off elsewhere";
+                // then the records the app can no longer act on are removed. Elevated only; the count is not shown.
+                if (elevated)
+                {
+                    try { StartupServices.TidyJournal(); }
+                    catch (Exception ex) { ErrorLog.TryWrite(ErrorLog.DefaultPath, "could not tidy the service startup journal", ex); }
+                }
                 Post(() =>
                 {
                     startupFlow.Loaded();
@@ -892,6 +903,8 @@ namespace RamOptimiser.App
         sealed class StartupItem
         {
             public string Key, Label, Name, Detail, LockText;
+            /// <summary>"Look closer" when the program's signature does not back it (E26); else null.</summary>
+            public string Marker;
             public Geometry LockGlyph;
             public Verdict Verdict;
             public bool IsService, On, ByApp;
@@ -906,15 +919,20 @@ namespace RamOptimiser.App
                 foreach (StartupApp a in startupApps)
                 {
                     StartupApp target = a;
+                    string key = AppText.StartupAppKey(a);
                     var it = new StartupItem
                     {
-                        Key = "app|" + a.Name, Name = a.Name, IsService = false, On = startupFlow.ShowsOn("app|" + a.Name, a.Enabled),
+                        Key = key, Name = a.Name, IsService = false, On = startupFlow.ShowsOn(key, a.Enabled),
                         Verdict = a.Known == null ? Verdict.Unknown : a.Known.Verdict,
-                        Label = a.Known != null ? a.Known.Label : a.Name, Detail = AppText.AppDetail(a)
+                        Label = a.Known != null ? a.Known.Label : a.Name, Detail = AppText.AppDetail(a),
+                        Marker = AppText.LookCloser(a),
+                        LockText = AppText.AppLock(a, elevated)
                     };
-                    if (it.Verdict == Verdict.Keep) { it.LockText = "Left on"; it.LockGlyph = Icon("IconShield"); }
-                    else if (a.NeedsAdmin && !elevated) { it.LockText = "Needs admin"; it.LockGlyph = Icon("IconLock"); }
-                    it.Apply = on => SetAppEnabled(target, it, on);
+                    string glyph = AppText.AppLockGlyph(a, elevated);
+                    if (glyph != null) it.LockGlyph = Icon(glyph);
+                    // E24: a packaged or run-once row is read-only. AppLock always locks it, and it gets no switch
+                    // action either, so nothing here can reach SetEnabled's refusal.
+                    it.Apply = a.CanToggle ? (Action<bool>)(on => SetAppEnabled(target, it, on)) : null;
                     items.Add(it);
                 }
             }
@@ -952,9 +970,9 @@ namespace RamOptimiser.App
             }
             startupLoadingPanel.Visibility = Visibility.Collapsed;
 
-            int appsOn = 0, servicesOn = 0, safeOn = 0;
-            foreach (StartupApp a in startupApps)
-                if (a.Enabled) { appsOn++; if (a.Known != null && a.Known.Verdict == Verdict.Safe) safeOn++; }
+            int appsOn, servicesOn = 0, safeOn;
+            // E24: packaged rows count as apps on, run-once rows never do.
+            AppText.CountStartupApps(startupApps, out appsOn, out safeOn);
             foreach (StartupService s in startupServices)
                 if (s.CanDisable && s.Known != null)
                 {
@@ -972,6 +990,7 @@ namespace RamOptimiser.App
             bool apps = showApps.IsChecked == true;
             startupNote.Text = apps ? AppText.StartupAppsNote : AppText.StartupServicesNote;
             if (!elevated) startupNote.Text += " " + (apps ? "Apps for every user need administrator rights." : AppText.ServicesNeedAdmin);
+            openStartupSettings.Visibility = AppText.ShowsStartupSettings(apps, startupApps) ? Visibility.Visible : Visibility.Collapsed;
 
             List<StartupItem> all = CurrentItems(apps);
             var filter = (VerdictFilter)((ComboBoxItem)verdictBox.SelectedItem).Tag;
@@ -1136,6 +1155,18 @@ namespace RamOptimiser.App
                 tag.SetResourceReference(FrameworkElement.StyleProperty, "Tag");
                 nameLine.Children.Add(tag);
             }
+            if (it.Marker != null)
+            {
+                // E26: a glyph plus words, never colour alone; the detail line under it says what was found.
+                var markerLine = new StackPanel { Orientation = Orientation.Horizontal };
+                Path markerGlyph = IconPath("IconWarn", "Caution");
+                markerGlyph.Margin = new Thickness(0, 0, 4, 0);
+                markerLine.Children.Add(markerGlyph);
+                markerLine.Children.Add(new TextBlock { Text = it.Marker, FontSize = 12, VerticalAlignment = VerticalAlignment.Center });
+                var marker = new Border { Child = markerLine };
+                marker.SetResourceReference(FrameworkElement.StyleProperty, "Tag");
+                nameLine.Children.Add(marker);
+            }
             text.Children.Add(nameLine);
             var verdictLine = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 0) };
             Path vGlyph = IconPath(glyph, brush);
@@ -1151,7 +1182,7 @@ namespace RamOptimiser.App
             text.Children.Add(detail);
             grid.Children.Add(text);
 
-            string switchName = it.Label + ", starts with Windows" + (it.ByApp ? ". Turned off by this app" : "");
+            string switchName = AppText.StartupSwitchName(it.Label, it.ByApp, it.Marker);
             if (it.LockText == null)
             {
                 var box = new CheckBox { IsChecked = it.On, Tag = it.Key + "|sw", VerticalAlignment = VerticalAlignment.Center };
@@ -1191,34 +1222,37 @@ namespace RamOptimiser.App
                 grid.Children.Add(lockedRow);
             }
 
-            KeyValuePair<string, string> error;
-            if (rowErrors.TryGetValue(it.Key, out error)) stack.Children.Add(ErrorBar(it.Key, error.Key, error.Value));
+            RowNote note;
+            if (rowErrors.TryGetValue(it.Key, out note)) stack.Children.Add(ErrorBar(it.Key, note));
             return row;
         }
 
-        /// <summary>The error under the row that failed: icon, title, reason and a dismiss button; announced politely.</summary>
-        UIElement ErrorBar(string key, string title, string message)
+        /// <summary>
+        /// Under the row that changed: an error (nothing changed) or a note (it changed only in part), each with its
+        /// glyph, title, words and a dismiss button; announced politely, once.
+        /// </summary>
+        UIElement ErrorBar(string key, RowNote note)
         {
             var bar = new LiveRegion { Margin = new Thickness(12, 0, 12, 10) };
-            bar.SetResourceReference(FrameworkElement.StyleProperty, "InfoBar");
+            bar.SetResourceReference(FrameworkElement.StyleProperty, note.BarStyle);
             AutomationProperties.SetLiveSetting(bar, AutomationLiveSetting.Polite);
-            AutomationProperties.SetName(bar, title + ". " + message);
+            AutomationProperties.SetName(bar, note.Spoken);
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            Path icon = IconPath("IconError", "Danger");
+            Path icon = IconPath(note.Glyph, note.Stroke);
             icon.VerticalAlignment = VerticalAlignment.Top;
             icon.Margin = new Thickness(0, 1, 8, 0);
             grid.Children.Add(icon);
             var words = new StackPanel();
-            words.Children.Add(new TextBlock { Text = title, FontSize = 13, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
-            words.Children.Add(new TextBlock { Text = message, FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) });
+            words.Children.Add(new TextBlock { Text = note.Title, FontSize = 13, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+            words.Children.Add(new TextBlock { Text = note.Text, FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) });
             Grid.SetColumn(words, 1);
             grid.Children.Add(words);
             var dismiss = new Button { Content = IconPath("IconClose", "Text"), Tag = key + "|err", Margin = new Thickness(4, -4, 0, 0), VerticalAlignment = VerticalAlignment.Top };
             dismiss.SetResourceReference(FrameworkElement.StyleProperty, "SubtleButton");
-            AutomationProperties.SetName(dismiss, "Dismiss error");
+            AutomationProperties.SetName(dismiss, note.DismissName);
             dismiss.ToolTip = "Dismiss";
             dismiss.Click += delegate
             {
@@ -1230,7 +1264,7 @@ namespace RamOptimiser.App
             grid.Children.Add(dismiss);
             bar.Child = grid;
             // Read out when the error first shows, not again on each rebuild of the list.
-            bar.Loaded += delegate { if (announcedErrors.ShouldAnnounce(key, title + ". " + message)) bar.Announce(); };
+            bar.Loaded += delegate { if (announcedErrors.ShouldAnnounce(key, note.Spoken)) bar.Announce(); };
             return bar;
         }
 
@@ -1259,8 +1293,9 @@ namespace RamOptimiser.App
             catch (UnauthorizedAccessException) { failure = AppText.NeedsAdmin; }
             catch (System.Security.SecurityException) { failure = AppText.NeedsAdmin; }
             catch (IOException ex) { failure = AppText.Plain(ex.Message, "could not be changed"); }
-            if (failure != null)
-                rowErrors[it.Key] = new KeyValuePair<string, string>(AppText.ChangeFailedTitle(it.Label, on), AppText.ChangeFailedText(failure, on));
+            // A packaged or run-once row has no switch; the engine refuses one anyway.
+            catch (InvalidOperationException ex) { failure = AppText.Plain(ex.Message, "could not be changed"); }
+            if (failure != null) rowErrors[it.Key] = AppText.AppChangeError(it.Label, on, failure);
             refocusTag = it.Key + "|sw";
             BuildStartupList();
         }
@@ -1280,13 +1315,31 @@ namespace RamOptimiser.App
             {
                 StartupChange r;
                 try { r = on ? StartupServices.Reenable(svc.Name) : StartupServices.Disable(svc.Name); }
-                catch (Exception ex) { r = new StartupChange { Ok = false, Message = AppText.Plain(ex.Message, "unknown error") }; }
+                catch (Exception ex) { r = new StartupChange { Kind = StartupChangeKind.Failed, Detail = ex.Message }; }
                 Post(() =>
                 {
-                    if (!r.Ok) rowErrors[it.Key] = new KeyValuePair<string, string>(AppText.ChangeFailedTitle(it.Label, on), AppText.ChangeFailedText(r.Message, on));
+                    // E13: an error when nothing changed, a note when it changed only in part, nothing when it went as asked.
+                    RowNote note = AppText.ServiceChangeNote(r, it.Label, on);
+                    if (note != null) rowErrors[it.Key] = note;
                     QueryStartup(); // still Applying: Loaded() after the reload makes the switches work again
                 });
             });
+        }
+
+        /// <summary>
+        /// Opens Settings, Apps, Startup, where packaged apps are turned on or off (E24). The URI is a fixed constant
+        /// with no user data in it, so nothing from a row reaches the shell.
+        /// </summary>
+        void OpenStartupSettings()
+        {
+            try
+            {
+                using (System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(AppText.StartupSettingsUri) { UseShellExecute = true })) { }
+            }
+            catch (Exception ex)
+            {
+                ShowStatus(startupErrorRegion, startupError, "Settings could not be opened: " + AppText.Plain(ex.Message, "unknown error") + ".");
+            }
         }
 
         // ------------------------------------------------------------------ elevation

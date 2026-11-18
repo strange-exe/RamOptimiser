@@ -217,19 +217,10 @@ namespace RamOptimiser
             return IsFailure(o) || (IsSkip(o) && o != ServiceOutcome.SkippedNotRunning);
         }
 
-        /// <summary>
-        /// The action's outcome. One built by an older caller with only a reason and no outcome reads as a skip
-        /// (SkippedNotRunning for the old "not running" reason), as it did before outcomes existed; every action
-        /// this app's own code builds has its outcome set. Null is Pending.
-        /// TEMPORARY (E13): the text branch exists only for tests that still build actions without an outcome
-        /// (AppTests.cs, CleanLogTests.cs, CleanControlTests.cs). Remove it, and the Stopped, Started and Failed
-        /// setters below, once package 6A moves those tests to Outcome; no logic may branch on the English text.
-        /// </summary>
+        /// <summary>The action's outcome; no action is Pending. Never read from the message text.</summary>
         public static ServiceOutcome Of(ServiceAction a)
         {
-            if (a == null) return ServiceOutcome.Pending;
-            if (a.Outcome != ServiceOutcome.Pending || a.Message == null) return a.Outcome;
-            return a.Message == ServiceTrimmer.NotRunning ? ServiceOutcome.SkippedNotRunning : ServiceOutcome.SkippedCannotStop;
+            return a == null ? ServiceOutcome.Pending : a.Outcome;
         }
     }
 
@@ -241,40 +232,14 @@ namespace RamOptimiser
         /// <summary>The detail behind the outcome: the Win32 reason, the dependents, the timeout. Null when it worked.</summary>
         public string Message;
 
-        /// <summary>Derived from Outcome. Setting it is kept for older callers: true records Stopped.</summary>
-        public bool Stopped
-        {
-            get { return Outcome == ServiceOutcome.Stopped; }
-            set { SetFlag(ServiceOutcome.Stopped, value); }
-        }
+        /// <summary>Derived from Outcome.</summary>
+        public bool Stopped { get { return Outcome == ServiceOutcome.Stopped; } }
 
-        /// <summary>Derived from Outcome. Setting it is kept for older callers: true records Started.</summary>
-        public bool Started
-        {
-            get { return Outcome == ServiceOutcome.Started; }
-            set { SetFlag(ServiceOutcome.Started, value); }
-        }
+        /// <summary>Derived from Outcome.</summary>
+        public bool Started { get { return Outcome == ServiceOutcome.Started; } }
 
-        /// <summary>
-        /// A stop or start was tried and did not finish; a planned skip is not a failure. Derived from Outcome.
-        /// Setting it is kept for older callers: true records StopFailed unless a failure is already recorded,
-        /// false clears a failure.
-        /// </summary>
-        public bool Failed
-        {
-            get { return ServiceOutcomes.IsFailure(Outcome); }
-            set
-            {
-                if (value && !ServiceOutcomes.IsFailure(Outcome)) Outcome = ServiceOutcome.StopFailed;
-                else if (!value && ServiceOutcomes.IsFailure(Outcome)) Outcome = ServiceOutcome.Pending;
-            }
-        }
-
-        void SetFlag(ServiceOutcome flag, bool value)
-        {
-            if (value) Outcome = flag;
-            else if (Outcome == flag) Outcome = ServiceOutcome.Pending;
-        }
+        /// <summary>A stop or start was tried and did not finish; a planned skip is not a failure. Derived from Outcome.</summary>
+        public bool Failed { get { return ServiceOutcomes.IsFailure(Outcome); } }
     }
 
     /// <summary>

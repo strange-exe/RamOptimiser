@@ -268,7 +268,9 @@ namespace RamOptimiser.Tests
 
         static ServiceAction Done(string label, bool started, string message)
         {
-            return new ServiceAction { Name = label, Label = label, Started = started, Failed = !started && message != "no longer installed", Message = message };
+            ServiceOutcome outcome = started ? ServiceOutcome.Started
+                : message == "no longer installed" ? ServiceOutcome.SkippedNotInstalled : ServiceOutcome.StartFailed;
+            return new ServiceAction { Name = label, Label = label, Outcome = outcome, Message = message };
         }
 
         static void RecoveryTests()
@@ -358,8 +360,9 @@ namespace RamOptimiser.Tests
             Check("verdict words", AppText.VerdictText(Verdict.Safe, false) == "Safe to turn off"
                 && AppText.VerdictText(Verdict.Keep, true) == "Keep on"
                 && AppText.VerdictText(Verdict.Unknown, true).StartsWith("Not in the app's list"));
-            var app = new StartupApp { Source = StartupSource.MachineRun, Name = "X", Publisher = "Contoso" };
-            Check("app detail: unknown publisher line", AppText.AppDetail(app) == "From Contoso. Starts for every user");
+            // E26: the line comes from AppText.PublisherLine; an unchecked file keeps today's "From ..." wording.
+            var app = new StartupApp { Source = StartupSource.MachineRun, Name = "X", Publisher = "Contoso", ClaimedCompany = "Contoso" };
+            Check("app detail: unknown publisher line", AppText.AppDetail(app) == "From Contoso. Starts for every user", AppText.AppDetail(app));
             app.Known = StartupKnowledge.FindApp("Discord.exe");
             Check("app detail: known", AppText.AppDetail(app).StartsWith("Opens the Discord") && AppText.AppDetail(app).Contains("If off: "));
             var svc = new StartupService { Name = "ArmouryCrateService", Mode = StartMode.Automatic, Running = true, SharedWith = 1,
@@ -368,7 +371,7 @@ namespace RamOptimiser.Tests
             svc.Protected = true;
             Check("service detail: protected says why", AppText.ServiceDetail(svc).Contains("Windows protects this service"));
             svc.Protected = false;
-            svc.DisabledByApp = true;
+            svc.Journal = JournalState.OffByApp;
             Check("service detail: turned off", AppText.ServiceDetail(svc).Contains("Turned off by this app"));
 
             // Journal entries only count while the service is still at the Manual start this app set.
@@ -388,7 +391,7 @@ namespace RamOptimiser.Tests
             KnownItem discord = StartupKnowledge.FindApp("Discord.exe");
             Check("trust: safe match kept anywhere", StartupApps.TrustedKnown(discord, @"C:\Users\x\Discord.exe", roots) == discord);
             app = new StartupApp { Source = StartupSource.UserRun, Name = "Discord", ExePath = @"C:\Users\x\Discord.exe", Known = discord };
-            Check("app detail: known shows the real file", AppText.AppDetail(app).EndsWith("Runs C:\\Users\\x\\Discord.exe"), AppText.AppDetail(app));
+            Check("app detail: known shows the real file", AppText.AppDetail(app).Contains(". Runs C:\\Users\\x\\Discord.exe"), AppText.AppDetail(app));
 
             // Per-user approval writes must land in this user's own hive.
             const string sub = @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
@@ -454,8 +457,9 @@ namespace RamOptimiser.Tests
                 new ServiceState { Name = "WinDefend", Rule = ServiceCatalog.Find("MapsBroker"), Running = true, CanStop = true } },
                 new[] { "MapsBroker" }).Count == 0);
             Check("summary: one stopped plus skip", ServiceTrimmer.Summarise(new List<ServiceAction> {
-                new ServiceAction { Label = "A", Stopped = true }, new ServiceAction { Label = "B", Message = "not running" },
-                new ServiceAction { Label = "C", Message = "needed by X" } }) == "stopped 1 service; C: needed by X");
+                new ServiceAction { Label = "A", Outcome = ServiceOutcome.Stopped },
+                new ServiceAction { Label = "B", Outcome = ServiceOutcome.SkippedNotRunning, Message = "not running" },
+                new ServiceAction { Label = "C", Outcome = ServiceOutcome.SkippedDependents, Message = "needed by X" } }) == "stopped 1 service; C: needed by X");
 
             // Settings: round trip, defaults, tampered file cannot widen the list.
             var s = new AppSettings();
@@ -1020,7 +1024,8 @@ namespace RamOptimiser.Tests
             ns.AddNamespace("app", "clr-namespace:RamOptimiser.App;assembly=RamOptimiser");
             ns.AddNamespace("x", "http://schemas.microsoft.com/winfx/2006/xaml");
             foreach (string[] g in new[] { new[] { "TopList", "Apps using the most memory" }, new[] { "PowerList", "Services to stop" },
-                         new[] { "StartupLoading", "Loading startup items" }, new[] { "StartupList", "Startup items" } })
+                         new[] { "StartupLoading", "Loading startup items" }, new[] { "StartupList", "Startup items" },
+                         new[] { "RecentCleanRows", "Recent cleans" }, new[] { "ActivityRows", "Recent activity" } })
             {
                 var e = docs["MainWindow.xaml"].SelectSingleNode("//app:GroupPanel[@x:Name='" + g[0] + "']", ns) as XmlElement;
                 Check("named group " + g[0] + " is a GroupPanel", e != null && e.GetAttribute("AutomationProperties.Name") == g[1],

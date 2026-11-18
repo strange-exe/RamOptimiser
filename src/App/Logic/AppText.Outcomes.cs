@@ -1,6 +1,6 @@
-// Wording for typed outcomes (E13) and the service-startup journal (E12), engine side. Pure, so the tests
-// compile it. Nothing calls these yet: package 6A shows partial Startup-tab changes as a note under the row,
-// feeds StartupChangeReason to ChangeFailedText, and adds JournalNote to ServiceDetail.
+// Wording for typed outcomes (E13) and the service-startup journal (E12). Pure, so the tests compile it.
+// AppText.ServiceChangeNote turns a change into the error or note under its Startup row, and ServiceDetail adds
+// JournalNote after the start label.
 namespace RamOptimiser.App
 {
     public static partial class AppText

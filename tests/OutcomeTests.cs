@@ -28,7 +28,6 @@ namespace RamOptimiser.Tests
             SummaryTests();
             PlanTests();
             StopPlannedTests();
-            LegacyActionTests();
             StartupChangeTests();
             StartupWordingTests();
             JournalTests();
@@ -191,31 +190,7 @@ namespace RamOptimiser.Tests
             Check("stop: a typed skip is left alone", calls == 0 && plan[0].Outcome == ServiceOutcome.SkippedCannotStop);
         }
 
-        static void LegacyActionTests()
-        {
-            // Older callers set the flags; they now write the outcome.
-            var a = new ServiceAction { Stopped = true };
-            Check("legacy: Stopped = true records Stopped", a.Outcome == ServiceOutcome.Stopped);
-            a = new ServiceAction { Started = true, Failed = false };
-            Check("legacy: Failed = false keeps a start", a.Outcome == ServiceOutcome.Started && !a.Failed);
-            a = new ServiceAction { Failed = true, Message = "access denied" };
-            Check("legacy: Failed = true is a failure", a.Failed && ServiceOutcomes.IsFailure(a.Outcome));
-            a = new ServiceAction { Outcome = ServiceOutcome.StartTimedOut, Failed = true };
-            Check("legacy: Failed = true keeps a typed failure", a.Outcome == ServiceOutcome.StartTimedOut);
-            a = new ServiceAction { Stopped = true };
-            a.Stopped = false;
-            Check("legacy: Stopped = false clears it", a.Outcome == ServiceOutcome.Pending);
-
-            // An action built with only a reason (no outcome) still reads as the skip it describes.
-            Check("legacy: a pending action with a reason is a skip",
-                ServiceOutcomes.Of(new ServiceAction { Message = "needed by X" }) == ServiceOutcome.SkippedCannotStop);
-            Check("legacy: the old not-running reason",
-                ServiceOutcomes.Of(new ServiceAction { Message = "not running" }) == ServiceOutcome.SkippedNotRunning);
-            Check("legacy: a typed outcome wins over its text",
-                ServiceOutcomes.Of(new ServiceAction { Outcome = ServiceOutcome.SkippedCannotStop, Message = "not running" }) == ServiceOutcome.SkippedCannotStop);
-            Check("legacy: no reason stays pending", ServiceOutcomes.Of(new ServiceAction()) == ServiceOutcome.Pending);
-            Check("legacy: no action is pending", ServiceOutcomes.Of(null) == ServiceOutcome.Pending);
-        }
+        // The legacy flag setters and the text fallback were removed in package 6A; StartupTabTests checks they are gone.
 
         // ---------------------------------------------------------------- startup changes
 
@@ -231,12 +206,11 @@ namespace RamOptimiser.Tests
             }
             Check("change: 16 kinds (15 plus the delay not restored)", AllKinds().Length == 16, AllKinds().Length.ToString());
 
-            // AppShell's catch still builds { Ok = false, Message = ... }; that is a Failed change with that detail.
-            var legacy = new StartupChange { Ok = false, Message = "boom" };
-            Check("change: legacy Ok = false is Failed", legacy.Kind == StartupChangeKind.Failed && !legacy.Ok && legacy.Message == "boom"
-                && legacy.Detail == "boom", legacy.Kind + " " + legacy.Message);
+            // AppShell's catch builds { Kind = Failed, Detail }; that is a failure carrying that detail.
+            var thrown = new StartupChange { Kind = StartupChangeKind.Failed, Detail = "boom" };
+            Check("change: a thrown change is Failed", !thrown.Ok && thrown.Message == "boom", thrown.Kind + " " + thrown.Message);
 
-            // The display-only Message keeps today's words, so the error bar reads as before until 6A.
+            // The display-only Message keeps the refusal words StartupChangeReason gives the error bar.
             foreach (StartupChangeKind k in notOk)
             {
                 var c = new StartupChange { Kind = k, Detail = k == StartupChangeKind.Failed ? "The service did not respond" : null };
@@ -337,11 +311,6 @@ namespace RamOptimiser.Tests
             Check("service: disabled by app derives from the journal", svc.DisabledByApp);
             svc.Journal = JournalState.TurnedBackOn;
             Check("service: turned back on is not disabled by app", !svc.DisabledByApp);
-            svc = new StartupService();
-            svc.DisabledByApp = true;
-            Check("service: legacy DisabledByApp = true is off by app", svc.Journal == JournalState.OffByApp);
-            svc.DisabledByApp = false;
-            Check("service: legacy DisabledByApp = false clears it", svc.Journal == JournalState.Untouched);
 
             Check("journal note: turned back on", AppText.JournalNote(JournalState.TurnedBackOn)
                 == "Windows or an updater turned it back on after this app turned it off");

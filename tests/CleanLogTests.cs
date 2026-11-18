@@ -159,8 +159,8 @@ namespace RamOptimiser.Tests
             r.Results.Add(new AreaResult { Area = Areas.VolumeCache, Ok = true, Partial = true, Message = "C: flushed", Duration = TimeSpan.FromMilliseconds(5) });
             r.Results.Add(new AreaResult { Area = Areas.StandbyList, Skipped = true, Message = "needs admin" });
             r.Results.Add(new AreaResult { Area = Areas.RegistryCache, Ok = false, Message = "line one\r\nline two" });
-            r.Services.Add(new ServiceAction { Name = "SysMain", Stopped = true });
-            r.Services.Add(new ServiceAction { Name = "Spooler", Failed = true, Message = "access denied" });
+            r.Services.Add(new ServiceAction { Name = "SysMain", Outcome = ServiceOutcome.Stopped });
+            r.Services.Add(new ServiceAction { Name = "Spooler", Outcome = ServiceOutcome.StopFailed, Message = "access denied" });
             return r;
         }
 
@@ -265,7 +265,7 @@ namespace RamOptimiser.Tests
                 Encoding.UTF8.GetByteCount(dropped) + " bytes");
 
             CleanReport manyServices = SampleReport();
-            for (int i = 0; i < 60; i++) manyServices.Services.Add(new ServiceAction { Name = new string('s', 200), Stopped = true });
+            for (int i = 0; i < 60; i++) manyServices.Services.Add(new ServiceAction { Name = new string('s', 200), Outcome = ServiceOutcome.Stopped });
             string noServices = CleanLog.FormatClean(manyServices, "gui", "manual", "e", When);
             var so = Parse(noServices);
             Check("log: then services", so != null && Encoding.UTF8.GetByteCount(noServices) <= CleanLog.MaxLineBytes

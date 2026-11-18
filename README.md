@@ -54,6 +54,17 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
 - **Startup** lists apps and services that start with Windows, with a verdict for each (safe to turn off, turn off with
   care, keep on), a search box (Ctrl+F; Esc clears it), a filter and a sort. Rows Windows protects, or that need admin
   rights, say so instead of showing a switch. While a service change applies, the other switches wait until it finishes.
+  - Store apps that start with Windows (new Teams, Phone Link, WhatsApp and others) are listed too, read-only:
+    **Open Startup settings** goes to Settings, Apps, Startup, where Windows turns them on or off. RunOnce entries
+    (a program set to run once at the next sign-in) are listed read-only and never removed.
+  - Each app's details say who signed its program, from its Authenticode signature checked on this PC with no
+    network access, and whether that matches the company the file names. An unsigned program, a signature that
+    does not check out, or a signer that differs from the named company gets a **Look closer** marker. The marker
+    is information only: it never locks or unlocks a switch. Windows' own files, which are signed through a
+    catalog, read "signature not checked".
+  - When a service change works only in part (for example, it won't start with Windows but other services keep it
+    running until a restart), a note under the row says so. When Windows or an updater turns a service back on
+    after this app turned it off, its details say so once; with admin rights the app then forgets its record.
 - Opened without admin rights, the app shows status only, plus a **Restart as administrator** link. The tray menu
   offers the same restart and says when auto-clean is paused for lack of admin rights.
 - Auto-clean can be paused for 1 hour from the tray menu (**Pause auto-clean for 1 hour**, then **Resume

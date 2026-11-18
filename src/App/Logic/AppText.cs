@@ -25,6 +25,25 @@ namespace RamOptimiser.App
         public string Time;
     }
 
+    /// <summary>
+    /// What shows under a Startup row after a change (E13): an error when nothing changed (a refusal or a failure),
+    /// or a neutral note when the change worked only in part. Always a glyph plus words, never colour alone.
+    /// </summary>
+    public sealed class RowNote
+    {
+        public string Title, Text;
+        public bool IsError;
+        /// <summary>The Styles.xaml geometry: IconError for an error, IconWarn for a note.</summary>
+        public string Glyph { get { return IsError ? "IconError" : "IconWarn"; } }
+        /// <summary>The glyph's brush token.</summary>
+        public string Stroke { get { return IsError ? "Danger" : "Caution"; } }
+        /// <summary>The bar's style: the danger-tinted InfoBar, or the info-tinted NoticeBar.</summary>
+        public string BarStyle { get { return IsError ? "InfoBar" : "NoticeBar"; } }
+        public string DismissName { get { return IsError ? "Dismiss error" : "Dismiss note"; } }
+        /// <summary>The bar's accessible name, read out once when it first shows.</summary>
+        public string Spoken { get { return Title + ". " + Text; } }
+    }
+
     /// <summary>Where the user paused auto-clean, for the bar's second line (2A); Unknown says nothing.</summary>
     public enum PauseOrigin { Unknown, Tray, Settings, Restored }
 
@@ -805,8 +824,18 @@ namespace RamOptimiser.App
             }
         }
 
-        /// <summary>Sentences joined with ". ": purpose, what turning it off does, and the facts the row knows.</summary>
+        /// <summary>As below, with the real Windows folder.</summary>
         public static string AppDetail(StartupApp a)
+        {
+            return AppDetail(a, Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+        }
+
+        /// <summary>
+        /// Sentences joined with ". ": purpose, what turning it off does and which file runs (for a row the built-in
+        /// list knows), then who signed it (PublisherLine: a company the file only claims never reads as its
+        /// publisher), "Starts for every user", and why a packaged or run-once row has no switch here. Pure.
+        /// </summary>
+        public static string AppDetail(StartupApp a, string windowsFolder)
         {
             var parts = new List<string>();
             if (a.Known != null)
@@ -816,9 +845,133 @@ namespace RamOptimiser.App
                 // The list matches by file name only, so say which file this row really runs.
                 parts.Add("Runs " + (a.ExePath ?? a.Name));
             }
-            else parts.Add(a.Publisher != null ? "From " + a.Publisher : "Publisher unknown");
+            parts.Add(PublisherLine(a, windowsFolder));
             if (a.NeedsAdmin) parts.Add("Starts for every user");
+            string source = StartupSourceDetail(a);
+            if (source != null) parts.Add(source);
             return string.Join(". ", parts.ToArray());
+        }
+
+        /// <summary>The marker beside a row's name whose signature does not back it (E26). Words plus a glyph.</summary>
+        public const string LookCloserText = "Look closer";
+
+        /// <summary>As below, with the real Windows folder.</summary>
+        public static string LookCloser(StartupApp a)
+        {
+            return LookCloser(a, Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+        }
+
+        /// <summary>
+        /// LookCloserText when the row's program is unsigned (outside Windows' own files, which are catalog-signed and
+        /// read "not checked"), its signature does not check out or is blocked, or it is signed by a company other than
+        /// the one the file names; else null. A row that was not checked (a packaged app, a user's own shortcut, a
+        /// missing file) gets no marker: there is nothing to say about it. Display only: never part of a Keep or switch
+        /// decision. Pure.
+        /// </summary>
+        public static string LookCloser(StartupApp a, string windowsFolder)
+        {
+            if (a == null) return null;
+            switch (a.Signature)
+            {
+                case SignatureState.Signed:
+                    bool mismatch = !string.IsNullOrEmpty(a.Signer) && !string.IsNullOrEmpty(a.ClaimedCompany)
+                        && !Signature.SameCompany(a.Signer, a.ClaimedCompany);
+                    return mismatch ? LookCloserText : null;
+                case SignatureState.Unsigned:
+                    bool windowsFile = a.SystemOwned && StartupApps.IsInside(a.ExePath, windowsFolder);
+                    return windowsFile ? null : LookCloserText;
+                case SignatureState.Invalid:
+                case SignatureState.Distrusted:
+                    return LookCloserText;
+                default:
+                    return null;
+            }
+        }
+
+        /// <summary>
+        /// A startup switch's accessible name: "Steam, starts with Windows", plus ". Turned off by this app" and
+        /// ". Look closer: see who signed it" when they apply, so the marker is never visual only. Pure.
+        /// </summary>
+        public static string StartupSwitchName(string label, bool byApp, string marker)
+        {
+            return label + ", starts with Windows" + (byApp ? ". Turned off by this app" : "")
+                + (marker != null ? ". " + marker + ": see who signed it" : "");
+        }
+
+        /// <summary>
+        /// The words in place of an app row's switch, or null for a row with one. First match wins: a row with no
+        /// reversible switch ("In Settings", "Runs once"), a program the list says to keep ("Left on"), an every-user
+        /// entry without admin rights ("Needs admin"). Pure.
+        /// </summary>
+        public static string AppLock(StartupApp a, bool elevated)
+        {
+            if (a == null) return null;
+            string source = StartupSourceLock(a);
+            if (source != null) return source;
+            if (a.Known != null && a.Known.Verdict == Verdict.Keep) return "Left on";
+            if (a.NeedsAdmin && !elevated) return "Needs admin";
+            return null;
+        }
+
+        /// <summary>The glyph beside AppLock's words: a shield for Left on, a lock for Needs admin, none for the source locks.</summary>
+        public static string AppLockGlyph(StartupApp a, bool elevated)
+        {
+            if (a == null || StartupSourceLock(a) != null) return null;
+            if (a.Known != null && a.Known.Verdict == Verdict.Keep) return "IconShield";
+            if (a.NeedsAdmin && !elevated) return "IconLock";
+            return null;
+        }
+
+        /// <summary>
+        /// The app half of the Startup summary: apps on (CountsAsAppOn: packaged rows count, run-once rows never), and
+        /// of those, the ones safe to turn off that have a switch here (a packaged app is turned off in Settings). Pure.
+        /// </summary>
+        public static void CountStartupApps(IList<StartupApp> apps, out int on, out int safeOn)
+        {
+            on = 0; safeOn = 0;
+            if (apps == null) return;
+            foreach (StartupApp a in apps)
+            {
+                if (!CountsAsAppOn(a)) continue;
+                on++;
+                if (a.CanToggle && a.Known != null && a.Known.Verdict == Verdict.Safe) safeOn++;
+            }
+        }
+
+        /// <summary>A row's key for focus, errors and the change flow: a Run value and a packaged task may share a name. Pure.</summary>
+        public static string StartupAppKey(StartupApp a)
+        {
+            return "app|" + a.Source + "|" + a.Name;
+        }
+
+        /// <summary>The "Open Startup settings" button shows on the apps list while it has a packaged row. Pure.</summary>
+        public static bool ShowsStartupSettings(bool appsView, IList<StartupApp> apps)
+        {
+            if (!appsView || apps == null) return false;
+            foreach (StartupApp a in apps)
+                if (a != null && a.Source == StartupSource.Packaged) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// What shows under a service row after a change: an error with today's words when nothing changed
+        /// (StartupChangeReason into ChangeFailedText), a note titled with the row's name when the change worked only
+        /// in part (StartupChangeNote), and nothing when it went as asked. Pure.
+        /// </summary>
+        public static RowNote ServiceChangeNote(StartupChange r, string label, bool on)
+        {
+            if (r == null) return null;
+            if (!r.Ok)
+                return new RowNote { IsError = true, Title = ChangeFailedTitle(label, on),
+                    Text = ChangeFailedText(StartupChangeReason(r.Kind, r.Detail), on) };
+            string note = StartupChangeNote(r.Kind);
+            return note == null ? null : new RowNote { Title = label, Text = note };
+        }
+
+        /// <summary>The error under an app row whose switch could not be changed. Pure.</summary>
+        public static RowNote AppChangeError(string label, bool on, string failure)
+        {
+            return new RowNote { IsError = true, Title = ChangeFailedTitle(label, on), Text = ChangeFailedText(failure, on) };
         }
 
         public static string ServiceDetail(StartupService s)
@@ -830,6 +983,9 @@ namespace RamOptimiser.App
                 if (!string.IsNullOrEmpty(s.Known.Effect)) parts.Add("If off: " + s.Known.Effect);
             }
             parts.Add(StartLabel(s));
+            // E12: once, in the row detail, when something else changed a service this app turned off.
+            string journal = JournalNote(s.Journal);
+            if (journal != null) parts.Add(journal);
             if (s.Protected) parts.Add("Windows protects this service, so its startup can't be changed here");
             if (s.Running && s.SharedWith <= 1 && s.MemoryBytes >= 0) parts.Add("Uses " + Format.Bytes((ulong)s.MemoryBytes));
             return string.Join(". ", parts.ToArray());
