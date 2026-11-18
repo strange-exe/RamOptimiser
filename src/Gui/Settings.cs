@@ -38,6 +38,16 @@ namespace RamOptimiser.Gui
         /// The file is user-writable, so AutoCleanService.RestorePause cuts it to an hour from the time it is read.
         /// </summary>
         public DateTime? AutoCleanPausedUntilUtc { get; set; }
+        /// <summary>
+        /// A Windows notification when an automatic clean fails or stops helping (R6). Off by default (owner decision
+        /// 2026-11-17); while off, the tray icon never shows a balloon.
+        /// </summary>
+        public bool NotifyProblems { get; set; }
+        /// <summary>
+        /// The global Clean memory shortcut (R7) in its canonical form ("Ctrl+Shift+M"), or "" for none, the default.
+        /// Only what RamOptimiser.App.HotkeyGesture accepts survives Normalized and Parse: two modifiers, no Windows key.
+        /// </summary>
+        public string CleanHotkey { get; set; }
 
         /// <summary>What a clean actually runs: the chosen areas, or everything plus services under Power Clean.</summary>
         public Areas CleanAreas
@@ -58,6 +68,25 @@ namespace RamOptimiser.Gui
             ShowTrayPercent = true;
             PowerClean = false;
             PowerServices = ServiceCatalog.SuggestedNames();
+            NotifyProblems = false;
+            CleanHotkey = "";
+        }
+
+        /// <summary>
+        /// Every setting back to its default (P16), except Start with Windows: the logon task, not the setting, is its
+        /// source of truth, so a reset leaves it as it is. Auto-clean turns off, which also ends any pause. Pure.
+        /// </summary>
+        public static AppSettings ResetDefaults(AppSettings current)
+        {
+            return new AppSettings { StartWithWindows = current != null && current.StartWithWindows };
+        }
+
+        /// <summary>The canonical text of a shortcut, or "" for none or anything HotkeyGesture refuses.</summary>
+        internal static string NormalizeHotkey(string text)
+        {
+            RamOptimiser.App.HotkeyGesture g;
+            if (!RamOptimiser.App.HotkeyGesture.TryParse(text, out g) || g == null) return "";
+            return g.Format();
         }
 
         public AppSettings Clone()
@@ -81,6 +110,7 @@ namespace RamOptimiser.Gui
             if (s.Areas == Areas.None) s.Areas = Areas.Default;
             if (s.Theme != ThemeMode.System && s.Theme != ThemeMode.Light && s.Theme != ThemeMode.Dark) s.Theme = ThemeMode.System;
             s.PowerServices = ServiceCatalog.Filter(s.PowerServices);
+            s.CleanHotkey = NormalizeHotkey(s.CleanHotkey);
             return s;
         }
 
@@ -219,6 +249,8 @@ namespace RamOptimiser.Gui
             Line(sb, "ShowTrayPercent", Bool(s.ShowTrayPercent));
             Line(sb, "PowerClean", Bool(s.PowerClean));
             Line(sb, "PowerServices", string.Join(",", s.PowerServices.ToArray()));
+            Line(sb, "NotifyProblems", Bool(s.NotifyProblems));
+            Line(sb, "CleanHotkey", s.CleanHotkey);
             if (s.AutoCleanPausedUntilUtc.HasValue)
                 Line(sb, "AutoCleanPausedUntil", s.AutoCleanPausedUntilUtc.Value.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture));
             return sb.ToString();
@@ -267,6 +299,10 @@ namespace RamOptimiser.Gui
                 case "powerclean": if (TryBool(value, out b)) s.PowerClean = b; break;
                 // Names outside the catalog are dropped here: the file is user-writable, the clean is elevated.
                 case "powerservices": s.PowerServices = ServiceCatalog.Filter(value.Split(',')); break;
+                case "notifyproblems": if (TryBool(value, out b)) s.NotifyProblems = b; break;
+                // Only the strict shortcut whitelist (two modifiers, no Windows key, no F12): the elevated app registers it
+                // system-wide, and this file is user-writable. Anything else loads as no shortcut.
+                case "cleanhotkey": s.CleanHotkey = AppSettings.NormalizeHotkey(value); break;
                 case "autocleanpauseduntil":
                     // Only a round-trip UTC time ("o", ending in Z); a local or offset time is ambiguous and dropped.
                     DateTime until;

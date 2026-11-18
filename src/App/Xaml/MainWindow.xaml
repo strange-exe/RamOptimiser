@@ -28,8 +28,10 @@
       </TabItem.Header>
       <ScrollViewer x:Name="MainView" Focusable="False" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Margin="16,12,16,16">
-          <!-- Sample failed -->
-          <Border x:Name="SampleError" Style="{StaticResource InfoBar}" Margin="0,0,0,8" Visibility="Collapsed">
+          <!-- Sample failed. A polite live region (U9): read out when it appears or its message changes, never on each
+               2-second sample. -->
+          <app:LiveRegion x:Name="SampleError" Style="{StaticResource InfoBar}" Margin="0,0,0,8" Visibility="Collapsed"
+                          AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Memory status could not be read.">
             <Grid>
               <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
@@ -40,7 +42,7 @@
               <TextBlock x:Name="SampleErrorText" Grid.Column="1" TextWrapping="Wrap" FontSize="13" Margin="0,0,6,0"
                          Text="Memory status could not be read."/>
             </Grid>
-          </Border>
+          </app:LiveRegion>
 
           <!-- Auto-clean paused or waiting longer (P6, R2): seen without scrolling to the auto-clean card. Shares the
                slot with the bar above, which wins while memory cannot be read. Glyph plus words, never colour alone;
@@ -189,8 +191,11 @@
               <Button x:Name="RestartButton" Style="{StaticResource LinkButton}" Content="Restart as administrator"
                       AutomationProperties.Name="Restart as administrator"/>
             </WrapPanel>
-            <TextBlock x:Name="RestartError" Visibility="Collapsed" Margin="0,6,0,0" TextWrapping="Wrap" FontSize="13"
-                       FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
+            <!-- Assertive (U9): the restart failed and the user has to act. -->
+            <app:LiveRegion x:Name="RestartErrorRegion" Visibility="Collapsed" Margin="0,6,0,0"
+                            AutomationProperties.LiveSetting="Assertive" AutomationProperties.Name="Restart failed">
+              <TextBlock x:Name="RestartError" TextWrapping="Wrap" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
+            </app:LiveRegion>
           </StackPanel>
           <!-- Elevated as another account (over-the-shoulder UAC): stays for the whole run -->
           <TextBlock x:Name="AccountNotice" Style="{StaticResource Small}" Margin="4,6,4,0" TextWrapping="Wrap"
@@ -329,15 +334,26 @@
               </Button>
             </Grid>
           </Grid>
-          <TextBlock x:Name="StartupSummary" Style="{StaticResource Small}" Margin="0,10,0,0" Text="Reading what starts with Windows..."/>
+          <!-- U9: read out once, when the first load finishes. -->
+          <app:LiveRegion x:Name="StartupSummaryRegion" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite"
+                          AutomationProperties.Name="Reading what starts with Windows...">
+            <TextBlock x:Name="StartupSummary" Style="{StaticResource Small}" Text="Reading what starts with Windows..."/>
+          </app:LiveRegion>
           <WrapPanel Margin="0,8,0,0">
             <TextBlock Text="Show" VerticalAlignment="Center" FontSize="13" Margin="0,0,8,4"/>
             <ComboBox x:Name="VerdictBox" Width="200" Margin="0,0,16,4" AutomationProperties.Name="Show verdict"/>
             <TextBlock Text="Sort" VerticalAlignment="Center" FontSize="13" Margin="0,0,8,4"/>
-            <ComboBox x:Name="SortBox" Width="110" Margin="0,0,0,4" AutomationProperties.Name="Sort by"/>
+            <ComboBox x:Name="SortBox" Width="110" Margin="0,0,16,4" AutomationProperties.Name="Sort by"/>
+            <!-- U9: "12 shown" while a search or filter narrows the list, read out 300 ms after the last change. -->
+            <app:LiveRegion x:Name="SearchCountRegion" VerticalAlignment="Center" Margin="0,0,0,4" Visibility="Collapsed"
+                            AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Shown">
+              <TextBlock x:Name="SearchCount" Style="{StaticResource Small}"/>
+            </app:LiveRegion>
           </WrapPanel>
-          <TextBlock x:Name="StartupError" Visibility="Collapsed" Margin="0,8,0,0" TextWrapping="Wrap" FontSize="13" FontWeight="SemiBold"
-                     Foreground="{DynamicResource Danger}"/>
+          <app:LiveRegion x:Name="StartupErrorRegion" Visibility="Collapsed" Margin="0,8,0,0"
+                          AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Some entries could not be read">
+            <TextBlock x:Name="StartupError" TextWrapping="Wrap" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
+          </app:LiveRegion>
         </StackPanel>
         <ScrollViewer x:Name="StartupView" Grid.Row="1" Focusable="False" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Margin="16,8,16,16">
@@ -351,17 +367,21 @@
             <Border x:Name="StartupCard" Style="{StaticResource CardBorder}" Visibility="Collapsed">
               <app:GroupPanel x:Name="StartupList" AutomationProperties.Name="Startup items"/>
             </Border>
-            <!-- Empty: nothing in this list, or nothing matches the search and filter -->
-            <StackPanel x:Name="StartupEmpty" HorizontalAlignment="Center" Margin="0,24,0,0" Visibility="Collapsed">
-              <Path Style="{StaticResource IconPath}" Data="{StaticResource IconEmpty}" Stroke="{DynamicResource MutedText}"
-                    HorizontalAlignment="Center" RenderTransformOrigin="0.5,0.5">
-                <Path.RenderTransform>
-                  <ScaleTransform ScaleX="2" ScaleY="2"/>
-                </Path.RenderTransform>
-              </Path>
-              <TextBlock x:Name="StartupEmptyTitle" Margin="0,20,0,0" FontWeight="SemiBold" HorizontalAlignment="Center" TextAlignment="Center"/>
-              <TextBlock x:Name="StartupEmptyText" Style="{StaticResource Small}" Margin="0,2,0,0" HorizontalAlignment="Center" TextAlignment="Center"/>
-            </StackPanel>
+            <!-- Empty: nothing in this list, or nothing matches the search and filter. Read out through the search
+                 debounce (U9), not on every rebuild. -->
+            <app:LiveRegion x:Name="StartupEmptyRegion" HorizontalAlignment="Center" AutomationProperties.LiveSetting="Polite"
+                            AutomationProperties.Name="Nothing matches">
+              <StackPanel x:Name="StartupEmpty" Margin="0,24,0,0" Visibility="Collapsed">
+                <Path Style="{StaticResource IconPath}" Data="{StaticResource IconEmpty}" Stroke="{DynamicResource MutedText}"
+                      HorizontalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                  <Path.RenderTransform>
+                    <ScaleTransform ScaleX="2" ScaleY="2"/>
+                  </Path.RenderTransform>
+                </Path>
+                <TextBlock x:Name="StartupEmptyTitle" Margin="0,20,0,0" FontWeight="SemiBold" HorizontalAlignment="Center" TextAlignment="Center"/>
+                <TextBlock x:Name="StartupEmptyText" Style="{StaticResource Small}" Margin="0,2,0,0" HorizontalAlignment="Center" TextAlignment="Center"/>
+              </StackPanel>
+            </app:LiveRegion>
             <TextBlock x:Name="StartupNote" Style="{StaticResource Small}" Margin="4,10,4,0"/>
           </StackPanel>
         </ScrollViewer>
@@ -379,8 +399,11 @@
       </TabItem.Header>
       <ScrollViewer x:Name="SettingsView" Focusable="False" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Margin="16,0,16,16">
-          <TextBlock x:Name="SaveError" Visibility="Collapsed" Margin="0,12,0,0" TextWrapping="Wrap" FontSize="13" FontWeight="SemiBold"
-                     Foreground="{DynamicResource Danger}"/>
+          <!-- Assertive (U9): settings are not being saved. -->
+          <app:LiveRegion x:Name="SaveErrorRegion" Visibility="Collapsed" Margin="0,12,0,0"
+                          AutomationProperties.LiveSetting="Assertive" AutomationProperties.Name="Settings not saved">
+            <TextBlock x:Name="SaveError" TextWrapping="Wrap" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
+          </app:LiveRegion>
 
           <!-- Auto-clean -->
           <TextBlock Text="Auto-clean" Style="{StaticResource SectionHeading}"/>
@@ -532,7 +555,11 @@
                 <StackPanel>
                   <Button x:Name="RestoreButton" Style="{StaticResource OutlineButton}" HorizontalAlignment="Left"
                           Content="Restore services" AutomationProperties.Name="Restore services"/>
-                  <TextBlock x:Name="PowerStatus" Style="{StaticResource Small}" Margin="0,6,0,0"/>
+                  <!-- U9: read out when a restore finishes. -->
+                  <app:LiveRegion x:Name="PowerStatusRegion" Margin="0,6,0,0" AutomationProperties.LiveSetting="Polite"
+                                  AutomationProperties.Name="Services">
+                    <TextBlock x:Name="PowerStatus" Style="{StaticResource Small}"/>
+                  </app:LiveRegion>
                 </StackPanel>
               </Border>
             </StackPanel>
@@ -584,6 +611,78 @@
                   <CheckBox x:Name="TrayPercentCheck" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
                             VerticalAlignment="Center" AutomationProperties.Name="Show the load percent on the tray icon"/>
                 </Grid>
+              </Border>
+              <!-- R6: opt-in Windows notifications, off by default (owner decision 2026-11-17). -->
+              <Border Style="{StaticResource RowDivider}" Padding="16,10">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="Notify me when auto-clean has a problem" TextWrapping="Wrap"/>
+                    <TextBlock Style="{StaticResource Small}"
+                               Text="A Windows notification when an automatic clean fails or stops helping. Never for routine cleans."/>
+                  </StackPanel>
+                  <CheckBox x:Name="NotifyCheck" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
+                            VerticalAlignment="Center" AutomationProperties.Name="Notify me when auto-clean has a problem"
+                            AutomationProperties.HelpText="A Windows notification when an automatic clean fails or stops helping. Never for routine cleans."/>
+                </Grid>
+              </Border>
+              <!-- R7: the global Clean memory shortcut, none by default. The box records a combination: Delete removes it,
+                   Esc leaves it as it was, Tab moves on. Errors and the AltGr warning show under the row, read out politely. -->
+              <Border Style="{StaticResource RowDivider}" Padding="16,10">
+                <StackPanel>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                      <TextBlock Text="Shortcut for Clean memory" TextWrapping="Wrap"/>
+                      <TextBlock x:Name="HotkeyNote" Style="{StaticResource Small}"
+                                 Text="Works anywhere in Windows while RAM Optimiser runs as administrator. Use two of Ctrl, Alt and Shift with a letter, digit or F key."/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
+                      <TextBox x:Name="HotkeyBox" Width="150" IsReadOnly="True" Tag="None" IsUndoEnabled="False"
+                               AutomationProperties.Name="Shortcut for Clean memory"
+                               AutomationProperties.HelpText="Press a key combination. Press Delete to remove the shortcut."/>
+                      <Button x:Name="HotkeyRemove" Style="{StaticResource LinkButton}" Content="Remove" HorizontalAlignment="Right"
+                              Margin="0,4,0,0" Visibility="Collapsed" AutomationProperties.Name="Remove shortcut"/>
+                    </StackPanel>
+                  </Grid>
+                  <app:LiveRegion x:Name="HotkeyMessageRegion" Margin="0,6,0,0" Visibility="Collapsed"
+                                  AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Shortcut">
+                    <TextBlock x:Name="HotkeyMessage" Style="{StaticResource Small}" Foreground="{DynamicResource Text}"/>
+                  </app:LiveRegion>
+                </StackPanel>
+              </Border>
+              <!-- P16: reset, with the confirmation inline (no dialog). Focus goes to Cancel, the safe choice. -->
+              <Border Style="{StaticResource RowDivider}" Padding="16,10">
+                <StackPanel>
+                  <DockPanel>
+                    <Button x:Name="ResetButton" DockPanel.Dock="Right" Style="{StaticResource OutlineButton}" Content="Reset"
+                            Margin="12,0,0,0" VerticalAlignment="Center" AutomationProperties.Name="Reset settings"/>
+                    <StackPanel VerticalAlignment="Center">
+                      <TextBlock Text="Reset settings" TextWrapping="Wrap"/>
+                      <TextBlock Style="{StaticResource Small}"
+                                 Text="Puts every setting back to its default and turns auto-clean off. Start with Windows is left as it is."/>
+                    </StackPanel>
+                  </DockPanel>
+                  <app:GroupPanel x:Name="ResetConfirm" Margin="0,10,0,0" Visibility="Collapsed" AutomationProperties.Name="Confirm reset">
+                    <TextBlock Style="{StaticResource Small}" Foreground="{DynamicResource Text}" Text="Reset all settings? This cannot be undone."/>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                      <Button x:Name="ResetYes" Style="{StaticResource OutlineButton}" Content="Reset settings"
+                              AutomationProperties.Name="Yes, reset settings"/>
+                      <Button x:Name="ResetNo" Style="{StaticResource OutlineButton}" Content="Cancel" Margin="8,0,0,0"
+                              AutomationProperties.Name="Cancel reset"/>
+                    </StackPanel>
+                  </app:GroupPanel>
+                  <app:LiveRegion x:Name="ResetStatusRegion" Margin="0,8,0,0" Visibility="Collapsed"
+                                  AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Settings were reset.">
+                    <TextBlock x:Name="ResetStatus" Style="{StaticResource Small}" Foreground="{DynamicResource Text}"/>
+                  </app:LiveRegion>
+                </StackPanel>
               </Border>
             </StackPanel>
           </Border>

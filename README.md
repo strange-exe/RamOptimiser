@@ -71,11 +71,27 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
   - theme: System, Light or Dark
   - start with Windows (a logon task, so it can run as administrator)
   - closing the window hides it to the tray
+  - **Notify me when auto-clean has a problem** (off by default): a Windows notification from the tray icon when
+    an automatic clean fails, partly fails or does not finish, or when cleans stop helping (auto-clean has reached
+    its longest wait). Never for manual cleans, cleans that went well, or while the window is on screen, and at most
+    one of each kind an hour. Clicking it opens the Memory tab. While it is off, the app never shows a notification.
+  - **Shortcut for Clean memory** (none by default): click the box and press the keys. It needs two of Ctrl, Alt
+    and Shift with a letter, a digit or F1 to F24 (not F12, which Windows keeps; the Windows key is not allowed).
+    Delete removes it and Esc leaves it as it was. The shortcut works anywhere in Windows, but only while the app
+    runs as administrator; without admin rights it is saved and marked not active. If another app already uses the
+    keys, Windows refuses them and the row says so; the previous shortcut stays. A press less than 60 seconds after
+    the last clean is ignored, logged, and shown in the tray menu for a minute, because any program can send keys.
+    The shortcut shows in the Clean memory tooltip and next to **Clean memory** in the tray menu.
+  - **Reset settings**: asks first, then puts every setting back to its default (auto-clean off, no shortcut,
+    notifications off). Start with Windows is left as it is, and services Power Clean stopped stay stopped until you
+    restore them or quit.
 - `RamOptimiser.exe --tray` starts hidden in the tray. Launching it again brings the open window to the front.
 - Settings are stored in `%LOCALAPPDATA%\RamOptimiser\settings.ini`. Crashes are logged to `error.log` in the same folder.
   The app refuses to use that folder if it is a link (junction or symbolic link), if `settings.ini` is a link
   or has a second hard link, or if the folder is owned by anyone other than you, Administrators or SYSTEM.
-  The minimum wait between automatic cleans is 60 seconds, whatever the file says.
+  The minimum wait between automatic cleans is 60 seconds, whatever the file says. `NotifyProblems` (`true` or
+  `false`) is the notification switch and `CleanHotkey` the shortcut as text (`Ctrl+Shift+M`; empty for none); a
+  shortcut the app would not accept from the keyboard is read as none.
   When a clean leaves memory load at or above the threshold (the memory is really in use), the wait doubles
   after each such clean, up to 16 times the setting, and returns to normal once load drops below the threshold.
 - Services Power Clean stops are started again when you quit the app. Each one is first recorded in
@@ -190,7 +206,9 @@ flush), 3 not elevated, 4 `watch` stopped after 5 errors in a row, 5 another cle
 - `"type":"rebound"`: `ref` (the clean's `id`), `time`, `load`, `inUse`: the load about five minutes after an app
   clean.
 - `"type":"event"` (the app): `time`, `source`, `event` (`paused`, `resumed`, `pause-ended`, `backoff-started`,
-  `backoff-ended`, `read-failed`, `read-recovered`) and `text`, the line shown under Recent activity.
+  `backoff-ended`, `read-failed`, `read-recovered`, `hotkey-clean` (the shortcut started a clean; its own `clean`
+  line follows with reason `manual`), `hotkey-skipped` (a press within 60 s of the last clean), `notice-shown` (a
+  notification was shown) and `settings-reset`) and `text`, the line shown under Recent activity.
 
 Fields are only ever added; a breaking change bumps `v`. Text is cut to 200 characters and escaped, so a message
 can't start a new line. The file is kept under 256 KB, with one older copy in `cleans.log.old`, and is written only

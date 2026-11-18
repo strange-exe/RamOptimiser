@@ -1479,4 +1479,135 @@ namespace RamOptimiser.App
             catch (Exception) { return false; }
         }
     }
+
+    // ---------------------------------------------------------------------- problem notices (R6)
+
+    public enum NoticeKind { CleanFailed, NotHelping }
+
+    /// <summary>A Windows notification the tray icon shows: plain text with counts and times only, no names or paths.</summary>
+    public sealed class Notice
+    {
+        public NoticeKind Kind;
+        public string Title;
+        public string Text;
+    }
+
+    /// <summary>
+    /// When the opt-in notices show (owner decision 2026-11-17: off by default, a Settings switch). Only when something
+    /// needs the user: an automatic clean that failed, partly failed or did not finish, or cleans that stopped helping
+    /// at the maximum back-off. Never for a manual clean, a clean that went well or a busy skip, and never while the
+    /// window can be seen (it already shows the same). NoticeGate keeps each kind to once an hour. Pure.
+    /// </summary>
+    public static class Notices
+    {
+        public const string CleanFailedTitle = "Auto-clean had a problem";
+        public const string NotHelpingTitle = "Auto-clean is not helping";
+
+        public static Notice ForClean(bool enabled, bool windowShowing, CleanReason reason, CleanReport report, Exception error,
+            DateTime localTime, CultureInfo culture)
+        {
+            if (!enabled || windowShowing || reason == CleanReason.Manual) return null;
+            string at = "At " + localTime.ToString("t", culture);
+            bool unfinished = error != null || report == null || report.Before == null || report.After == null
+                || report.Stopped == CleanStop.TimedOut || report.Stopped == CleanStop.Cancelled;
+            if (report != null && report.Stopped == CleanStop.Busy && error == null) return null;
+            if (unfinished)
+                return new Notice { Kind = NoticeKind.CleanFailed, Title = CleanFailedTitle, Text = at + " the clean did not finish. Open RAM Optimiser for details." };
+            int failed = 0, partial = 0;
+            foreach (AreaResult a in report.Results)
+            {
+                if (a.Outcome == AreaOutcome.Failed) failed++;
+                else if (a.Outcome == AreaOutcome.Partial) partial++;
+            }
+            string what = failed > 0 ? AreaCount(failed) + " failed" : partial > 0 ? AreaCount(partial) + " partly failed" : null;
+            if (what == null) return null;
+            return new Notice { Kind = NoticeKind.CleanFailed, Title = CleanFailedTitle, Text = at + ", " + what + ". Open RAM Optimiser to see which." };
+        }
+
+        /// <summary>Only on the step into the maximum back-off; it re-arms once the streak drops below it.</summary>
+        public static Notice ForStreak(bool enabled, bool windowShowing, int oldStreak, int newStreak, int thresholdPercent)
+        {
+            int max = AutoCleanPolicy.MaxBackoffSteps;
+            if (!enabled || windowShowing || oldStreak >= max || newStreak < max) return null;
+            return new Notice
+            {
+                Kind = NoticeKind.NotHelping, Title = NotHelpingTitle,
+                Text = "The last " + newStreak.ToString(CultureInfo.InvariantCulture) + " cleans left load at "
+                    + thresholdPercent.ToString(CultureInfo.InvariantCulture) + "% or more. Closing an app will free more memory than cleaning."
+            };
+        }
+
+        /// <summary>The Recent activity line and cleans.log event for a notice that was shown.</summary>
+        public static ActivityEvent ShownEvent(Notice n)
+        {
+            return new ActivityEvent { Kind = "notice-shown", Text = "Notification shown: " + (n == null ? "" : n.Title) + "." };
+        }
+
+        static string AreaCount(int n)
+        {
+            return n.ToString(CultureInfo.InvariantCulture) + (n == 1 ? " area" : " areas");
+        }
+    }
+
+    /// <summary>At most one notice of a kind an hour; a clock set back allows one. Pure.</summary>
+    public static class NoticeGate
+    {
+        public static readonly TimeSpan Interval = TimeSpan.FromMinutes(60);
+
+        public static bool Allow(DateTime? lastShownUtc, DateTime nowUtc)
+        {
+            if (lastShownUtc == null) return true;
+            TimeSpan since = nowUtc - lastShownUtc.Value;
+            return since < TimeSpan.Zero || since >= Interval;
+        }
+    }
+
+    // ---------------------------------------------------------------------- announcements (U9)
+
+    /// <summary>
+    /// Whether a status line is read out: only text that is new for that line (ordinal comparison). Hiding the line
+    /// resets it (last null), so the same message coming back later is read out again. Pure.
+    /// </summary>
+    public static class AnnounceGate
+    {
+        public static bool ShouldAnnounce(string last, string next)
+        {
+            return !string.IsNullOrEmpty(next) && !string.Equals(last, next, StringComparison.Ordinal);
+        }
+    }
+
+    public static partial class AppText
+    {
+        /// <summary>The Startup tab's count while a search or filter is on: "Nothing matches", "1 shown", "12 shown".</summary>
+        public static string SearchCount(int shown)
+        {
+            if (shown <= 0) return "Nothing matches";
+            return shown.ToString(CultureInfo.InvariantCulture) + " shown";
+        }
+
+        /// <summary>The count shows only while the list is narrowed: search text, or a filter other than the first (All).</summary>
+        public static bool SearchCountVisible(string search, int filterIndex)
+        {
+            return filterIndex > 0 || (search != null && search.Trim().Length > 0);
+        }
+
+        // ------------------------------------------------------------------ notices switch (R6) and reset (P16)
+
+        public const string NotifyRowNote = "A Windows notification when an automatic clean fails or stops helping. Never for routine cleans.";
+        public const string ResetRowNote = "Puts every setting back to its default and turns auto-clean off. Start with Windows is left as it is.";
+        public const string ResetConfirm = "Reset all settings? This cannot be undone.";
+
+        /// <summary>After a reset; services Power Clean stopped this session are not started by it.</summary>
+        public static string ResetDone(bool servicesStopped)
+        {
+            return servicesStopped
+                ? "Settings were reset. Services stopped by Power Clean stay stopped until you restore them or quit."
+                : "Settings were reset.";
+        }
+
+        public static ActivityEvent ResetEvent()
+        {
+            return new ActivityEvent { Kind = "settings-reset", Text = "Settings were reset to their defaults." };
+        }
+    }
 }
