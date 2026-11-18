@@ -39,13 +39,21 @@ Build (needs only the C# compiler that ships with Windows, .NET Framework 4.8):
 
 A window and a tray icon. The tray icon shows the current memory load.
 
-Three tabs (Ctrl+1, Ctrl+2, Ctrl+3):
+Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
 
 - **Memory** shows the load, a map of in use, modified, standby and free memory, committed memory against its limit,
   a **Clean memory** button, what the last clean freed, and the five apps using the most memory.
+  - Under **Clean memory**, one line says whether a clean would help now, from Windows' own low and high memory
+    signal and the commit level. It is advice only: it never decides when auto-clean runs.
+  - When committed memory reaches 90% of its limit, its bar changes colour and a warning with an icon says that cleaning does not
+    lower it and closing apps does. The warning goes away below 87%.
+  - The apps are ranked by private memory (memory only that app uses), which a clean does not change, so the order
+    holds after a clean. **In RAM** is the part held in physical memory now. Hover a row for the full name and what
+    each figure means.
+  - The per-area results of a clean show how long each area took, and the whole clean.
 - **Startup** lists apps and services that start with Windows, with a verdict for each (safe to turn off, turn off with
-  care, keep on), a search box (Ctrl+F), a filter and a sort. Rows Windows protects, or that need admin rights, say so
-  instead of showing a switch. While a service change applies, the other switches wait until it finishes.
+  care, keep on), a search box (Ctrl+F; Esc clears it), a filter and a sort. Rows Windows protects, or that need admin
+  rights, say so instead of showing a switch. While a service change applies, the other switches wait until it finishes.
 - Opened without admin rights, the app shows status only, plus a **Restart as administrator** link. The tray menu
   offers the same restart and says when auto-clean is paused for lack of admin rights.
 - Auto-clean can be paused for 1 hour from the tray menu (**Pause auto-clean for 1 hour**, then **Resume
@@ -126,7 +134,14 @@ bin\ramopt.exe status --json               # one JSON object on stdout
 bin\ramopt.exe clean --no-log              # don't add this clean to cleans.log
 bin\ramopt.exe top                         # the 10 apps using the most private memory (no admin needed)
 bin\ramopt.exe top 20 --by ws              # the 20 apps holding the most RAM right now
+bin\ramopt.exe clean --trim each           # trim app by app, sparing the app in front
+bin\ramopt.exe clean --trim each --spare obs64,vlc   # also spare these apps
 ```
+
+`--trim each` (with `clean` or `watch`) trims app by app instead of all at once and leaves the app in front alone;
+`--spare LIST` names more exe names to leave alone, and `--no-spare-foreground` trims the app in front too. It needs
+the `workingsets` area; `--trim system`, the default, trims every process at once. The desktop app always trims
+all at once.
 
 `top [N]` lists 1 to 100 apps (default 10), each app's processes added together. It ranks by private bytes, the
 memory only that app uses, because the working set (RAM it holds now, shared pages included) collapses right after

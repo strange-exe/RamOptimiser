@@ -18,7 +18,7 @@
   <TabControl x:Name="Tabs" AutomationProperties.Name="Sections">
 
     <!-- ============================== Memory ============================== -->
-    <TabItem x:Name="MemoryTab" AutomationProperties.Name="Memory">
+    <TabItem x:Name="MemoryTab" AutomationProperties.Name="Memory" ToolTip="Memory (Ctrl+1)" AutomationProperties.AcceleratorKey="Ctrl+1">
       <TabItem.Header>
         <StackPanel Orientation="Horizontal">
           <Path Style="{StaticResource IconPath}" Data="{StaticResource IconMemory}" Margin="0,0,8,0"
@@ -43,9 +43,9 @@
           </Border>
 
           <!-- Auto-clean paused or waiting longer (P6, R2): seen without scrolling to the auto-clean card. Shares the
-               slot with the bar above, which wins while memory cannot be read. Glyph plus words, never colour alone. -->
-          <app:LiveRegion x:Name="AutoBar" Margin="0,0,0,8" Padding="10,8,4,8" CornerRadius="4" BorderThickness="1"
-                          BorderBrush="{DynamicResource ControlBorder}" Background="{DynamicResource Card}" Visibility="Collapsed"
+               slot with the bar above, which wins while memory cannot be read. Glyph plus words, never colour alone;
+               the info tint (NoticeBar) sets it apart from the danger-tinted error bar. A pause says where it came from. -->
+          <app:LiveRegion x:Name="AutoBar" Style="{StaticResource NoticeBar}" Margin="0,0,0,8" Visibility="Collapsed"
                           AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Auto-clean">
             <app:LiveRegion.RenderTransform>
               <TranslateTransform/>
@@ -154,16 +154,31 @@
                               BorderBrush="{DynamicResource TrackEdge}" BorderThickness="1"/>
                     </app:MapPanel>
                   </Grid>
-                  <TextBlock Style="{StaticResource Small}" Margin="0,6,0,0"
+                  <TextBlock x:Name="CommitNote" Style="{StaticResource Small}" Margin="0,6,0,0"
                              Text="Reserved by apps. The limit includes the page file, and cleaning does not lower it."/>
+                  <!-- U15: at 90% of the limit (off again below 87%) the bar turns Caution and this line replaces the
+                       note above: glyph plus words in Text colour, read out once when it appears. No red. -->
+                  <app:LiveRegion x:Name="CommitWarning" Visibility="Collapsed" Margin="0,6,0,0"
+                                  AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Close to the limit">
+                    <Grid>
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                      </Grid.ColumnDefinitions>
+                      <Path Style="{StaticResource IconPath}" Data="{StaticResource IconWarn}" Stroke="{DynamicResource Caution}"
+                            VerticalAlignment="Top" Margin="0,0,6,0"/>
+                      <TextBlock x:Name="CommitWarningText" Grid.Column="1" Style="{StaticResource Small}" Foreground="{DynamicResource Text}"/>
+                    </Grid>
+                  </app:LiveRegion>
                 </StackPanel>
               </Border>
             </StackPanel>
           </Border>
 
           <!-- 2. Clean memory -->
+          <!-- Disabled, it still shows why on hover (U21); the reason is also the visible admin line below. -->
           <Button x:Name="CleanButton" Style="{StaticResource PrimaryButton}" Margin="0,12,0,0" Content="Clean memory"
-                  AutomationProperties.Name="Clean memory"/>
+                  ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Clean memory"/>
           <TextBlock x:Name="PowerNote" Style="{StaticResource Small}" Margin="4,6,4,0" Visibility="Collapsed"/>
 
           <!-- One admin line when not elevated -->
@@ -180,6 +195,17 @@
           <!-- Elevated as another account (over-the-shoulder UAC): stays for the whole run -->
           <TextBlock x:Name="AccountNotice" Style="{StaticResource Small}" Margin="4,6,4,0" TextWrapping="Wrap"
                      Visibility="Collapsed"/>
+
+          <!-- Will a clean help now (R1): Windows' own low/high memory signal and the commit level, as glyph plus words.
+               Display only: it never gates auto-clean. Shown only on live figures; changes after two equal samples. -->
+          <Grid x:Name="AdviceLine" Margin="4,8,4,0" Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Path x:Name="AdviceGlyph" Style="{StaticResource IconPath}" VerticalAlignment="Top" Margin="0,1,8,0"/>
+            <TextBlock x:Name="AdviceText" Grid.Column="1" FontSize="13" TextWrapping="Wrap"/>
+          </Grid>
 
           <!-- 3. The last clean, manual or automatic (announced politely to screen readers) -->
           <app:LiveRegion x:Name="ResultPanel" Margin="4,8,0,0" Visibility="Collapsed"
@@ -210,7 +236,19 @@
           <Border Style="{StaticResource CardBorder}" Padding="16,12" Margin="0,12,0,0">
             <StackPanel>
               <TextBlock Text="Using the most memory" FontWeight="SemiBold"/>
-              <app:GroupPanel x:Name="TopList" Margin="0,6,0,0" AutomationProperties.Name="Apps using the most memory">
+              <!-- R5: ranked by private bytes, which a clean does not change, so the order holds after a clean. -->
+              <TextBlock x:Name="TopAppsNote" Style="{StaticResource Small}" Text="Ranked by private memory. Cleaning does not shrink it; closing the app does."/>
+              <!-- Column heads over the figures; each row's name and tooltip say the same in words. -->
+              <Grid Margin="0,6,0,0">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="80"/>
+                  <ColumnDefinition Width="80"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="1" Style="{StaticResource Small}" HorizontalAlignment="Right" Text="In RAM"/>
+                <TextBlock Grid.Column="2" Style="{StaticResource Small}" HorizontalAlignment="Right" Text="Private"/>
+              </Grid>
+              <app:GroupPanel x:Name="TopList" Margin="0,2,0,0" AutomationProperties.Name="Apps using the most memory">
                 <TextBlock Style="{StaticResource Muted}" Text="Reading apps..."/>
               </app:GroupPanel>
             </StackPanel>
@@ -248,7 +286,7 @@
     </TabItem>
 
     <!-- ============================== Startup ============================== -->
-    <TabItem x:Name="StartupTab" AutomationProperties.Name="Startup">
+    <TabItem x:Name="StartupTab" AutomationProperties.Name="Startup" ToolTip="Startup (Ctrl+2)" AutomationProperties.AcceleratorKey="Ctrl+2">
       <TabItem.Header>
         <StackPanel Orientation="Horizontal">
           <Path Style="{StaticResource IconPath}" Data="{StaticResource IconPower}" Margin="0,0,8,0"
@@ -280,10 +318,15 @@
               </app:GroupPanel>
             </Border>
             <Grid Grid.Column="1" Margin="8,0,0,0">
-              <TextBox x:Name="StartupSearch" Style="{StaticResource SearchBox}" Tag="Search" Height="36"
-                       AutomationProperties.Name="Search startup items"/>
+              <TextBox x:Name="StartupSearch" Style="{StaticResource SearchBox}" Tag="Search (Ctrl+F)" Height="36"
+                       AutomationProperties.Name="Search startup items" AutomationProperties.AcceleratorKey="Ctrl+F"/>
               <Path Style="{StaticResource IconPath}" Data="{StaticResource IconSearch}" Stroke="{DynamicResource MutedText}"
                     HorizontalAlignment="Left" Margin="9,0,0,0" IsHitTestVisible="False"/>
+              <!-- U16: shown only while there is text; Esc in the box does the same and keeps focus there. -->
+              <Button x:Name="ClearSearchButton" Style="{StaticResource SubtleButton}" HorizontalAlignment="Right" Width="28" Height="28"
+                      Margin="0,0,4,0" Visibility="Collapsed" ToolTip="Clear search (Esc)" AutomationProperties.Name="Clear search">
+                <Path Style="{StaticResource IconPath}" Data="{StaticResource IconClose}" Stroke="{DynamicResource Text}"/>
+              </Button>
             </Grid>
           </Grid>
           <TextBlock x:Name="StartupSummary" Style="{StaticResource Small}" Margin="0,10,0,0" Text="Reading what starts with Windows..."/>
@@ -326,7 +369,7 @@
     </TabItem>
 
     <!-- ============================== Settings ============================== -->
-    <TabItem x:Name="SettingsTab" AutomationProperties.Name="Settings">
+    <TabItem x:Name="SettingsTab" AutomationProperties.Name="Settings" ToolTip="Settings (Ctrl+3)" AutomationProperties.AcceleratorKey="Ctrl+3">
       <TabItem.Header>
         <StackPanel Orientation="Horizontal">
           <Path Style="{StaticResource IconPath}" Data="{StaticResource IconSliders}" Margin="0,0,8,0"
@@ -452,8 +495,11 @@
                   </CheckBox>
                 </StackPanel>
               </Expander>
-              <TextBlock x:Name="AreaReason" Style="{StaticResource Small}" Margin="0,0,0,8" Visibility="Collapsed"
-                         Text="At least one area must stay selected."/>
+              <!-- U21: the last selected area stays focusable; unticking it is refused and this line says why, aloud. -->
+              <app:LiveRegion x:Name="AreaReasonRegion" Margin="0,0,0,8" Visibility="Collapsed"
+                              AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="At least one area must stay selected.">
+                <TextBlock x:Name="AreaReason" Style="{StaticResource Small}" Text="At least one area must stay selected."/>
+              </app:LiveRegion>
             </StackPanel>
           </Border>
 
@@ -514,7 +560,7 @@
                     <TextBlock x:Name="StartupReason" Style="{StaticResource Small}" Visibility="Collapsed"/>
                   </StackPanel>
                   <CheckBox x:Name="StartupCheck" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
-                            VerticalAlignment="Center" AutomationProperties.Name="Start with Windows"/>
+                            ToolTipService.ShowOnDisabled="True" VerticalAlignment="Center" AutomationProperties.Name="Start with Windows"/>
                 </Grid>
               </Border>
               <Border Style="{StaticResource RowDivider}" Padding="16,10">

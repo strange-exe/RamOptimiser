@@ -21,6 +21,52 @@ namespace RamOptimiser.App
         public AreaState State;
         /// <summary>"ok", "failed: reason" or "skipped: reason" (a Partial area reads "ok: what it did; what failed").</summary>
         public string Status;
+        /// <summary>How long the area took ("1.8 s", "&lt;0.1 s"); null for a skipped area, which ran nothing (E8).</summary>
+        public string Time;
+    }
+
+    /// <summary>Where the user paused auto-clean, for the bar's second line (2A); Unknown says nothing.</summary>
+    public enum PauseOrigin { Unknown, Tray, Settings, Restored }
+
+    /// <summary>
+    /// Keeps the "will a clean help" line from flickering at a band edge (R1): the first reading shows at once, and
+    /// after that a different advice shows only once two samples in a row agree on it. Reset when the figures go
+    /// stale, so the next live reading shows at once again. Pure.
+    /// </summary>
+    public sealed class AdviceSmoother
+    {
+        CleanAdvice pending;
+        int count;
+        bool started;
+
+        public CleanAdvice Shown { get; private set; }
+
+        public CleanAdvice Next(CleanAdvice candidate)
+        {
+            if (!started)
+            {
+                started = true;
+                Shown = candidate;
+                count = 0;
+                return Shown;
+            }
+            if (candidate == Shown) { count = 0; return Shown; }
+            if (count > 0 && candidate == pending) count++;
+            else { pending = candidate; count = 1; }
+            if (count >= 2)
+            {
+                Shown = candidate;
+                count = 0;
+            }
+            return Shown;
+        }
+
+        public void Reset()
+        {
+            started = false;
+            count = 0;
+            Shown = CleanAdvice.None;
+        }
     }
 
     /// <summary>
@@ -223,8 +269,23 @@ namespace RamOptimiser.App
                 // Partial keeps its "ok: ..." words, with a caution glyph that matches the summary's warning.
                 State = r.Outcome == AreaOutcome.Partial ? AreaState.Partial
                     : r.Ok ? AreaState.Ok : r.Skipped ? AreaState.Skipped : AreaState.Failed,
-                Status = Status(r)
+                Status = Status(r),
+                Time = r.Skipped ? null : DurationText(r.Duration)
             };
+        }
+
+        /// <summary>A result row's accessible name: "Process working sets: ok, 1.8 s".</summary>
+        public static string AreaRowName(AreaLine line)
+        {
+            string name = line.Label + ": " + line.Status;
+            return line.Time == null ? name : name + ", " + line.Time;
+        }
+
+        /// <summary>The last line of the per-area details: "Took 3.4 s."; null when the clean never ran (E8).</summary>
+        public static string TookLine(CleanReport report)
+        {
+            if (report == null || report.Stopped == CleanStop.Busy) return null;
+            return "Took " + DurationText(report.Duration) + ".";
         }
 
         public static string Headline(CleanReport report)
@@ -550,11 +611,144 @@ namespace RamOptimiser.App
             return "Committed " + CommitText(s) + ", " + s.CommitPercent.ToString(CultureInfo.InvariantCulture) + " percent of the limit";
         }
 
-        /// <summary>The top-apps row as one phrase: "msedge: 2.1 GB, 24 processes".</summary>
+        // ------------------------------------------------------------------ commit warning (U15)
+
+        /// <summary>The warning turns on at 90% of the commit limit and off below 87%, so 2-second samples near the
+        /// edge do not flicker it.</summary>
+        public const int CommitWarnPercent = 90, CommitClearPercent = 87;
+        public const string CommitWarning = "Close to the limit: apps may fail to start or to save work. "
+            + "Cleaning does not lower this; closing apps does.";
+
+        /// <summary>Normal to Warning at 90% or more; Warning to Normal below 87%; never with an unknown limit. Pure.</summary>
+        public static bool CommitWarnOn(bool wasOn, MemorySnapshot s)
+        {
+            if (s == null || s.CommitLimit == 0) return false;
+            return s.CommitPercent >= (wasOn ? CommitClearPercent : CommitWarnPercent);
+        }
+
+        /// <summary>The commit row's accessible name, with ". Close to the limit" while the warning shows.</summary>
+        public static string CommitName(MemorySnapshot s, bool warn)
+        {
+            string name = CommitName(s);
+            return warn && s != null && s.CommitLimit != 0 ? name + ". Close to the limit" : name;
+        }
+
+        // ------------------------------------------------------------------ top apps (R5, U17)
+
+        public const string TopAppsNote = "Ranked by private memory. Cleaning does not shrink it; closing the app does.";
+        const int MaxDisplayName = 64;
+
+        /// <summary>
+        /// A process name as shown: whoever names an exe controls it, so control, format (bidi, zero-width) and line or
+        /// paragraph separator characters are dropped, the rest is trimmed and cut to 64 characters with "...", and an
+        /// empty result reads "(no name)". A surrogate pair is never split. Pure.
+        /// </summary>
+        public static string DisplayName(string raw)
+        {
+            var sb = new StringBuilder();
+            if (raw != null)
+            {
+                foreach (char c in raw)
+                {
+                    UnicodeCategory cat = char.GetUnicodeCategory(c);
+                    if (cat == UnicodeCategory.Control || cat == UnicodeCategory.Format
+                        || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator) continue;
+                    sb.Append(c);
+                }
+            }
+            string name = sb.ToString().Trim();
+            if (name.Length == 0) return "(no name)";
+            if (name.Length <= MaxDisplayName) return name;
+            int keep = MaxDisplayName - 3;
+            if (char.IsHighSurrogate(name[keep - 1])) keep--;
+            return name.Substring(0, keep).TrimEnd() + "...";
+        }
+
+        /// <summary>The top-apps row as one phrase: "msedge: 2.9 GB private, 1.6 GB in RAM, 24 processes".</summary>
         public static string TopAppName(AppMemory a)
         {
-            string text = a.Name + ": " + Format.Bytes(a.Bytes);
+            string text = DisplayName(a.Name) + ": " + Format.Bytes(a.PrivateBytes) + " private, " + Format.Bytes(a.Bytes) + " in RAM";
             return a.Processes > 1 ? text + ", " + a.Processes.ToString(CultureInfo.InvariantCulture) + " processes" : text;
+        }
+
+        /// <summary>The row's tooltip, one line each: the full name, then what each figure means and what a clean does to it.</summary>
+        public static List<string> TopAppTip(AppMemory a)
+        {
+            string name = DisplayName(a.Name);
+            if (a.Processes > 1) name += ", " + a.Processes.ToString(CultureInfo.InvariantCulture) + " processes";
+            return new List<string>
+            {
+                name,
+                "Private: " + Format.Bytes(a.PrivateBytes) + ". Memory only this app can use. A clean does not change it.",
+                "In RAM: " + Format.Bytes(a.Bytes) + ". The part held in physical memory now. A clean lowers it for a while, then it grows back."
+            };
+        }
+
+        // ------------------------------------------------------------------ shortcuts and locked controls (U16, U21)
+
+        /// <summary>"Memory (Ctrl+1)": a control's label with its keys, for tooltips.</summary>
+        public static string ShortcutHint(string label, string keys)
+        {
+            return label + " (" + keys + ")";
+        }
+
+        public const string MustStaySelected = "Must stay selected";
+
+        /// <summary>"At least one area must stay selected, so Process working sets stays on." Uses the short visible labels.</summary>
+        public static string LastAreaReasonFor(Areas area)
+        {
+            return "At least one area must stay selected, so " + ShortAreaLabel(area) + " stays on.";
+        }
+
+        /// <summary>The labels the Settings list shows (MainWindow.xaml), without AreaLabel's cost notes.</summary>
+        static string ShortAreaLabel(Areas area)
+        {
+            switch (area)
+            {
+                case Areas.StandbyList: return "Full standby cache";
+                case Areas.VolumeCache: return "Drive write cache";
+                default: return AreaLabel(area);
+            }
+        }
+
+        /// <summary>The Clean button's tooltip while it is disabled for a reason the user can act on; null otherwise.</summary>
+        public static string CleanTooltip(bool elevated, bool cleaning, MemoryViewState state)
+        {
+            if (cleaning) return null;
+            if (!elevated) return CleanNeedsAdmin;
+            if (state == MemoryViewState.FailedNoData) return CleanNeedsData;
+            return null;
+        }
+
+        /// <summary>A disabled control's tooltip: its reason, only while it is disabled and has one.</summary>
+        public static string DisabledTip(bool enabled, string reason)
+        {
+            return enabled || string.IsNullOrEmpty(reason) ? null : reason;
+        }
+
+        // ------------------------------------------------------------------ will a clean help (R1 wiring)
+
+        /// <summary>The advice line's glyph: a warning when memory is short or commit-bound, else an info mark; null hides it.</summary>
+        public static string AdviceGlyph(RamOptimiser.CleanAdvice a)
+        {
+            if (a == RamOptimiser.CleanAdvice.None) return null;
+            return AdviceStrong(a) ? "IconWarn" : "IconInfo";
+        }
+
+        public static string AdviceStroke(RamOptimiser.CleanAdvice a) { return AdviceStrong(a) ? "Caution" : "MutedText"; }
+
+        /// <summary>Text colour: the warnings read in full Text, the calm states stay muted.</summary>
+        public static string AdviceTextBrush(RamOptimiser.CleanAdvice a) { return AdviceStrong(a) ? "Text" : "MutedText"; }
+
+        static bool AdviceStrong(RamOptimiser.CleanAdvice a)
+        {
+            return a == RamOptimiser.CleanAdvice.WillHelp || a == RamOptimiser.CleanAdvice.CommitBound;
+        }
+
+        /// <summary>The advice is about now: shown only while the figures are live, never from a stale or missing read.</summary>
+        public static bool AdviceVisible(MemoryViewState state)
+        {
+            return state == MemoryViewState.Live;
         }
 
         /// <summary>The error under a startup row that could not be changed: a title and the reason as a sentence.</summary>
@@ -883,15 +1077,41 @@ namespace RamOptimiser.App
         /// </summary>
         public static AutoNotice AutoBar(AutoCleanState state, AutoCleanStatus st, AppSettings s, CultureInfo culture)
         {
+            return AutoBar(state, st, s, culture, PauseOrigin.Unknown);
+        }
+
+        /// <summary>"Paused from the tray for 1 hour." for the bar's second line; null when the origin is not known.</summary>
+        public static string PauseOriginLine(PauseOrigin origin)
+        {
+            string length = DurationPhrase(AutoCleanService.PauseLength);
+            switch (origin)
+            {
+                case PauseOrigin.Tray: return "Paused from the tray for " + length + ".";
+                case PauseOrigin.Settings: return "Paused from Settings for " + length + ".";
+                case PauseOrigin.Restored: return "Paused before the app restarted.";
+                default: return null;
+            }
+        }
+
+        /// <summary>The origin lasts as long as the pause it describes: once the service is not paused, it is forgotten.</summary>
+        public static PauseOrigin KeepPauseOrigin(PauseOrigin origin, AutoCleanStatus st)
+        {
+            return st != null && st.Paused ? origin : PauseOrigin.Unknown;
+        }
+
+        /// <summary>As above; a pause's second line also says where it came from, when that is known.</summary>
+        public static AutoNotice AutoBar(AutoCleanState state, AutoCleanStatus st, AppSettings s, CultureInfo culture, PauseOrigin origin)
+        {
             if (s == null) throw new ArgumentNullException("s");
             if (state == AutoCleanState.Paused)
             {
                 string paused = PausedLine(st, culture);
                 if (paused == null) return null;
+                string from = PauseOriginLine(origin);
                 return new AutoNotice
                 {
                     Title = "Auto-clean is p" + paused.Substring(1) + ".",
-                    Detail = ManualStillWorks,
+                    Detail = from == null ? ManualStillWorks : from + " " + ManualStillWorks,
                     Glyph = "IconPause", Stroke = "Accent", Resume = true, Key = "paused"
                 };
             }
@@ -1014,6 +1234,12 @@ namespace RamOptimiser.App
         }
 
         /// <summary>Case-insensitive search over the shown name and the real name; blank matches everything.</summary>
+        /// <summary>Esc in the search box clears it only when there is text; on an empty box the key is left alone.</summary>
+        public static bool EscapeClears(string text)
+        {
+            return !string.IsNullOrEmpty(text);
+        }
+
         public static bool Matches(string search, string label, string name)
         {
             if (string.IsNullOrWhiteSpace(search)) return true;

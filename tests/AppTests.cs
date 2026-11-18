@@ -516,10 +516,11 @@ namespace RamOptimiser.Tests
             Check("commit: of limit", AppText.CommitText(commit) == Format.Bytes(12 * GB) + " of " + Format.Bytes(24 * GB)
                 && AppText.CommitName(commit).EndsWith(", 50 percent of the limit"));
 
-            Check("top app: one process", AppText.TopAppName(new AppMemory { Name = "code", Processes = 1, Bytes = GB })
-                == "code: " + Format.Bytes(GB));
-            Check("top app: process count", AppText.TopAppName(new AppMemory { Name = "msedge", Processes = 24, Bytes = GB })
-                == "msedge: " + Format.Bytes(GB) + ", 24 processes");
+            // R5: ranked by private bytes, with the part in RAM now as the second figure.
+            Check("top app: one process", AppText.TopAppName(new AppMemory { Name = "code", Processes = 1, PrivateBytes = GB, Bytes = GB / 2 })
+                == "code: " + Format.Bytes(GB) + " private, " + Format.Bytes(GB / 2) + " in RAM");
+            Check("top app: process count", AppText.TopAppName(new AppMemory { Name = "msedge", Processes = 24, PrivateBytes = GB, Bytes = GB })
+                == "msedge: " + Format.Bytes(GB) + " private, " + Format.Bytes(GB) + " in RAM, 24 processes");
             Check("change failed: title", AppText.ChangeFailedTitle("Xbox", false) == "Couldn't turn off Xbox"
                 && AppText.ChangeFailedTitle("Xbox", true) == "Couldn't turn on Xbox");
             Check("change failed: text keeps state", AppText.ChangeFailedText("access is denied", false) == "Access is denied. It is still on."

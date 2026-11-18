@@ -22,6 +22,8 @@
   <Geometry x:Key="IconEmpty">M2.5,3 H13.5 V13 H2.5 Z M2.5,9.5 H5.5 L6.5,11 H9.5 L10.5,9.5 H13.5</Geometry>
   <Geometry x:Key="IconClose">M4,4 L12,12 M12,4 L4,12</Geometry>
   <Geometry x:Key="IconDash">M4.5,8 H11.5</Geometry>
+  <!-- An "i" in a circle: the calm states of the will-a-clean-help line (R1). -->
+  <Geometry x:Key="IconInfo">M14,8 A6,6 0 1 1 2,8 A6,6 0 1 1 14,8 Z M8,7.5 V11 M8,5 V5.05</Geometry>
 
   <Style x:Key="IconPath" TargetType="Path">
     <Setter Property="Width" Value="16"/>
@@ -464,9 +466,34 @@
     </Setter>
   </Style>
 
-  <!-- Search: room on the left for the magnifier drawn over it in MainWindow; its Tag is the placeholder. -->
+  <!-- Search: room on the left for the magnifier and on the right for the clear button, both drawn over it in
+       MainWindow, so text never runs under either; its Tag is the placeholder. -->
   <Style x:Key="SearchBox" TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
-    <Setter Property="Padding" Value="30,0,8,0"/>
+    <Setter Property="Padding" Value="30,0,34,0"/>
+  </Style>
+
+  <!-- Tooltips follow the theme (the system look stays light in dark mode): Text on Card (16.82 light, 14.16 dark),
+       a ControlBorder edge (3.52 / 5.03 against Card), radius 4. Used by the top-app rows, tabs and disabled reasons. -->
+  <Style TargetType="ToolTip">
+    <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+    <Setter Property="Background" Value="{DynamicResource Card}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource ControlBorder}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="8,4"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="FontFamily" Value="{DynamicResource BodyFont}"/>
+    <Setter Property="MaxWidth" Value="320"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ToolTip">
+          <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4" Padding="{TemplateBinding Padding}"
+                  SnapsToDevicePixels="True">
+            <ContentPresenter/>
+          </Border>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
   </Style>
 
   <!-- Slider: a 4 px track (control border, 3:1), accent fill up to a 20 px thumb. Arrow keys move by 1. -->
@@ -711,6 +738,17 @@
   <Style x:Key="InfoBar" TargetType="Border">
     <Setter Property="Background" Value="{DynamicResource DangerBackground}"/>
     <Setter Property="BorderBrush" Value="{DynamicResource Danger}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="Padding" Value="10,8,4,8"/>
+  </Style>
+
+  <!-- Status that is news, not an error (auto-clean paused or waiting longer): info tint, glyph plus words.
+       Text 15.41 / 14.05 and muted text 5.92 / 8.40 on InfoBackground; Accent glyph 5.58 / 7.81, Caution glyph
+       4.65 / 10.64, button edge (ControlBorder) 3.22 / 4.99. The InfoBorder edge is decorative (the words carry it). -->
+  <Style x:Key="NoticeBar" TargetType="Border">
+    <Setter Property="Background" Value="{DynamicResource InfoBackground}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource InfoBorder}"/>
     <Setter Property="BorderThickness" Value="1"/>
     <Setter Property="CornerRadius" Value="4"/>
     <Setter Property="Padding" Value="10,8,4,8"/>
