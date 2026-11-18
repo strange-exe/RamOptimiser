@@ -365,30 +365,45 @@ Owner answers used: the planner's recommended ones (decisions file, 2026-11-17);
   the switch: "In Settings" (packaged) or "Runs once", no glyph (like Left alone and Not at startup); the row gets no
   switch action at all. First match wins in `AppText.AppLock`: source lock, Left on, Needs admin. The detail adds
   "Store app. Turn it on or off in Settings, Apps, Startup" or "Your organisation controls whether it starts", and
-  "Runs once at the next sign-in, then Windows removes it". The summary counts enabled packaged rows as apps on and
+  "Runs once at the next sign-in, then Windows removes it". A packaged row a policy decides reads "Set by policy"
+  instead (Settings can't change it), its verdict line reads "Set by policy: nothing to turn off", and it does not
+  on its own bring up the Settings button. A run-once row has no list verdict either: its verdict line reads "Runs
+  once: nothing to turn off", its detail drops "If off", and its locked name is "X: Runs once at the next sign-in"
+  rather than "starts with Windows". Detail parts join without doubling a full stop ("From Discord Inc. Runs ...",
+  `AppText.JoinSentences` and `DetailLine`). The summary counts enabled packaged rows as apps on and
   never counts run-once rows; "safe to turn off" counts only rows with a switch here. An OutlineButton "Open Startup
   settings" under the apps note opens `ms-settings:startupapps` (a constant) while the apps list has a packaged row.
   Row keys include the source (`app|Packaged|Teams`), so a Run value and a packaged task with one name stay apart.
+  Two read-only rows may still share a key (two tasks of one package with one name, "!Setup" beside "Setup"); that is
+  accepted, since a read-only row has no switch, no error bar and no change flow, the only users of the key.
 - **Publisher line and Look closer (E26).** The detail's "From <company>" is now `AppText.PublisherLine`: who
   signed it, or "Not signed; the file says ...", or today's "From ..." when the file was not checked. Rows the list
   knows also end with it, after "Runs <file>". A Tag beside the name, IconWarn in Caution plus the words "Look
   closer", marks an unsigned program (not Windows' own catalog-signed files), a signature that does not check out or
-  is blocked, and a signer that differs from the named company. Never colour alone; the switch name adds ". Look
-  closer: see who signed it". Display only: it never changes Keep or a switch.
+  is blocked, a signer that differs from the named company, and any checked host (rundll32, wscript, powershell)
+  that runs another file, Windows' own hosts included, since the check never covers the file it runs. Never colour
+  alone; the switch name, or a locked row's name, adds ". Look closer: see who signed it". Display only: it never
+  changes Keep or a switch.
 - **Error or note under the row (E13).** `RowNote` replaces the title/message pair. Nothing changed (a refusal or a
   failure, including an exception, now `Kind = Failed`): the danger InfoBar with IconError, today's words, "Dismiss
   error". Changed only in part: the NoticeBar (info tint) with IconWarn in Caution, titled with the row's name, the
   StartupChangeNote sentence and "Dismiss note". Both are polite live regions read once (`AnnounceGate`).
 - **Journal sentence (E12).** After the start label: "Windows or an updater turned it back on after this app turned
   it off" or "Turned off by someone else after this app changed it, so the app leaves it alone". An elevated load
-  calls `StartupServices.TidyJournal()` after reading, so the sentence shows on that load and the record then goes.
+  whose service read worked queues `StartupServices.TidyJournal()` as its own work item after handing the rows to
+  the UI, so the sentence shows on that load, the record then goes, and a Power Clean holding the service lock
+  never keeps the list on "Loading".
 - **Shims removed.** The temporary flag setters on ServiceAction, StartupService.DisabledByApp and StartupChange,
   and the message-text fallback in `ServiceOutcomes.Of`, are gone: outcomes are typed end to end.
 
 Verified: unit and static tests only (tests/StartupTabTests.cs: detail and publisher lines, the marker, locks,
 counts, keys, the settings-link rule, every change kind's note, journal sentences, read-only legacy members, and the
-AppShell / MainWindow wiring by source). Not verified: no run of the app, so no render of the new rows, marker or
-note bar, no real packaged rows, no check that an elevated app can open ms-settings, no Narrator pass.
+AppShell / MainWindow wiring by source). Integration (2026-11-18): the render harness drew a fixed apps list
+(signed known row, unsigned row with an error bar, a Windows host running another file locked "Needs admin" with
+the marker, packaged, policy-set packaged and run-once rows, the Settings button) and a partial-change note under
+a service row, in light and dark (.claude/verify/shots-6a-startup), and printed each switch's and locked row's
+UIA name. Not verified: no real packaged rows, no check that an elevated app can open ms-settings, no high
+contrast render, no Narrator pass.
 
 ## Website (download page), started 2026-11-17
 

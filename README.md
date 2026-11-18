@@ -59,7 +59,8 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
     (a program set to run once at the next sign-in) are listed read-only and never removed.
   - Each app's details say who signed its program, from its Authenticode signature checked on this PC with no
     network access, and whether that matches the company the file names. An unsigned program, a signature that
-    does not check out, or a signer that differs from the named company gets a **Look closer** marker. The marker
+    does not check out, a signer that differs from the named company, or a program such as rundll32 or PowerShell
+    that runs another file (whose signature is never checked) gets a **Look closer** marker. The marker
     is information only: it never locks or unlocks a switch. Windows' own files, which are signed through a
     catalog, read "signature not checked".
   - When a service change works only in part (for example, it won't start with Windows but other services keep it

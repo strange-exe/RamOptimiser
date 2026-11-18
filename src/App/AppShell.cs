@@ -874,13 +874,6 @@ namespace RamOptimiser.App
                 catch (Exception ex) { failure = AppText.Plain(ex.Message, "unknown error"); }
                 try { services = StartupServices.Query(); }
                 catch (Exception ex) { failure = failure ?? AppText.Plain(ex.Message, "unknown error"); }
-                // E12: after the read, so this one load still shows "turned back on" or "turned off elsewhere";
-                // then the records the app can no longer act on are removed. Elevated only; the count is not shown.
-                if (elevated)
-                {
-                    try { StartupServices.TidyJournal(); }
-                    catch (Exception ex) { ErrorLog.TryWrite(ErrorLog.DefaultPath, "could not tidy the service startup journal", ex); }
-                }
                 Post(() =>
                 {
                     startupFlow.Loaded();
@@ -896,6 +889,18 @@ namespace RamOptimiser.App
                         Announce(startupSummaryRegion, startupSummary.Text);
                     }
                 });
+                // E12: after the rows were read and handed over, so this one load still shows "turned back on" or
+                // "turned off elsewhere"; then the records the app can no longer act on are removed. Only after a
+                // read that worked (a failed one showed nothing), elevated only, the count not shown. Its own work
+                // item: the tidy waits on ServiceTrimmer.Operation, which a Power Clean holds while it stops services.
+                if (elevated && services != null)
+                {
+                    ThreadPool.QueueUserWorkItem(delegate
+                    {
+                        try { StartupServices.TidyJournal(); }
+                        catch (Exception ex) { ErrorLog.TryWrite(ErrorLog.DefaultPath, "could not tidy the service startup journal", ex); }
+                    });
+                }
             });
         }
 
@@ -905,9 +910,11 @@ namespace RamOptimiser.App
             public string Key, Label, Name, Detail, LockText;
             /// <summary>"Look closer" when the program's signature does not back it (E26); else null.</summary>
             public string Marker;
+            /// <summary>The verdict line's words when they are not VerdictText's (run-once, policy-set); else null.</summary>
+            public string VerdictWords;
             public Geometry LockGlyph;
             public Verdict Verdict;
-            public bool IsService, On, ByApp;
+            public bool IsService, On, ByApp, RunsOnce;
             public Action<bool> Apply;
         }
 
@@ -923,7 +930,8 @@ namespace RamOptimiser.App
                     var it = new StartupItem
                     {
                         Key = key, Name = a.Name, IsService = false, On = startupFlow.ShowsOn(key, a.Enabled),
-                        Verdict = a.Known == null ? Verdict.Unknown : a.Known.Verdict,
+                        Verdict = AppText.AppVerdict(a), RunsOnce = StartupApps.IsRunOnce(a.Source),
+                        VerdictWords = AppText.AppVerdictWords(a),
                         Label = a.Known != null ? a.Known.Label : a.Name, Detail = AppText.AppDetail(a),
                         Marker = AppText.LookCloser(a),
                         LockText = AppText.AppLock(a, elevated)
@@ -1130,7 +1138,8 @@ namespace RamOptimiser.App
             string brush = it.Verdict == Verdict.Safe ? "Ok" : it.Verdict == Verdict.Caution ? "Caution" : "MutedText";
             string glyph = it.Verdict == Verdict.Safe ? "IconCheck" : it.Verdict == Verdict.Caution ? "IconWarn"
                 : it.Verdict == Verdict.Keep ? "IconShield" : "IconUnknown";
-            string verdict = it.Verdict == Verdict.Unknown && it.IsService ? "Not in the app's list" : AppText.VerdictText(it.Verdict, it.IsService);
+            string verdict = it.VerdictWords
+                ?? (it.Verdict == Verdict.Unknown && it.IsService ? "Not in the app's list" : AppText.VerdictText(it.Verdict, it.IsService));
 
             var row = new Border();
             if (!first)
@@ -1177,7 +1186,7 @@ namespace RamOptimiser.App
             verdictLine.Children.Add(verdictText);
             text.Children.Add(verdictLine);
             // What it is for and what turning it off breaks, always in view: the decision needs it.
-            TextBlock detail = SmallText(it.Detail + ".");
+            TextBlock detail = SmallText(AppText.DetailLine(it.Detail));
             detail.Margin = new Thickness(0, 4, 0, 0);
             text.Children.Add(detail);
             grid.Children.Add(text);
@@ -1217,7 +1226,7 @@ namespace RamOptimiser.App
                 // U10: one Text element (a plain StackPanel has no peer, so its name was never exposed) that always
                 // says whether the item starts with Windows; the glyph and words inside are hidden from UIA.
                 var lockedRow = new SummaryPanel { Child = state, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 2, 0, 0) };
-                AutomationProperties.SetName(lockedRow, AppText.LockedRowName(it.Label, it.LockText, it.On));
+                AutomationProperties.SetName(lockedRow, AppText.StartupLockedName(it.Label, it.LockText, it.On, it.RunsOnce, it.Marker));
                 Grid.SetColumn(lockedRow, 1);
                 grid.Children.Add(lockedRow);
             }

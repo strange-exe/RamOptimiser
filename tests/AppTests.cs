@@ -1038,7 +1038,7 @@ namespace RamOptimiser.Tests
                 && automation.Contains("return new GroupPanelPeer(this);") && automation.Contains("AutomationControlType.Group; }"));
             // A locked startup row reads as one Text element whose name says whether it starts with Windows.
             Check("locked startup rows are SummaryPanels", shellCode.Contains("var lockedRow = new SummaryPanel")
-                && shellCode.Contains("AutomationProperties.SetName(lockedRow, AppText.LockedRowName(it.Label, it.LockText, it.On));"));
+                && shellCode.Contains("AutomationProperties.SetName(lockedRow, AppText.StartupLockedName(it.Label, it.LockText, it.On, it.RunsOnce, it.Marker));"));
         }
 
         /// <summary>A SolidColorBrush token's Color, or null.</summary>

@@ -841,7 +841,8 @@ namespace RamOptimiser.App
             if (a.Known != null)
             {
                 parts.Add(a.Known.Purpose);
-                if (!string.IsNullOrEmpty(a.Known.Effect)) parts.Add("If off: " + a.Known.Effect);
+                // A run-once row has no off to describe.
+                if (!string.IsNullOrEmpty(a.Known.Effect) && !StartupApps.IsRunOnce(a.Source)) parts.Add("If off: " + a.Known.Effect);
                 // The list matches by file name only, so say which file this row really runs.
                 parts.Add("Runs " + (a.ExePath ?? a.Name));
             }
@@ -849,7 +850,74 @@ namespace RamOptimiser.App
             if (a.NeedsAdmin) parts.Add("Starts for every user");
             string source = StartupSourceDetail(a);
             if (source != null) parts.Add(source);
-            return string.Join(". ", parts.ToArray());
+            return JoinSentences(parts);
+        }
+
+        /// <summary>The verdict line of a run-once row: there is no switch, so no list verdict applies.</summary>
+        public const string RunOnceVerdictText = "Runs once: nothing to turn off";
+        /// <summary>The verdict line of a packaged row a policy decides: the user can't turn it off anywhere.</summary>
+        public const string PolicyVerdictText = "Set by policy: nothing to turn off";
+
+        /// <summary>
+        /// The verdict words of an app row nobody here can turn off (a run-once row, a policy-set packaged row), or
+        /// null for every other row, whose words are VerdictText's. Pure.
+        /// </summary>
+        public static string AppVerdictWords(StartupApp a)
+        {
+            if (a == null) return null;
+            if (StartupApps.IsRunOnce(a.Source)) return RunOnceVerdictText;
+            if (a.Source == StartupSource.Packaged && a.PolicySet) return PolicyVerdictText;
+            return null;
+        }
+
+        /// <summary>
+        /// An app row's verdict: the built-in list's, except for a row AppVerdictWords speaks for, which can't be
+        /// turned off and so gets none (Unknown). Pure.
+        /// </summary>
+        public static Verdict AppVerdict(StartupApp a)
+        {
+            if (a == null || a.Known == null || AppVerdictWords(a) != null) return Verdict.Unknown;
+            return a.Known.Verdict;
+        }
+
+        /// <summary>An app row's verdict as words: AppVerdictWords when it speaks, else VerdictText. Pure.</summary>
+        public static string AppVerdictText(StartupApp a)
+        {
+            return AppVerdictWords(a) ?? VerdictText(AppVerdict(a), false);
+        }
+
+        /// <summary>
+        /// Parts joined as sentences with ". ", except after a part that already ends in a full stop (a company such
+        /// as "Discord Inc."), which gets only the space. No final full stop, like AppDetail. Pure.
+        /// </summary>
+        public static string JoinSentences(IList<string> parts)
+        {
+            var sb = new StringBuilder();
+            foreach (string p in parts)
+            {
+                if (string.IsNullOrEmpty(p)) continue;
+                if (sb.Length > 0) sb.Append(sb[sb.Length - 1] == '.' ? " " : ". ");
+                sb.Append(p);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>A row's detail as shown: with one final full stop, never two. Pure.</summary>
+        public static string DetailLine(string detail)
+        {
+            if (string.IsNullOrEmpty(detail)) return "";
+            return detail.EndsWith(".", StringComparison.Ordinal) ? detail : detail + ".";
+        }
+
+        /// <summary>
+        /// A locked Startup row's accessible name: LockedRowName, except that a run-once row says when it runs (it
+        /// never "starts with Windows"), plus ". Look closer: see who signed it" when the row has the marker, the
+        /// way StartupSwitchName does for a row with a switch. Pure.
+        /// </summary>
+        public static string StartupLockedName(string label, string lockText, bool on, bool runsOnce, string marker)
+        {
+            string name = runsOnce ? label + ": Runs once at the next sign-in" : LockedRowName(label, lockText, on);
+            return name + (marker != null ? ". " + marker + ": see who signed it" : "");
         }
 
         /// <summary>The marker beside a row's name whose signature does not back it (E26). Words plus a glyph.</summary>
@@ -864,13 +932,15 @@ namespace RamOptimiser.App
         /// <summary>
         /// LookCloserText when the row's program is unsigned (outside Windows' own files, which are catalog-signed and
         /// read "not checked"), its signature does not check out or is blocked, or it is signed by a company other than
-        /// the one the file names; else null. A row that was not checked (a packaged app, a user's own shortcut, a
-        /// missing file) gets no marker: there is nothing to say about it. Display only: never part of a Keep or switch
-        /// decision. Pure.
+        /// the one the file names; else null. A host (rundll32, wscript, powershell) that runs another file is marked
+        /// whatever its own signature, Windows' own hosts included: the check covers the host, never the file it runs.
+        /// A row that was not checked (a packaged app, a user's own shortcut, a missing file) gets no marker: there is
+        /// nothing to say about it. Display only: never part of a Keep or switch decision. Pure.
         /// </summary>
         public static string LookCloser(StartupApp a, string windowsFolder)
         {
-            if (a == null) return null;
+            if (a == null || a.Signature == SignatureState.NotChecked) return null;
+            if (a.RunsFile) return LookCloserText;
             switch (a.Signature)
             {
                 case SignatureState.Signed:
@@ -944,12 +1014,15 @@ namespace RamOptimiser.App
             return "app|" + a.Source + "|" + a.Name;
         }
 
-        /// <summary>The "Open Startup settings" button shows on the apps list while it has a packaged row. Pure.</summary>
+        /// <summary>
+        /// The "Open Startup settings" button shows on the apps list while it has a packaged row Settings can change
+        /// (a policy-set one can't be changed there). Pure.
+        /// </summary>
         public static bool ShowsStartupSettings(bool appsView, IList<StartupApp> apps)
         {
             if (!appsView || apps == null) return false;
             foreach (StartupApp a in apps)
-                if (a != null && a.Source == StartupSource.Packaged) return true;
+                if (a != null && a.Source == StartupSource.Packaged && !a.PolicySet) return true;
             return false;
         }
 

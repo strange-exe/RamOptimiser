@@ -35,7 +35,104 @@ namespace RamOptimiser.Tests
             ServiceDetailTests();
             NoLegacySettersTests();
             WiringTests();
+            ReviewFixTests();
             return failed;
+        }
+
+        // ---------------------------------------------------------------- review fixes (6A integration)
+
+        static void ReviewFixTests()
+        {
+            // A host (rundll32, wscript, powershell) running another file: its own signature says nothing about
+            // that file, so the row is marked whatever the host's signature, Windows' own hosts included.
+            var host = App(StartupSource.UserRun, "Updater");
+            host.ExePath = @"C:\Windows\System32\rundll32.exe";
+            host.Signature = SignatureState.Unsigned;
+            host.SystemOwned = true;
+            host.RunsFile = true;
+            Check("look closer: a Windows host running another file", AppText.LookCloser(host, Win) == AppText.LookCloserText);
+            host.Signature = SignatureState.Signed;
+            host.Signer = "Microsoft Windows";
+            Check("look closer: a signed host running another file", AppText.LookCloser(host, Win) == AppText.LookCloserText);
+            host.Signature = SignatureState.NotChecked;
+            Check("look closer: an unchecked host is not flagged", AppText.LookCloser(host, Win) == null);
+            host.RunsFile = false;
+            host.Signature = SignatureState.Unsigned;
+            Check("look closer: a Windows file running nothing else is still fine", AppText.LookCloser(host, Win) == null);
+
+            // A locked row's name carries the marker too, so it is never visual only.
+            Check("locked name: marker", AppText.StartupLockedName("Updater", "Needs admin", true, false, AppText.LookCloserText)
+                == "Updater: Needs admin, starts with Windows. Look closer: see who signed it",
+                AppText.StartupLockedName("Updater", "Needs admin", true, false, AppText.LookCloserText));
+            Check("locked name: plain matches LockedRowName", AppText.StartupLockedName("Tool", "Left on", false, false, null)
+                == AppText.LockedRowName("Tool", "Left on", false));
+            // A run-once row never "starts with Windows": the summary does not count it either.
+            Check("locked name: run once", AppText.StartupLockedName("Setup", "Runs once", true, true, null)
+                == "Setup: Runs once at the next sign-in", AppText.StartupLockedName("Setup", "Runs once", true, true, null));
+            Check("locked name: run once with marker", AppText.StartupLockedName("Setup", "Runs once", true, true, AppText.LookCloserText)
+                == "Setup: Runs once at the next sign-in. Look closer: see who signed it");
+
+            // A packaged row that a policy decides: Settings can't change it, so the lock says who decides.
+            var pol = App(StartupSource.Packaged, "Teams");
+            pol.PolicySet = true;
+            Check("lock: policy-set packaged row", AppText.AppLock(pol, true) == "Set by policy", AppText.AppLock(pol, true));
+            Check("settings link: hidden when every packaged row is policy-set", !AppText.ShowsStartupSettings(true, new[] { pol }));
+            var free = App(StartupSource.Packaged, "Phone");
+            Check("settings link: shown with one packaged row Settings can change", AppText.ShowsStartupSettings(true, new[] { pol, free }));
+
+            // A run-once row has nothing to turn off: no verdict from the list, no "If off" sentence.
+            var once = App(StartupSource.UserRunOnce, "Discord");
+            once.Known = StartupKnowledge.FindApp("Discord.exe");
+            Check("verdict: run-once row has no list verdict", AppText.AppVerdict(once) == Verdict.Unknown);
+            Check("verdict: run-once words", AppText.AppVerdictText(once) == "Runs once: nothing to turn off", AppText.AppVerdictText(once));
+            string d = AppText.AppDetail(once, Win);
+            Check("app detail: run-once row has no If off", d.StartsWith(once.Known.Purpose, StringComparison.Ordinal) && !d.Contains("If off"), d);
+            var run = App(StartupSource.UserRun, "Discord");
+            run.Known = once.Known;
+            Check("verdict: a Run row keeps the list verdict", AppText.AppVerdict(run) == once.Known.Verdict);
+            Check("verdict: a Run row keeps today's words", AppText.AppVerdictText(run) == AppText.VerdictText(once.Known.Verdict, false));
+            Check("verdict: unknown app words", AppText.AppVerdictText(App(StartupSource.UserRun, "X")) == AppText.VerdictText(Verdict.Unknown, false));
+            Check("verdict: no row", AppText.AppVerdict(null) == Verdict.Unknown);
+            Check("verdict words: a Run row uses VerdictText", AppText.AppVerdictWords(run) == null);
+            Check("verdict words: run-once", AppText.AppVerdictWords(once) == AppText.RunOnceVerdictText);
+            // A policy-set packaged row can't be turned off by the user anywhere: no list verdict either.
+            pol.Known = once.Known;
+            Check("verdict: policy-set row has no list verdict", AppText.AppVerdict(pol) == Verdict.Unknown);
+            Check("verdict: policy-set words", AppText.AppVerdictText(pol) == "Set by policy: nothing to turn off", AppText.AppVerdictText(pol));
+            free.Known = once.Known;
+            Check("verdict: a packaged row Settings can change keeps the list verdict", AppText.AppVerdict(free) == once.Known.Verdict
+                && AppText.AppVerdictWords(free) == null);
+
+            // A company that ends in a full stop ("Discord Inc.") never doubles it, inside the detail or at its end.
+            var inc = App(StartupSource.UserRunOnce, "Setup");
+            inc.ClaimedCompany = "Discord Inc.";
+            d = AppText.AppDetail(inc, Win);
+            Check("app detail: no doubled full stop inside", d == "From Discord Inc. Runs once at the next sign-in, then Windows removes it", d);
+            inc.Source = StartupSource.UserRun;
+            inc.Signature = SignatureState.Signed;
+            inc.Signer = "Discord Inc.";
+            d = AppText.AppDetail(inc, Win);
+            Check("detail line: ends with one full stop", AppText.DetailLine(d) == "Signed by Discord Inc.", AppText.DetailLine(d));
+            Check("detail line: adds the full stop", AppText.DetailLine("Not signed") == "Not signed.");
+            Check("detail line: empty", AppText.DetailLine(null) == "" && AppText.DetailLine("") == "");
+
+            // E12: the tidy runs only after a successful read and never holds up the list (its lock is the one a
+            // Power Clean holds while it stops services).
+            string shellPath = SrcFile("App", "AppShell.cs");
+            if (!File.Exists(shellPath)) { Check("review wiring: source found", false, shellPath); return; }
+            string shell = File.ReadAllText(shellPath);
+            string query = Method(shell, "void QueryStartup()");
+            int post = query.IndexOf("Post(() =>", StringComparison.Ordinal);
+            int tidy = query.IndexOf("StartupServices.TidyJournal()", StringComparison.Ordinal);
+            Check("review wiring: tidy only after services were read", query.Contains("if (elevated && services != null)"), query);
+            Check("review wiring: tidy after the list is handed over", post > 0 && tidy > post, post + " / " + tidy);
+            string items = Method(shell, "List<StartupItem> CurrentItems(");
+            Check("review wiring: app rows use AppVerdict", items.Contains("Verdict = AppText.AppVerdict(a)"), items);
+            string row = Method(shell, "UIElement StartupRow(");
+            Check("review wiring: locked rows use StartupLockedName with the marker",
+                row.Contains("AppText.StartupLockedName(it.Label, it.LockText, it.On, it.RunsOnce, it.Marker)"), row);
+            Check("review wiring: run-once verdict words", row.Contains("it.VerdictWords") && items.Contains("VerdictWords = AppText.AppVerdictWords(a)"), row);
+            Check("review wiring: the detail line ends through DetailLine", row.Contains("SmallText(AppText.DetailLine(it.Detail))"), row);
         }
 
         const string Win = @"C:\Windows";
@@ -344,7 +441,7 @@ namespace RamOptimiser.Tests
             int read = query.IndexOf("StartupServices.Query()", StringComparison.Ordinal);
             int tidy = query.IndexOf("StartupServices.TidyJournal()", StringComparison.Ordinal);
             Check("wiring: tidy runs after the services were read", read > 0 && tidy > read, read + " / " + tidy);
-            Check("wiring: tidy only when elevated", Regex.IsMatch(query, @"if \(elevated\)[\s\S]{0,80}StartupServices\.TidyJournal\(\)"), query);
+            Check("wiring: tidy only when elevated", Regex.IsMatch(query, @"if \(elevated && services != null\)[\s\S]{0,160}StartupServices\.TidyJournal\(\)"), query);
 
             // E13: the catch builds a typed failure; the row note decides error or note.
             string change = Method(shell, "void SetServiceStartup(");

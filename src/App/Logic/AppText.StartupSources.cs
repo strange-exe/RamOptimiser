@@ -12,12 +12,13 @@ namespace RamOptimiser.App
 
         /// <summary>
         /// The words in place of the switch for a row this app can't change: "In Settings" for a packaged app,
-        /// "Runs once" for a RunOnce entry. Null for rows with a switch.
+        /// "Set by policy" for one a policy decides (Settings can't change it either), "Runs once" for a RunOnce
+        /// entry. Null for rows with a switch.
         /// </summary>
         public static string StartupSourceLock(StartupApp a)
         {
             if (a == null) return null;
-            if (a.Source == StartupSource.Packaged) return "In Settings";
+            if (a.Source == StartupSource.Packaged) return a.PolicySet ? "Set by policy" : "In Settings";
             if (StartupApps.IsRunOnce(a.Source)) return "Runs once";
             return null;
         }

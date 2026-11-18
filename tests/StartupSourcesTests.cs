@@ -402,7 +402,7 @@ namespace RamOptimiser.Tests
             Check("wording: run-once detail", AppText.StartupSourceDetail(once) + "." == "Runs once at the next sign-in, then Windows removes it.",
                 AppText.StartupSourceDetail(once));
             Check("wording: other rows add nothing", AppText.StartupSourceDetail(run) == null);
-            Check("wording: lock texts", AppText.StartupSourceLock(packaged) == "In Settings" && AppText.StartupSourceLock(policy) == "In Settings"
+            Check("wording: lock texts", AppText.StartupSourceLock(packaged) == "In Settings" && AppText.StartupSourceLock(policy) == "Set by policy"
                 && AppText.StartupSourceLock(once) == "Runs once" && AppText.StartupSourceLock(run) == null);
             Check("wording: settings link", AppText.OpenStartupSettings == "Open Startup settings"
                 && AppText.StartupSettingsUri == "ms-settings:startupapps");
