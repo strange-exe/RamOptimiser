@@ -36,10 +36,17 @@ namespace RamOptimiser.App
         public static void To(DependencyObject target, DependencyProperty property, double to, TimeSpan duration,
             IEasingFunction ease, bool animate, Action done = null)
         {
+            To(target, property, to, duration, ease, animate, done, TimeSpan.Zero);
+        }
+
+        /// <summary>The same, starting after delay (a stagger); until then the property keeps its current base value.</summary>
+        public static void To(DependencyObject target, DependencyProperty property, double to, TimeSpan duration,
+            IEasingFunction ease, bool animate, Action done, TimeSpan delay)
+        {
             var a = (IAnimatable)target;
             if (animate && On && duration > TimeSpan.Zero)
             {
-                var animation = new DoubleAnimation(to, new Duration(duration)) { EasingFunction = ease };
+                var animation = new DoubleAnimation(to, new Duration(duration)) { EasingFunction = ease, BeginTime = delay };
                 if (done != null) animation.Completed += delegate { done(); };
                 a.BeginAnimation(property, animation);
                 return;

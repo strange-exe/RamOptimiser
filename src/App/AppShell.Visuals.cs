@@ -56,8 +56,14 @@ namespace RamOptimiser.App
 
         void WireVisuals()
         {
-            // UseMica changes go through ApplySettings, which puts the backdrop on or takes it off.
-            OnToggle(micaCheck, on => { settings.UseMica = on; SaveAndApply(); });
+            // UseMica changes go through ApplySettings, which puts the backdrop on or takes it off. It diffs against the
+            // settings handed in, so the snapshot is taken before the change (SaveAndApply() alone would see none).
+            OnToggle(micaCheck, on =>
+            {
+                AppSettings before = settings.Clone();
+                settings.UseMica = on;
+                SaveAndApply(before);
+            });
             progressTimer = new DispatcherTimer(DispatcherPriority.Normal, dispatcher) { Interval = CleanProgressView.ShowAfter };
             progressTimer.Tick += delegate
             {
@@ -154,6 +160,8 @@ namespace RamOptimiser.App
                 return;
             }
             bool animate = WindowShowing;
+            var shown = new bool[changeTexts.Length];
+            for (int i = 0; i < shown.Length; i++) shown[i] = partChanges[i] != null;
             for (int i = 0; i < changeTexts.Length; i++)
             {
                 TextBlock t = changeTexts[i];
@@ -161,14 +169,15 @@ namespace RamOptimiser.App
                 if (text == null) { t.Visibility = Visibility.Collapsed; continue; }
                 t.Text = text;
                 t.Visibility = Visibility.Visible;
-                Enter(t, (TranslateTransform)t.RenderTransform, animate);
+                Enter(t, (TranslateTransform)t.RenderTransform, animate, ChangeStagger.Delay(shown, i));
             }
             changeNote.Text = AppText.ChangeNote(cleanUtc.ToLocalTime(), CultureInfo.CurrentCulture);
             changeNote.Visibility = Visibility.Visible;
-            Enter(changeNote, null, animate);
+            Enter(changeNote, null, animate, ChangeStagger.NoteDelay(shown));
         }
 
-        static void Enter(UIElement e, TranslateTransform rise, bool animate)
+        /// <summary>Rise 4 px and fade in after delay (the 30 ms stagger); everything at once with motion off.</summary>
+        static void Enter(UIElement e, TranslateTransform rise, bool animate, TimeSpan delay)
         {
             bool moving = animate && Motion.On;
             if (moving)
@@ -176,8 +185,8 @@ namespace RamOptimiser.App
                 Motion.To(e, UIElement.OpacityProperty, 0, TimeSpan.Zero, null, false);
                 if (rise != null) Motion.To(rise, TranslateTransform.YProperty, 4, TimeSpan.Zero, null, false);
             }
-            Motion.To(e, UIElement.OpacityProperty, 1, Motion.EnterDuration, Motion.Enter, moving);
-            if (rise != null) Motion.To(rise, TranslateTransform.YProperty, 0, Motion.EnterDuration, Motion.Enter, moving);
+            Motion.To(e, UIElement.OpacityProperty, 1, Motion.EnterDuration, Motion.Enter, moving, null, delay);
+            if (rise != null) Motion.To(rise, TranslateTransform.YProperty, 0, Motion.EnterDuration, Motion.Enter, moving, null, delay);
         }
 
         /// <summary>A new clean starts: the old figures fade out (200 ms, ease in) and go.</summary>

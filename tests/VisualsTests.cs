@@ -34,6 +34,8 @@ namespace RamOptimiser.Tests
             ProgressViewTests();
             PlacementTests();
             GateTests();
+            FocusTests();
+            StaggerTests();
             FlyoutTextTests();
             MicaTests();
             SourceTests();
@@ -333,6 +335,50 @@ namespace RamOptimiser.Tests
             Check("flyout gate: a clock that goes back does not block for long", g.ShouldOpen(T0.AddSeconds(-5)));
         }
 
+        // Review fix: Clean memory turning off while it holds focus hands focus to Open window, and back when it returns.
+        static void FocusTests()
+        {
+            var f = new FlyoutFocus();
+            Check("flyout focus: disabled while focused moves to Open window",
+                f.CleanEnabledChanged(true, false, true, false) == FlyoutFocusMove.ToOpen);
+            Check("flyout focus: enabled again returns to Clean memory",
+                f.CleanEnabledChanged(true, true, false, true) == FlyoutFocusMove.ToClean);
+            Check("flyout focus: only returns once", f.CleanEnabledChanged(true, true, false, true) == FlyoutFocusMove.None);
+            Check("flyout focus: disabled while not focused stays put",
+                new FlyoutFocus().CleanEnabledChanged(true, false, false, false) == FlyoutFocusMove.None);
+            Check("flyout focus: closed flyout never moves focus",
+                new FlyoutFocus().CleanEnabledChanged(false, false, true, false) == FlyoutFocusMove.None);
+            var moved = new FlyoutFocus();
+            moved.CleanEnabledChanged(true, false, true, false);
+            Check("flyout focus: user moved on, so focus stays where they put it",
+                moved.CleanEnabledChanged(true, true, false, false) == FlyoutFocusMove.None);
+            var hidden = new FlyoutFocus();
+            hidden.CleanEnabledChanged(true, false, true, false);
+            hidden.Reset();
+            Check("flyout focus: closing forgets the move", hidden.CleanEnabledChanged(true, true, false, true) == FlyoutFocusMove.None);
+            Check("flyout focus: no change of state, no move", new FlyoutFocus().CleanEnabledChanged(true, true, true, false) == FlyoutFocusMove.None);
+
+            var screen = new PixelRect(0, 0, 1920, 1080);
+            var bottomWork = new PixelRect(0, 0, 1920, 1032);
+            Check("on taskbar: pointer on a bottom bar", FlyoutPlacement.OnTaskbar(1800, 1060, screen, bottomWork));
+            Check("on taskbar: pointer on the desktop is not", !FlyoutPlacement.OnTaskbar(900, 500, screen, bottomWork));
+            Check("on taskbar: pointer on a left bar", FlyoutPlacement.OnTaskbar(20, 500, screen, new PixelRect(60, 0, 1860, 1080)));
+            Check("on taskbar: auto-hide bar is never under the pointer", !FlyoutPlacement.OnTaskbar(1800, 1079, screen, screen));
+        }
+
+        // Preview motion table: the signed changes come in 30 ms apart, in map order; hidden parts take no slot.
+        static void StaggerTests()
+        {
+            var shown = new bool[] { true, true, true, true };
+            Check("stagger: in use first, at once", ChangeStagger.Delay(shown, (int)MapPart.InUse) == TimeSpan.Zero);
+            Check("stagger: modified 30 ms", ChangeStagger.Delay(shown, (int)MapPart.Modified) == TimeSpan.FromMilliseconds(30));
+            Check("stagger: free 90 ms", ChangeStagger.Delay(shown, (int)MapPart.Free) == TimeSpan.FromMilliseconds(90));
+            Check("stagger: note after the last figure", ChangeStagger.NoteDelay(shown) == TimeSpan.FromMilliseconds(120));
+            var two = new bool[] { true, false, false, true };
+            Check("stagger: hidden parts take no slot", ChangeStagger.Delay(two, (int)MapPart.Free) == TimeSpan.FromMilliseconds(30));
+            Check("stagger: note after two figures", ChangeStagger.NoteDelay(two) == TimeSpan.FromMilliseconds(60));
+        }
+
         static void FlyoutTextTests()
         {
             var s = new AppSettings { AutoCleanEnabled = true, ThresholdPercent = 85 };
@@ -445,17 +491,32 @@ namespace RamOptimiser.Tests
             Check("tray: right click keeps the menu", tray.Contains("ContextMenuStrip = menu"));
 
             string flyout = File.ReadAllText(Path.Combine(dir, "TrayFlyout.cs"));
-            Check("flyout closes on Escape", flyout.Contains("Key.Escape"));
-            Check("flyout closes on focus loss", flyout.Contains("Deactivated"));
+            Check("flyout closes on Escape", Regex.IsMatch(flyout, @"e\.Key != Key\.Escape\) return;\s*e\.Handled = true;\s*Hide\(false\);"));
+            Check("flyout closes on focus loss", Regex.IsMatch(flyout, @"window\.Deactivated \+= delegate \{ Hide\(true\); \};"));
+            // Review fix: focus is read before Clean memory turns off (afterwards WPF has already started moving it).
+            Check("flyout reads Clean memory's focus before disabling it",
+                Regex.IsMatch(flyout, @"bool cleanFocused = clean\.IsKeyboardFocused;\s*clean\.IsEnabled = st\.CleanEnabled;"));
+            Check("flyout focus goes through FlyoutFocus", flyout.Contains("focus.CleanEnabledChanged(") && !flyout.Contains("!window.IsKeyboardFocusWithin"));
+            Check("flyout falls back to the primary screen off the taskbar",
+                flyout.Contains("FlyoutPlacement.OnTaskbar(") && flyout.Contains("Screen.PrimaryScreen"));
             Check("flyout motion goes through Motion", flyout.Contains("Motion.To(") && !flyout.Contains("new DoubleAnimation"));
 
             string theme = File.ReadAllText(Path.Combine(dir, "ThemeManager.cs"));
             Check("mica uses the documented backdrop attribute", theme.Contains("DWMWA_SYSTEMBACKDROP_TYPE = 38") && theme.Contains("DWMSBT_MAINWINDOW = 2"));
             Check("mica is decided by MicaPolicy.Use", theme.Contains("MicaPolicy.Use("));
 
-            string shell = File.ReadAllText(Path.Combine(dir, "AppShell.cs")) + File.ReadAllText(Path.Combine(dir, "AppShell.Visuals.cs"));
-            Check("progress reaches the window through Post", shell.Contains("req.Progress = p => Post("));
-            Check("progress bar respects reduced motion", shell.Contains("Motion.On"));
+            string visuals = File.ReadAllText(Path.Combine(dir, "AppShell.Visuals.cs"));
+            Check("progress reaches the window through Post", visuals.Contains("req.Progress = p => Post("));
+            Match seg = Regex.Match(visuals, @"void MoveSegment\(\)(.*?)\n        \}", RegexOptions.Singleline);
+            string body = seg.Success ? seg.Groups[1].Value : "";
+            int still = body.IndexOf("if (!Motion.On", StringComparison.Ordinal);
+            int sweep = body.IndexOf("BeginAnimation(TranslateTransform.XProperty, sweep)", StringComparison.Ordinal);
+            Check("progress bar respects reduced motion (MoveSegment stops before the sweep)", still >= 0 && sweep > still);
+            // Review fix: the toggle must hand SaveAndApply the settings from before the change, or ApplySettings sees no
+            // change and the backdrop is never put on or taken off until a restart.
+            Check("mica toggle passes the settings from before the change",
+                Regex.IsMatch(visuals, @"OnToggle\(micaCheck, on =>\s*\{\s*AppSettings before = settings\.Clone\(\);\s*settings\.UseMica = on;\s*SaveAndApply\(before\);"));
+            Check("change figures are staggered", visuals.Contains("ChangeStagger.Delay(") && visuals.Contains("ChangeStagger.NoteDelay("));
         }
 
         // ---------------------------------------------------------------- helpers

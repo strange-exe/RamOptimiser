@@ -245,19 +245,33 @@ namespace RamOptimiser.App
         /// pointer is on the taskbar. Opened from the keyboard the pointer can be anywhere, so then it goes to the tray
         /// end (right, or bottom for a side taskbar). Always clamped into the work area, top and left winning.
         /// </summary>
+        /// <summary>
+        /// The point is on the taskbar of this screen (outside the work area on the taskbar's side). An auto-hiding
+        /// taskbar cuts nothing from the work area, so it never counts.
+        /// </summary>
+        public static bool OnTaskbar(int x, int y, PixelRect screen, PixelRect work)
+        {
+            switch (Edge(screen, work))
+            {
+                case TaskbarEdge.Bottom: return y >= work.Bottom;
+                case TaskbarEdge.Top: return y < work.Top;
+                case TaskbarEdge.Left: return x < work.Left;
+                default: return x >= work.Right;
+            }
+        }
+
         public static PixelPoint Place(int anchorX, int anchorY, PixelRect screen, PixelRect work, int width, int height, int margin)
         {
             TaskbarEdge edge = Edge(screen, work);
+            bool onBar = OnTaskbar(anchorX, anchorY, screen, work);
             int x, y;
             if (edge == TaskbarEdge.Bottom || edge == TaskbarEdge.Top)
             {
-                bool onBar = edge == TaskbarEdge.Bottom ? anchorY >= work.Bottom : anchorY < work.Top;
                 x = onBar ? anchorX - width / 2 : work.Right - margin - width;
                 y = edge == TaskbarEdge.Bottom ? work.Bottom - margin - height : work.Top + margin;
             }
             else
             {
-                bool onBar = edge == TaskbarEdge.Left ? anchorX < work.Left : anchorX >= work.Right;
                 y = onBar ? anchorY - height / 2 : work.Bottom - margin - height;
                 x = edge == TaskbarEdge.Left ? work.Left + margin : work.Right - margin - width;
             }
@@ -294,6 +308,59 @@ namespace RamOptimiser.App
         public void Closed(DateTime now, bool byDeactivation)
         {
             deactivatedAt = byDeactivation ? now : (DateTime?)null;
+        }
+    }
+
+    public enum FlyoutFocusMove { None, ToOpen, ToClean }
+
+    /// <summary>
+    /// Clean memory in the flyout turns off while a clean runs. If it held keyboard focus, focus goes to Open window
+    /// (always there) rather than being dropped, and comes back when the button is enabled again, unless the user has
+    /// moved on. Mirrors refocusClean in the main window.
+    /// </summary>
+    public sealed class FlyoutFocus
+    {
+        bool moved;
+
+        /// <param name="shown">The flyout is open.</param>
+        /// <param name="enabled">Clean memory's new enabled state.</param>
+        /// <param name="cleanFocused">Clean memory held keyboard focus just before the change.</param>
+        /// <param name="openFocused">Open window holds keyboard focus now.</param>
+        public FlyoutFocusMove CleanEnabledChanged(bool shown, bool enabled, bool cleanFocused, bool openFocused)
+        {
+            if (!enabled)
+            {
+                if (!shown || !cleanFocused) return FlyoutFocusMove.None;
+                moved = true;
+                return FlyoutFocusMove.ToOpen;
+            }
+            if (!moved) return FlyoutFocusMove.None;
+            moved = false;
+            return shown && openFocused ? FlyoutFocusMove.ToClean : FlyoutFocusMove.None;
+        }
+
+        /// <summary>The flyout closed: the next open puts focus on its first button anyway.</summary>
+        public void Reset() { moved = false; }
+    }
+
+    /// <summary>
+    /// The per-part change figures come in one after another, 30 ms apart in map order (in use, modified, standby,
+    /// free), then the note; a part with no figure takes no slot.
+    /// </summary>
+    public static class ChangeStagger
+    {
+        public static readonly TimeSpan Step = TimeSpan.FromMilliseconds(30);
+
+        public static TimeSpan Delay(bool[] shown, int index)
+        {
+            int slot = 0;
+            for (int i = 0; i < index && i < shown.Length; i++) if (shown[i]) slot++;
+            return TimeSpan.FromTicks(Step.Ticks * slot);
+        }
+
+        public static TimeSpan NoteDelay(bool[] shown)
+        {
+            return Delay(shown, shown.Length);
         }
     }
 

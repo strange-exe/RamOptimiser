@@ -56,6 +56,7 @@ namespace RamOptimiser.App
         readonly TextBlock verdictText, autoLine, resultText;
         readonly Button clean, pause, open;
         readonly FlyoutGate gate = new FlyoutGate();
+        readonly FlyoutFocus focus = new FlyoutFocus();
         bool shown, paused, disposed, hasMap;
         int generation, anchorX, anchorY;
 
@@ -87,11 +88,6 @@ namespace RamOptimiser.App
             {
                 Hide(false);
                 Raise(OpenRequested);
-            };
-            // Clean memory turns off while a clean runs: keep focus in the flyout rather than losing it.
-            clean.IsEnabledChanged += delegate
-            {
-                if (shown && !clean.IsEnabled && !window.IsKeyboardFocusWithin) open.Focus();
             };
             window.Deactivated += delegate { Hide(true); };
             window.PreviewKeyDown += (s, e) =>
@@ -150,7 +146,17 @@ namespace RamOptimiser.App
 
             clean.Content = st.CleanLabel;
             AutomationProperties.SetName(clean, st.CleanLabel ?? "");
+            // Clean memory turns off while a clean runs: its focus is read first, because once it is disabled WPF
+            // starts dropping focus. FlyoutFocus hands it to Open window and back when the clean ends.
+            bool was = clean.IsEnabled;
+            bool cleanFocused = clean.IsKeyboardFocused;
             clean.IsEnabled = st.CleanEnabled;
+            if (was != st.CleanEnabled)
+            {
+                FlyoutFocusMove move = focus.CleanEnabledChanged(shown, st.CleanEnabled, cleanFocused, open.IsKeyboardFocused);
+                if (move == FlyoutFocusMove.ToOpen) open.Focus();
+                else if (move == FlyoutFocusMove.ToClean) clean.Focus();
+            }
             clean.ToolTip = st.CleanTip;
 
             autoLine.Text = st.AutoLine ?? "";
@@ -202,6 +208,7 @@ namespace RamOptimiser.App
             if (!shown) return;
             shown = false;
             gate.Closed(DateTime.UtcNow, byDeactivation);
+            focus.Reset();
             int gen = ++generation;
             root.IsHitTestVisible = false;
             Motion.To(rise, TranslateTransform.YProperty, ExitSink, ExitTime, Motion.Exit, true);
@@ -211,7 +218,11 @@ namespace RamOptimiser.App
             });
         }
 
-        /// <summary>Next to the taskbar that holds the icon, in the work area of the screen under the pointer.</summary>
+        /// <summary>
+        /// Next to the taskbar that holds the icon, in the work area of the screen under the pointer. When the pointer is
+        /// not on that screen's taskbar (an auto-hiding one, or the pointer elsewhere), the primary screen is used:
+        /// Windows shows the notification area icons on the primary taskbar.
+        /// </summary>
         void Place()
         {
             PresentationSource source = PresentationSource.FromVisual(window);
@@ -222,6 +233,8 @@ namespace RamOptimiser.App
             int height = (int)Math.Ceiling(window.ActualHeight * toDevice.M22);
             int margin = (int)Math.Round(MarginDip * toDevice.M11);
             System.Windows.Forms.Screen screen = System.Windows.Forms.Screen.FromPoint(new System.Drawing.Point(anchorX, anchorY));
+            if (!FlyoutPlacement.OnTaskbar(anchorX, anchorY, Rect(screen.Bounds), Rect(screen.WorkingArea)))
+                screen = System.Windows.Forms.Screen.PrimaryScreen;
             PixelPoint p = FlyoutPlacement.Place(anchorX, anchorY, Rect(screen.Bounds), Rect(screen.WorkingArea), width, height, margin);
             SetWindowPos(hwnd, HwndTopmost, p.X, p.Y, 0, 0, SwpNoSize | SwpNoActivate);
         }

@@ -421,7 +421,8 @@ From `.claude/design/enhancements-preview.html`. Decisions live in `src/App/Logi
   skip, a missing snapshot or a map whose detail changed; a two-part map has in use and available only. A 12 px
   muted line under each figure plus `AppText.ChangeNote` ("The + and - figures are what the clean at 14:32
   changed."), kept until the next clean starts; the rows' names gain ", changed by -2.1 GB". Enter: opacity and
-  Y 4 to 0, 320 ms QuinticEase; exit: opacity, 200 ms CubicEase in. No 30 ms stagger (Motion.To has no delay).
+  Y 4 to 0, 320 ms QuinticEase, 30 ms apart in map order and the note last (`ChangeStagger`; a part with no
+  figure takes no slot; `Motion.To` takes a delay); exit: opacity, 200 ms CubicEase in.
 - **Clean progress.** `CleanRequest.Progress` (engine, backward compatible: null by default, exceptions ignored)
   reports the services step, then each chosen area once, in clean order; extra trim-and-flush passes are not new
   steps. AppShell posts each step to the UI thread. `CleanProgressView`: shown from 400 ms, so a quick clean never
@@ -434,10 +435,15 @@ From `.claude/design/enhancements-preview.html`. Decisions live in `src/App/Logi
   load headline and mini map, the will-a-clean-help line, Clean memory, Auto-clean line with "Pause for 1 hour" or
   "Resume" (name starts with the visible label, WCAG 2.5.3), the last clean with the window's glyph rule, "Open
   window". `FlyoutPlacement` (physical pixels, PerMonitorV2): beside the taskbar edge the work area is cut from,
-  12 px in, centred on the pointer, clamped to the work area; opened from the keyboard (pointer off the taskbar) it
-  goes to the tray end. Placed again after layout, once the DPI of its screen applies. Tab cycles inside; focus
-  starts on Clean memory (Open window when Clean is off). Esc, focus loss, a second icon click and Open window close
-  it; `FlyoutGate` stops the icon click that caused the focus loss from reopening it within 300 ms. Stays open while
+  12 px in, centred on the pointer, clamped to the work area; with the pointer off that screen's taskbar
+  (`FlyoutPlacement.OnTaskbar`) it goes to the tray end of the primary screen, where Windows shows tray icons.
+  Placed again after layout, once the DPI of its screen applies. Tab cycles inside; focus starts on Clean memory
+  (Open window when Clean is off); if Clean memory turns off while it has focus, `FlyoutFocus` moves focus to Open
+  window and back when the clean ends. Keyboard path: the WinForms NotifyIcon never sets NOTIFYICON_VERSION_4, so
+  Enter or Space on the tray icon arrives as a right click (Shell_NotifyIcon remarks,
+  https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyicona) and opens the tray
+  menu, which has the same actions (Clean, Pause, Open); the flyout is a pointer shortcut. Not checked on a real
+  taskbar. Esc, focus loss, a second icon click and Open window close it; `FlyoutGate` stops the icon click that caused the focus loss from reopening it within 300 ms. Stays open while
   a clean runs. Enter: opacity and Y 12 to 0, 250 ms QuinticEase; exit: opacity and Y to 8, 150 ms CubicEase in;
   instant with Windows animations off. Alt+F4 hides it rather than closing it.
 - **Mica.** `UseMica`, off by default, written to settings.ini only while on (the file keeps its 13 keys
@@ -452,9 +458,13 @@ Verified: unit and static tests (tests/VisualsTests.cs), with mutation checks (r
 the gate blocking after Esc, Mica under high contrast, the keyboard placement) each failing the suite. A scratch
 render (MainWindow.xaml and Flyout.xaml loaded through the app's loader, no AppShell) drew the chart (floor 50 and
 floor 0), the load card with change figures and note, the progress line, the Mica row and the flyout, light and
-dark. The render harness gained `Stage7A` (light and dark) and was compiled against these sources, not run.
-Not verified: the flyout shown on a real taskbar (placement, DPI change between monitors, keyboard activation of
-the tray icon), Mica on screen, high contrast, Narrator, the progress bar in motion.
+dark. Integration review fixes: the Mica switch now hands SaveAndApply the settings from before the change (it
+used to diff the new settings against themselves, so the backdrop only changed after a restart); flyout focus
+(`FlyoutFocus`), the primary-screen fallback and the change stagger were added, and the weak static checks
+(reduced motion, Esc, focus loss) were tied to the 7A code and proven by mutation. The render harness `Stage7A`
+(light and dark) was run on the integrated branch. Not verified: the flyout shown on a real taskbar (placement,
+DPI change between monitors), keyboard activation of the tray icon, Mica on screen, high contrast, Narrator, the
+progress bar in motion.
 
 ## Website (download page), started 2026-11-17
 
