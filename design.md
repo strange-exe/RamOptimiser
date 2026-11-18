@@ -405,6 +405,57 @@ a service row, in light and dark (.claude/verify/shots-6a-startup), and printed 
 UIA name. Not verified: no real packaged rows, no check that an elevated app can open ms-settings, no high
 contrast render, no Narrator pass.
 
+### Preview visuals: history, change, progress, flyout, Mica (package 7A, 2026-11-18)
+From `.claude/design/enhancements-preview.html`. Decisions live in `src/App/Logic/Visuals.cs` and
+`AppText.Visuals.cs` (tested in `tests/VisualsTests.cs`); WPF only paints them.
+- **Load history.** `LoadHistory`: a 300-reading ring (10 minutes at 2 s) plus clean times, this session only,
+  filled while hidden; a clock that goes back starts it again. `LoadChart` (FrameworkElement, `OnRender`, no
+  library) sits in the load card under the legend: 78 px (64 px plot), labels in a 36 px column on the right.
+  Hairline at 100% and the floor (and 50% when the floor is 0), ControlBorder dashed (4 3) at the threshold while
+  auto-clean is on, Accent 1.5 px line with round joins (broken across gaps over 30 s), Text 1.5 x 7 px tick per
+  clean at the foot, MutedText 12 px labels. The floor is 50%, or 0 once a reading dips under 50, so a dip is
+  never flattened. Labels: 100, threshold, floor; the threshold wins over a label within 14 px. Under it, the
+  left-edge time and "Now". UIA: Image, named by `AppText.ChartName` ("Load over the last 10 minutes: now 71%,
+  between 69% and 85%. Cleans at 14:23 and 14:32."). Not animated.
+- **Per-part change.** `PartChanges.From(report)`: signed `AppText.Change` per map part, null for no report, a busy
+  skip, a missing snapshot or a map whose detail changed; a two-part map has in use and available only. A 12 px
+  muted line under each figure plus `AppText.ChangeNote` ("The + and - figures are what the clean at 14:32
+  changed."), kept until the next clean starts; the rows' names gain ", changed by -2.1 GB". Enter: opacity and
+  Y 4 to 0, 320 ms QuinticEase; exit: opacity, 200 ms CubicEase in. No 30 ms stagger (Motion.To has no delay).
+- **Clean progress.** `CleanRequest.Progress` (engine, backward compatible: null by default, exceptions ignored)
+  reports the services step, then each chosen area once, in clean order; extra trim-and-flush passes are not new
+  steps. AppShell posts each step to the UI thread. `CleanProgressView`: shown from 400 ms, so a quick clean never
+  flashes it. A 3 px TrackBackground track with an Accent segment (40%) sweeping by TranslateTransform.X, 1600 ms
+  a pass, SineEase in-out, forever; reduced motion: the segment stands still over the first 40%. Fade in 150 ms
+  ease out, out 200 ms ease in. Step line "Process working sets (2 of 6)", "Stopping services (1 of 9)". Read out
+  once as it appears ("Cleaning memory"); the result line reads the end. No Cancel or Stop (owner decision).
+- **Tray flyout.** Left click raises `FlyoutRequested`; the right-click menu is unchanged. `Flyout.xaml`: a 360 px
+  layered, borderless, topmost window (no taskbar button), Surface fill, WindowBorder 1 px, radius 8. Caption,
+  load headline and mini map, the will-a-clean-help line, Clean memory, Auto-clean line with "Pause for 1 hour" or
+  "Resume" (name starts with the visible label, WCAG 2.5.3), the last clean with the window's glyph rule, "Open
+  window". `FlyoutPlacement` (physical pixels, PerMonitorV2): beside the taskbar edge the work area is cut from,
+  12 px in, centred on the pointer, clamped to the work area; opened from the keyboard (pointer off the taskbar) it
+  goes to the tray end. Placed again after layout, once the DPI of its screen applies. Tab cycles inside; focus
+  starts on Clean memory (Open window when Clean is off). Esc, focus loss, a second icon click and Open window close
+  it; `FlyoutGate` stops the icon click that caused the focus loss from reopening it within 300 ms. Stays open while
+  a clean runs. Enter: opacity and Y 12 to 0, 250 ms QuinticEase; exit: opacity and Y to 8, 150 ms CubicEase in;
+  instant with Windows animations off. Alt+F4 hides it rather than closing it.
+- **Mica.** `UseMica`, off by default, written to settings.ini only while on (the file keeps its 13 keys
+  otherwise). The row shows from build 22000; the switch works from 22621 (DWMWA_SYSTEMBACKDROP_TYPE = 38,
+  DWMSBT_MAINWINDOW = 2) and not under high contrast; the note says which. On: window background and HwndSource
+  composition colour transparent, frame extended over the client area, caption colour back to the system default.
+  Off after being on: backdrop AUTO, frame and colours restored, then `ApplyWindowFrame`. Never applied, nothing
+  changes. Caution text on Mica fails in light (4.47:1, preview report), so Caution stays glyph-only on the window
+  surface; no new token pairs were added.
+
+Verified: unit and static tests (tests/VisualsTests.cs), with mutation checks (repeat passes counted as steps,
+the gate blocking after Esc, Mica under high contrast, the keyboard placement) each failing the suite. A scratch
+render (MainWindow.xaml and Flyout.xaml loaded through the app's loader, no AppShell) drew the chart (floor 50 and
+floor 0), the load card with change figures and note, the progress line, the Mica row and the flyout, light and
+dark. The render harness gained `Stage7A` (light and dark) and was compiled against these sources, not run.
+Not verified: the flyout shown on a real taskbar (placement, DPI change between monitors, keyboard activation of
+the tray icon), Mica on screen, high contrast, Narrator, the progress bar in motion.
+
 ## Website (download page), started 2026-11-17
 
 Owner's pick, in their words: "Instrument is good but colour palette not so good, try obsidian alongside

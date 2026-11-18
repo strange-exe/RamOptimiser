@@ -1,0 +1,91 @@
+<!-- Tray flyout (7A): what a left click on the tray icon opens. Load and map, the will-a-clean-help line, Clean memory,
+     auto-clean with Pause or Resume, the last clean, and Open window. Loaded at runtime like MainWindow.xaml; TrayFlyout
+     finds the named elements. A borderless, layered window so it can fade and rise in; Tab cycles inside it, Esc and
+     a click elsewhere close it. The right-click menu is unchanged. -->
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:app="clr-namespace:RamOptimiser.App;assembly=RamOptimiser"
+        Title="RAM Optimiser" Width="360" SizeToContent="Height"
+        WindowStyle="None" ResizeMode="NoResize" AllowsTransparency="True" Background="Transparent"
+        ShowInTaskbar="False" Topmost="True" ShowActivated="True"
+        UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display"
+        Foreground="{DynamicResource Text}" FontFamily="{DynamicResource BodyFont}" FontSize="14"
+        KeyboardNavigation.TabNavigation="Cycle" KeyboardNavigation.DirectionalNavigation="Cycle"
+        AutomationProperties.Name="RAM Optimiser quick view">
+  <Border x:Name="FlyRoot" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource WindowBorder}"
+          BorderThickness="1" CornerRadius="8" Padding="16,12,16,8">
+    <Border.RenderTransform>
+      <TranslateTransform/>
+    </Border.RenderTransform>
+    <StackPanel>
+      <TextBlock Text="RAM Optimiser" Style="{StaticResource Small}"/>
+
+      <!-- Load: the same words the window's load card uses, one name for screen readers -->
+      <app:SummaryPanel x:Name="FlyLoad" Margin="0,2,0,0" AutomationProperties.Name="Memory load">
+        <TextBlock Typography.NumeralAlignment="Tabular" TextOptions.TextFormattingMode="Ideal" TextWrapping="Wrap"><Run
+            x:Name="FlyLoadNumber" Text="--" FontFamily="{DynamicResource DisplayFont}" FontSize="28" FontWeight="SemiBold"/><Run
+            Text="%" FontFamily="{DynamicResource DisplayFont}" FontSize="20" FontWeight="SemiBold"/><Run
+            Text="   " FontSize="13"/><Run x:Name="FlyInUse" Text="Reading memory..." FontSize="13" Foreground="{DynamicResource MutedText}"/></TextBlock>
+      </app:SummaryPanel>
+      <Grid Height="8" Margin="0,8,0,0">
+        <app:MapPanel x:Name="FlyMap" Background="{DynamicResource Card}" Gap="2" Radius="2" AutomationProperties.Name="Memory map">
+          <Border Background="{DynamicResource MapInUse}"/>
+          <Border Background="{DynamicResource MapModified}"/>
+          <Border Background="{DynamicResource MapStandby}"/>
+          <Border Background="{DynamicResource MapFree}"/>
+        </app:MapPanel>
+        <Border CornerRadius="2" BorderThickness="1" BorderBrush="{DynamicResource ControlBorder}" IsHitTestVisible="False"/>
+      </Grid>
+
+      <!-- Will a clean help now: glyph plus words, as under the window's Clean memory -->
+      <Grid x:Name="FlyVerdict" Margin="0,10,0,0" Visibility="Collapsed">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+        <Path x:Name="FlyVerdictGlyph" Style="{StaticResource IconPath}" VerticalAlignment="Top" Margin="0,1,8,0"/>
+        <TextBlock x:Name="FlyVerdictText" Grid.Column="1" FontSize="13" TextWrapping="Wrap"/>
+      </Grid>
+
+      <Button x:Name="FlyClean" Style="{StaticResource PrimaryButton}" Margin="0,12,0,0" Content="Clean memory"
+              ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Clean memory"/>
+
+      <!-- Auto-clean: what it does now, and Pause for 1 hour or Resume -->
+      <Border Style="{StaticResource RowDivider}" Margin="0,12,0,0" Padding="0,10,0,0">
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <StackPanel VerticalAlignment="Center">
+            <TextBlock Text="Auto-clean"/>
+            <TextBlock x:Name="FlyAutoLine" Style="{StaticResource Small}"/>
+          </StackPanel>
+          <Button x:Name="FlyPause" Grid.Column="1" Style="{StaticResource OutlineButton}" Margin="12,0,0,0" VerticalAlignment="Center"
+                  Content="Pause for 1 hour" AutomationProperties.Name="Pause for 1 hour" Visibility="Collapsed"/>
+        </Grid>
+      </Border>
+
+      <!-- The last clean, with the result glyph the window uses -->
+      <Grid Margin="0,10,0,0">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+        <Path x:Name="FlyResultGlyph" Style="{StaticResource IconPath}" VerticalAlignment="Top" Margin="0,0,8,0" Visibility="Collapsed"/>
+        <TextBlock x:Name="FlyResultText" Grid.Column="1" Style="{StaticResource Small}"/>
+      </Grid>
+
+      <Border Style="{StaticResource RowDivider}" Margin="0,10,0,0" Padding="0,6,0,0">
+        <Button x:Name="FlyOpen" Style="{StaticResource SubtleButton}" HorizontalAlignment="Left" Padding="4,2"
+                AutomationProperties.Name="Open window">
+          <StackPanel Orientation="Horizontal">
+            <Path Style="{StaticResource IconPath}" Stroke="{DynamicResource Text}" Margin="0,0,8,0"
+                  Data="M9.5,2.5 H13.5 V6.5 M13.5,2.5 L8,8 M12,9.5 V13.5 H2.5 V4 H6.5"/>
+            <TextBlock Text="Open window" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Button>
+      </Border>
+    </StackPanel>
+  </Border>
+</Window>

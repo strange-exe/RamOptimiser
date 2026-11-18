@@ -36,6 +36,8 @@ namespace RamOptimiser.App
         public event EventHandler OpenRequested, CleanRequested, StatusClicked, AutoCleanToggled, PauseRequested, ResumeRequested, RestartRequested, ExitRequested;
         /// <summary>The user clicked a problem notice.</summary>
         public event EventHandler NoticeClicked;
+        /// <summary>A left click on the icon: AppShell opens or closes the flyout (7A). The right click keeps the menu.</summary>
+        public event EventHandler FlyoutRequested;
 
         public TrayController()
         {
@@ -68,7 +70,7 @@ namespace RamOptimiser.App
             shownSize = SmallIconSize();
             appIcon = LoadAppIcon(shownSize);
             icon = new NotifyIcon { Icon = appIcon, Text = AppText.AppName, ContextMenuStrip = menu };
-            icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) Raise(OpenRequested); };
+            icon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) Raise(FlyoutRequested); };
             icon.BalloonTipClicked += delegate { Raise(NoticeClicked); };
             icon.Visible = true;
         }

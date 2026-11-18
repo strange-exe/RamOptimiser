@@ -110,35 +110,85 @@
                   <RowDefinition Height="Auto"/>
                   <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
+                <!-- 7A: after a clean, each row's signed change sits under its figure until the next clean starts. -->
                 <app:SummaryPanel x:Name="RowInUse" Padding="0,2">
-                  <DockPanel>
-                    <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapInUse}"/>
-                    <TextBlock x:Name="ValInUse" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
-                    <TextBlock Text="In use" VerticalAlignment="Center"/>
-                  </DockPanel>
+                  <StackPanel>
+                    <DockPanel>
+                      <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapInUse}"/>
+                      <TextBlock x:Name="ValInUse" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
+                      <TextBlock Text="In use" VerticalAlignment="Center"/>
+                    </DockPanel>
+                    <TextBlock x:Name="ChgInUse" Style="{StaticResource Small}" HorizontalAlignment="Right"
+                               Typography.NumeralAlignment="Tabular" Visibility="Collapsed">
+                      <TextBlock.RenderTransform><TranslateTransform/></TextBlock.RenderTransform>
+                    </TextBlock>
+                  </StackPanel>
                 </app:SummaryPanel>
                 <app:SummaryPanel x:Name="RowModified" Grid.Row="1" Padding="0,2">
-                  <DockPanel>
-                    <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapModified}"/>
-                    <TextBlock x:Name="ValModified" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
-                    <TextBlock Text="Modified" VerticalAlignment="Center"/>
-                  </DockPanel>
+                  <StackPanel>
+                    <DockPanel>
+                      <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapModified}"/>
+                      <TextBlock x:Name="ValModified" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
+                      <TextBlock Text="Modified" VerticalAlignment="Center"/>
+                    </DockPanel>
+                    <TextBlock x:Name="ChgModified" Style="{StaticResource Small}" HorizontalAlignment="Right"
+                               Typography.NumeralAlignment="Tabular" Visibility="Collapsed">
+                      <TextBlock.RenderTransform><TranslateTransform/></TextBlock.RenderTransform>
+                    </TextBlock>
+                  </StackPanel>
                 </app:SummaryPanel>
                 <app:SummaryPanel x:Name="RowStandby" Grid.Column="2" Padding="0,2">
-                  <DockPanel>
-                    <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapStandby}"/>
-                    <TextBlock x:Name="ValStandby" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
-                    <TextBlock Text="Standby" VerticalAlignment="Center"/>
-                  </DockPanel>
+                  <StackPanel>
+                    <DockPanel>
+                      <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapStandby}"/>
+                      <TextBlock x:Name="ValStandby" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
+                      <TextBlock Text="Standby" VerticalAlignment="Center"/>
+                    </DockPanel>
+                    <TextBlock x:Name="ChgStandby" Style="{StaticResource Small}" HorizontalAlignment="Right"
+                               Typography.NumeralAlignment="Tabular" Visibility="Collapsed">
+                      <TextBlock.RenderTransform><TranslateTransform/></TextBlock.RenderTransform>
+                    </TextBlock>
+                  </StackPanel>
                 </app:SummaryPanel>
                 <app:SummaryPanel x:Name="RowFree" Grid.Row="1" Grid.Column="2" Padding="0,2">
-                  <DockPanel>
-                    <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapFree}"/>
-                    <TextBlock x:Name="ValFree" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
-                    <TextBlock x:Name="FreeLabel" Text="Free" VerticalAlignment="Center"/>
-                  </DockPanel>
+                  <StackPanel>
+                    <DockPanel>
+                      <Border DockPanel.Dock="Left" Style="{StaticResource Swatch}" Background="{DynamicResource MapFree}"/>
+                      <TextBlock x:Name="ValFree" DockPanel.Dock="Right" Style="{StaticResource FigureText}"/>
+                      <TextBlock x:Name="FreeLabel" Text="Free" VerticalAlignment="Center"/>
+                    </DockPanel>
+                    <TextBlock x:Name="ChgFree" Style="{StaticResource Small}" HorizontalAlignment="Right"
+                               Typography.NumeralAlignment="Tabular" Visibility="Collapsed">
+                      <TextBlock.RenderTransform><TranslateTransform/></TextBlock.RenderTransform>
+                    </TextBlock>
+                  </StackPanel>
                 </app:SummaryPanel>
               </Grid>
+              <TextBlock x:Name="ChangeNote" Style="{StaticResource Small}" Margin="0,6,0,0" Visibility="Collapsed"/>
+
+              <!-- 7A: load over the last ten minutes of this session (in memory only), drawn by LoadChart: one accent
+                   line on hairlines, the auto-clean threshold dashed, a tick per clean. Its name says it all in words. -->
+              <Border x:Name="HistoryPanel" Style="{StaticResource RowDivider}" Margin="0,12,0,0" Padding="0,10,0,0">
+                <StackPanel>
+                  <DockPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                      <Rectangle Width="1.5" Height="8" Fill="{DynamicResource Text}" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                      <TextBlock Text="Clean" Style="{StaticResource Small}" VerticalAlignment="Center"/>
+                      <StackPanel x:Name="ChartAutoKey" Orientation="Horizontal" Margin="10,0,0,0">
+                        <Line X1="0" Y1="0.5" X2="14" Y2="0.5" Stroke="{DynamicResource ControlBorder}" StrokeThickness="1"
+                              StrokeDashArray="4 3" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                        <TextBlock Text="Auto-clean" Style="{StaticResource Small}" VerticalAlignment="Center"/>
+                      </StackPanel>
+                    </StackPanel>
+                    <TextBlock Text="Load, last 10 minutes" FontSize="13" VerticalAlignment="Center"/>
+                  </DockPanel>
+                  <app:LoadChart x:Name="HistoryChart" Height="78" Margin="0,4,0,0" AutomationProperties.Name="Load history"/>
+                  <Grid Margin="0,0,36,0">
+                    <TextBlock x:Name="ChartFrom" Style="{StaticResource Small}" HorizontalAlignment="Left"/>
+                    <TextBlock Text="Now" Style="{StaticResource Small}" HorizontalAlignment="Right"/>
+                  </Grid>
+                </StackPanel>
+              </Border>
 
               <!-- Commit charge: what apps have reserved, which cleaning cannot lower -->
               <Border Style="{StaticResource RowDivider}" Margin="0,12,0,0" Padding="0,12,0,0">
@@ -181,6 +231,21 @@
           <!-- Disabled, it still shows why on hover (U21); the reason is also the visible admin line below. -->
           <Button x:Name="CleanButton" Style="{StaticResource PrimaryButton}" Margin="0,12,0,0" Content="Clean memory"
                   ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Clean memory"/>
+          <!-- 7A: while a clean runs, shown after 400 ms so a quick clean never flashes it: a moving segment (a still one
+               with Windows animations off) and the step. No Cancel or Stop (owner decision). Read out once as it
+               appears; the steps are not read out, and the result line reads the end. -->
+          <app:LiveRegion x:Name="CleanProgress" Margin="4,10,4,0" Visibility="Collapsed"
+                          AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Cleaning memory">
+            <StackPanel>
+              <Border x:Name="ProgressTrack" Height="3" CornerRadius="1.5" Background="{DynamicResource TrackBackground}"
+                      ClipToBounds="True">
+                <Border x:Name="ProgressSegment" HorizontalAlignment="Left" CornerRadius="1.5" Background="{DynamicResource Accent}">
+                  <Border.RenderTransform><TranslateTransform/></Border.RenderTransform>
+                </Border>
+              </Border>
+              <TextBlock x:Name="ProgressText" Style="{StaticResource Small}" Margin="0,6,0,0"/>
+            </StackPanel>
+          </app:LiveRegion>
           <TextBlock x:Name="PowerNote" Style="{StaticResource Small}" Margin="4,6,4,0" Visibility="Collapsed"/>
 
           <!-- One admin line when not elevated -->
@@ -582,6 +647,23 @@
               </DockPanel>
               <!-- High contrast overrides the choice above -->
               <TextBlock x:Name="ThemeNote" Style="{StaticResource Small}" Margin="16,-4,16,10" TextWrapping="Wrap" Visibility="Collapsed"/>
+              <!-- 7A: the Mica backdrop, off by default. Shown on Windows 11 only, usable from 22H2 and never under high
+                   contrast; the note under it says why when the switch cannot be used. -->
+              <Border x:Name="MicaRow" Style="{StaticResource RowDivider}" Padding="16,10" Visibility="Collapsed">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="Use the Windows 11 backdrop" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="MicaNote" Style="{StaticResource Small}"/>
+                  </StackPanel>
+                  <CheckBox x:Name="MicaCheck" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
+                            ToolTipService.ShowOnDisabled="True" VerticalAlignment="Center"
+                            AutomationProperties.Name="Use the Windows 11 backdrop"/>
+                </Grid>
+              </Border>
               <Border Style="{StaticResource RowDivider}" Padding="16,10">
                 <Grid>
                   <Grid.ColumnDefinitions>
