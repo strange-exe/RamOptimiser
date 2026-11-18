@@ -385,6 +385,11 @@
               </StackPanel>
             </app:LiveRegion>
             <TextBlock x:Name="StartupNote" Style="{StaticResource Small}" Margin="4,10,4,0"/>
+            <!-- E24: packaged (Store) apps are turned on or off in Settings, Apps, Startup. Shown on the apps list while
+                 it has a packaged row. -->
+            <Button x:Name="OpenStartupSettings" Style="{StaticResource OutlineButton}" HorizontalAlignment="Left" Margin="4,10,4,0"
+                    Visibility="Collapsed" Content="Open Startup settings" AutomationProperties.Name="Open Startup settings"
+                    ToolTip="Settings, Apps, Startup"/>
           </StackPanel>
         </ScrollViewer>
       </Grid>

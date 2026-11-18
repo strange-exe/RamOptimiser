@@ -1,6 +1,6 @@
 // Wording for the publisher check (E26, engine side): one line per startup row saying who signed the program and
-// whether that matches the company the file names. Pure, so the tests compile it. Nothing shows it yet: package 6A
-// puts it in AppDetail in place of "From ..." and decides the "look closer" marker.
+// whether that matches the company the file names. Pure, so the tests compile it. AppDetail shows it in place of
+// "From ...", and AppText.LookCloser decides the "Look closer" marker beside the row's name.
 using System;
 
 namespace RamOptimiser.App

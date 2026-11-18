@@ -168,8 +168,8 @@ namespace RamOptimiser
 
         /// <summary>
         /// With includeExtraSources, also the RunOnce entries and packaged (Store / MSIX) startup tasks, both
-        /// read-only, and each Startup-folder shortcut's real target. Off by default until the Startup tab can show
-        /// read-only rows (package 6A), so the current list does not change.
+        /// read-only, and each Startup-folder shortcut's real target. The Startup tab asks for them; the no-argument
+        /// form keeps the old list for any caller that can't show read-only rows.
         /// </summary>
         public static List<StartupApp> Query(bool includeExtraSources)
         {
@@ -209,7 +209,7 @@ namespace RamOptimiser
 
         /// <summary>
         /// The sources a listing reads, in order. Run-once and packaged rows come only with includeExtraSources
-        /// (the gate until the Startup tab can show read-only rows). Pure.
+        /// (for a caller that can show read-only rows). Pure.
         /// </summary>
         public static List<StartupSource> IncludedSources(bool includeExtraSources)
         {
@@ -698,20 +698,8 @@ namespace RamOptimiser
         public KnownItem Known;
         /// <summary>What this app's journal says about the service, checked against its start type now.</summary>
         public JournalState Journal;
-        /// <summary>
-        /// This app set it to Manual and recorded how it started before (Journal is OffByApp). Setting it is kept
-        /// for older callers: true records OffByApp, false clears it. TEMPORARY (E12): only AppTests.cs sets it;
-        /// remove the setter once package 6A moves that test to Journal = OffByApp.
-        /// </summary>
-        public bool DisabledByApp
-        {
-            get { return Journal == JournalState.OffByApp; }
-            set
-            {
-                if (value) Journal = JournalState.OffByApp;
-                else if (Journal == JournalState.OffByApp) Journal = JournalState.Untouched;
-            }
-        }
+        /// <summary>This app set it to Manual and recorded how it started before (Journal is OffByApp).</summary>
+        public bool DisabledByApp { get { return Journal == JournalState.OffByApp; } }
         /// <summary>The service's own permissions deny administrators a startup change (e.g. Gaming Services).</summary>
         public bool Protected;
         public bool CanDisable { get { return Mode == StartMode.Automatic || Mode == StartMode.AutomaticDelayed; } }
@@ -761,9 +749,9 @@ namespace RamOptimiser
         }
 
         /// <summary>
-        /// Today's words for a change, display only, so the Startup tab reads as before until it shows the kind
-        /// itself (AppText.StartupChangeReason and StartupChangeNote, package 6A). A test keeps the refusal words
-        /// equal to StartupChangeReason's. Nothing may branch on this text.
+        /// Short words for a change, display only, for callers without the app's wording; the Startup tab shows
+        /// AppText.StartupChangeReason and StartupChangeNote instead. A test keeps the refusal words equal to
+        /// StartupChangeReason's. Nothing may branch on this text.
         /// </summary>
         internal static string DisplayMessage(StartupChangeKind k, string detail)
         {
@@ -796,27 +784,11 @@ namespace RamOptimiser
         /// <summary>The Windows error text, for Failed only.</summary>
         public string Detail;
 
-        /// <summary>
-        /// Derived from Kind. Setting it is kept for older callers (AppShell's catch builds { Ok = false, Message }):
-        /// false records Failed, true on a refused or failed change records a plain TurnedOn. TEMPORARY (E13):
-        /// remove the setter once package 6A builds { Kind = Failed, Detail } in that catch.
-        /// </summary>
-        public bool Ok
-        {
-            get { return StartupChanges.IsOk(Kind); }
-            set
-            {
-                if (!value) Kind = StartupChangeKind.Failed;
-                else if (!StartupChanges.IsOk(Kind)) Kind = StartupChangeKind.TurnedOn;
-            }
-        }
+        /// <summary>Derived from Kind: false for a refusal or a failure (nothing changed).</summary>
+        public bool Ok { get { return StartupChanges.IsOk(Kind); } }
 
-        /// <summary>Display only, derived from Kind and Detail (see StartupChanges.DisplayMessage). Setting it sets Detail.</summary>
-        public string Message
-        {
-            get { return StartupChanges.DisplayMessage(Kind, Detail); }
-            set { Detail = value; }
-        }
+        /// <summary>Display only, derived from Kind and Detail (see StartupChanges.DisplayMessage).</summary>
+        public string Message { get { return StartupChanges.DisplayMessage(Kind, Detail); } }
     }
 
     /// <summary>

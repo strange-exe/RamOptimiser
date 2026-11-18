@@ -1,6 +1,6 @@
 // Wording for the extra startup sources (E24): packaged (Store / MSIX) startup tasks and RunOnce entries.
-// Pure, so the tests compile it. Nothing calls these yet: the Startup tab shows these rows from package 6A on,
-// which also places the sentences in the row detail and the "Open Startup settings" button.
+// Pure, so the tests compile it. The Startup tab shows these rows read-only (AppText.AppLock), puts the sentences
+// in the row detail (AppDetail) and shows the "Open Startup settings" button while a packaged row is listed.
 namespace RamOptimiser.App
 {
     public static partial class AppText
