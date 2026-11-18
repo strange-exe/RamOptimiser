@@ -48,6 +48,11 @@ namespace RamOptimiser.Gui
         /// Only what RamOptimiser.App.HotkeyGesture accepts survives Normalized and Parse: two modifiers, no Windows key.
         /// </summary>
         public string CleanHotkey { get; set; }
+        /// <summary>
+        /// The Windows 11 Mica backdrop behind the window (7A). Off by default; the app uses it only where
+        /// RamOptimiser.App.MicaPolicy allows (22H2 or later, not high contrast). Written to the file only when on.
+        /// </summary>
+        public bool UseMica { get; set; }
 
         /// <summary>What a clean actually runs: the chosen areas, or everything plus services under Power Clean.</summary>
         public Areas CleanAreas
@@ -70,6 +75,7 @@ namespace RamOptimiser.Gui
             PowerServices = ServiceCatalog.SuggestedNames();
             NotifyProblems = false;
             CleanHotkey = "";
+            UseMica = false;
         }
 
         /// <summary>
@@ -253,6 +259,8 @@ namespace RamOptimiser.Gui
             Line(sb, "CleanHotkey", s.CleanHotkey);
             if (s.AutoCleanPausedUntilUtc.HasValue)
                 Line(sb, "AutoCleanPausedUntil", s.AutoCleanPausedUntilUtc.Value.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture));
+            // Like the pause, only when set: a file without the key reads as off, the default.
+            if (s.UseMica) Line(sb, "UseMica", Bool(true));
             return sb.ToString();
         }
 
@@ -303,6 +311,7 @@ namespace RamOptimiser.Gui
                 // Only the strict shortcut whitelist (two modifiers, no Windows key, no F12): the elevated app registers it
                 // system-wide, and this file is user-writable. Anything else loads as no shortcut.
                 case "cleanhotkey": s.CleanHotkey = AppSettings.NormalizeHotkey(value); break;
+                case "usemica": if (TryBool(value, out b)) s.UseMica = b; break;
                 case "autocleanpauseduntil":
                     // Only a round-trip UTC time ("o", ending in Z); a local or offset time is ambiguous and dropped.
                     DateTime until;

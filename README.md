@@ -37,7 +37,9 @@ Build (needs only the C# compiler that ships with Windows, .NET Framework 4.8):
 
 ### Desktop app: `bin\RamOptimiser.exe`
 
-A window and a tray icon. The tray icon shows the current memory load.
+A window and a tray icon. The tray icon shows the current memory load. Click it for a small panel with the load,
+**Clean memory**, auto-clean with **Pause for 1 hour** (or **Resume**), the last clean and **Open window**; Esc or
+a click elsewhere closes it. Right-click it for the menu.
 
 Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
 
@@ -51,6 +53,13 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
     holds after a clean. **In RAM** is the part held in physical memory now. Hover a row for the full name and what
     each figure means.
   - The per-area results of a clean show how long each area took, and the whole clean.
+  - **Load, last 10 minutes** draws the load for this session (kept in memory only, never saved), with the
+    auto-clean threshold as a dashed line and a tick for each clean. Screen readers hear it as one sentence: the
+    range, the load now and when the cleans were.
+  - After a clean, each part of the map shows what that clean changed under its figure (for example -2.1 GB
+    in use, +400.0 MB free), until the next clean starts.
+  - While a clean runs for more than a moment, a bar and a line under **Clean memory** say which step it is on
+    ("Process working sets (2 of 6)"). A clean cannot be stopped from here.
 - **Startup** lists apps and services that start with Windows, with a verdict for each (safe to turn off, turn off with
   care, keep on), a search box (Ctrl+F; Esc clears it), a filter and a sort. Rows Windows protects, or that need admin
   rights, say so instead of showing a switch. While a service change applies, the other switches wait until it finishes.
@@ -81,6 +90,9 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
   - auto-clean when load reaches 50 to 99%, and/or on a schedule
   - which areas to clean
   - theme: System, Light or Dark
+  - **Use the Windows 11 backdrop** (off by default, shown on Windows 11 only): the Mica backdrop, tinted by your
+    wallpaper, behind the window. It needs Windows 11 version 22H2 or later and is not used with high contrast;
+    otherwise the window stays solid.
   - start with Windows (a logon task, so it can run as administrator)
   - closing the window hides it to the tray
   - **Notify me when auto-clean has a problem** (off by default): a Windows notification from the tray icon when
@@ -105,7 +117,8 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
   or has a second hard link, or if the folder is owned by anyone other than you, Administrators or SYSTEM.
   The minimum wait between automatic cleans is 60 seconds, whatever the file says. `NotifyProblems` (`true` or
   `false`) is the notification switch and `CleanHotkey` the shortcut as text (`Ctrl+Shift+M`; empty for none); a
-  shortcut the app would not accept from the keyboard is read as none.
+  shortcut the app would not accept from the keyboard is read as none. `UseMica=true` turns the backdrop on; the
+  line is written only while it is on.
   When a clean leaves memory load at or above the threshold (the memory is really in use), the wait doubles
   after each such clean, up to 16 times the setting, and returns to normal once load drops below the threshold.
 - Services Power Clean stops are started again when you quit the app. Each one is first recorded in

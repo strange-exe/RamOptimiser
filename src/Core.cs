@@ -311,6 +311,19 @@ namespace RamOptimiser
         public ICollection<string> TrimExclusions;
         /// <summary>EachProcess only: leave the app in front alone, with all its processes.</summary>
         public bool SpareForeground = true;
+        /// <summary>
+        /// Called on the cleaning thread as each step starts (services first, then each area once, in clean order);
+        /// extra trim-and-flush passes are not new steps. Null for none. An exception it throws is ignored.
+        /// </summary>
+        public Action<CleanProgress> Progress;
+    }
+
+    /// <summary>One step of a running clean: Step of Total, about to clean Area (Areas.Services for stopping services).</summary>
+    public sealed class CleanProgress
+    {
+        public int Step;
+        public int Total;
+        public Areas Area;
     }
 
     /// <summary>
@@ -517,6 +530,7 @@ namespace RamOptimiser
                 TimeSpan start = clock();
                 var stopper = new CleanStopper(req.Cancel, req.Deadline, clock);
                 report.Before = snapshot();
+                var progress = new ProgressReporter(req);
 
                 if ((req.Areas & Areas.Services) != 0)
                 {
@@ -525,6 +539,7 @@ namespace RamOptimiser
                     if (stop != CleanStop.None) MarkNotRun(r, stop);
                     else
                     {
+                        progress.Starting(Areas.Services);
                         TimeSpan t0 = clock();
                         List<string> chosen = ServiceCatalog.Filter(req.Services);
                         if (chosen.Count == 0) Skip(r, "no services chosen");
@@ -544,7 +559,8 @@ namespace RamOptimiser
                     report.Results.Add(r);
                 }
 
-                RunAreas(req.Areas, report, req.MaxPasses, inUse, r => run(report, r, stopper), clock, stopper.Check);
+                RunAreas(req.Areas, report, req.MaxPasses, inUse, r => { progress.Starting(r.Area); run(report, r, stopper); },
+                    clock, stopper.Check);
 
                 report.After = snapshot();
                 report.Duration = clock() - start;
@@ -574,6 +590,36 @@ namespace RamOptimiser
         }
 
         static readonly TimeSpan MaxTimerWait = TimeSpan.FromMilliseconds(int.MaxValue);
+
+        /// <summary>
+        /// Numbers the steps of one clean for req.Progress: the services step, then each chosen area the first time it
+        /// runs (later trim-and-flush passes reuse the area, so they are not counted again). Cleaning thread only.
+        /// </summary>
+        sealed class ProgressReporter
+        {
+            readonly Action<CleanProgress> report;
+            readonly int total;
+            Areas seen;
+            int step;
+
+            public ProgressReporter(CleanRequest req)
+            {
+                report = req.Progress;
+                if ((req.Areas & Areas.Services) != 0) total++;
+                foreach (var kv in AreaNames.Known)
+                    if ((req.Areas & kv.Value) != 0) total++;
+            }
+
+            public void Starting(Areas area)
+            {
+                if (report == null || (seen & area) != 0) return;
+                seen |= area;
+                step++;
+                // The window's progress line must never stop or fail a clean.
+                try { report(new CleanProgress { Step = step, Total = total, Area = area }); }
+                catch (Exception) { }
+            }
+        }
 
         /// <summary>The time limit for automatic cleans (the app's threshold and interval cleans); manual ones have none.</summary>
         public static readonly TimeSpan AutoCleanDeadline = TimeSpan.FromSeconds(120);

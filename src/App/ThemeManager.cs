@@ -19,10 +19,24 @@ namespace RamOptimiser.App
         public const int DWMWA_CAPTION_COLOR = 35;    // Windows 11
         public const int DWMWA_TEXT_COLOR = 36;       // Windows 11
         public const int DWMWA_COLOR_DEFAULT = unchecked((int)0xFFFFFFFF);
+        // 7A Mica (learn.microsoft.com, DWMWINDOWATTRIBUTE and DWM_SYSTEMBACKDROP_TYPE): Windows 11 build 22621 and later.
+        public const int DWMWA_SYSTEMBACKDROP_TYPE = 38;
+        public const int DWMSBT_AUTO = 0;
+        public const int DWMSBT_MAINWINDOW = 2;
         public const int ASFW_ANY = -1;
 
         [DllImport("dwmapi.dll")]
         public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MARGINS
+        {
+            public int Left, Right, Top, Bottom;
+        }
+
+        /// <summary>Margins of -1 extend the frame over the whole client area, so the backdrop shows where WPF draws nothing.</summary>
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref MARGINS margins);
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -210,5 +224,62 @@ namespace RamOptimiser.App
         }
 
         static int ColorRef(Color c) { return c.R | (c.G << 8) | (c.B << 16); }
+
+        // ------------------------------------------------------------------ Mica (7A)
+
+        bool micaOn;
+        Color solidComposition;
+
+        /// <summary>The Windows build, for MicaPolicy (the app manifest declares Windows 10/11, so this is the real one).</summary>
+        public static int OsBuild { get { return Environment.OSVersion.Version.Major >= 10 ? Environment.OSVersion.Version.Build : 0; } }
+
+        /// <summary>
+        /// Puts the Mica backdrop behind the window when MicaPolicy.Use allows it (the setting is on, Windows 11 22H2 or
+        /// later, not high contrast), or takes it away again. The window's surface turns transparent so the backdrop
+        /// shows; cards keep their own fill. Off and never applied, it changes nothing, so the default is exactly the
+        /// solid window. Call after ApplyWindowFrame, whose caption colour Mica replaces. Returns true while Mica is on.
+        /// </summary>
+        public bool ApplyBackdrop(Window window, bool setting)
+        {
+            IntPtr hwnd = new WindowInteropHelper(window).Handle;
+            if (hwnd == IntPtr.Zero) return false;
+            bool use = MicaPolicy.Use(setting, OsBuild, Current == ResolvedTheme.HighContrast);
+            if (!use && !micaOn) return false;
+            HwndSource source = HwndSource.FromHwnd(hwnd);
+            if (source == null || source.CompositionTarget == null) return false;
+            if (!use)
+            {
+                RemoveBackdrop(window, hwnd, source);
+                return false;
+            }
+            if (!micaOn) solidComposition = source.CompositionTarget.BackgroundColor;
+            int type = AppNative.DWMSBT_MAINWINDOW;
+            if (AppNative.DwmSetWindowAttribute(hwnd, AppNative.DWMWA_SYSTEMBACKDROP_TYPE, ref type, 4) != 0)
+            {
+                if (micaOn) RemoveBackdrop(window, hwnd, source);
+                return false;
+            }
+            micaOn = true;
+            window.Background = Brushes.Transparent;
+            source.CompositionTarget.BackgroundColor = Colors.Transparent;
+            var all = new AppNative.MARGINS { Left = -1, Right = -1, Top = -1, Bottom = -1 };
+            AppNative.DwmExtendFrameIntoClientArea(hwnd, ref all);
+            // The backdrop draws the title bar too: the system caption colour, not the solid Surface one.
+            int caption = AppNative.DWMWA_COLOR_DEFAULT;
+            AppNative.DwmSetWindowAttribute(hwnd, AppNative.DWMWA_CAPTION_COLOR, ref caption, 4);
+            return true;
+        }
+
+        void RemoveBackdrop(Window window, IntPtr hwnd, HwndSource source)
+        {
+            int type = AppNative.DWMSBT_AUTO;
+            AppNative.DwmSetWindowAttribute(hwnd, AppNative.DWMWA_SYSTEMBACKDROP_TYPE, ref type, 4);
+            var none = new AppNative.MARGINS();
+            AppNative.DwmExtendFrameIntoClientArea(hwnd, ref none);
+            source.CompositionTarget.BackgroundColor = solidComposition;
+            window.SetResourceReference(Window.BackgroundProperty, "Surface");
+            micaOn = false;
+            ApplyWindowFrame(window);
+        }
     }
 }

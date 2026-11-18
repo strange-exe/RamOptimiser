@@ -27,7 +27,7 @@ namespace RamOptimiser.App
     /// Dispatcher.BeginInvoke. Wording, validation and theme rules live in AppText and friends (tested).
     /// The window has three tabs (design.md, redesign 2 option A): Memory, Startup and Settings.
     /// </summary>
-    internal sealed class AppShell
+    internal sealed partial class AppShell
     {
         static readonly TimeSpan SampleInterval = TimeSpan.FromSeconds(2);
         /// <summary>Top apps are read every third sample (6 s) while the Memory tab is in view.</summary>
@@ -264,9 +264,11 @@ namespace RamOptimiser.App
             window = (Window)ThemeManager.LoadXaml("MainWindow.xaml");
             window.Icon = LoadWindowIcon();
             FindElements();
+            FindVisuals();
             WireMain();
             WireStartup();
             WireSettings();
+            WireVisuals();
             BuildChoices();
             ApplyElevationState();
             SyncSettingsUi(true);
@@ -285,6 +287,7 @@ namespace RamOptimiser.App
             tray.RestartRequested += delegate { RestartElevated(); };
             tray.ExitRequested += delegate { Exit(); };
             tray.NoticeClicked += delegate { ShowMemoryTab(); };
+            CreateFlyout();
             UpdateTray();
 
             powerServices = new List<string>(settings.PowerServices);
@@ -294,7 +297,7 @@ namespace RamOptimiser.App
             // this one skip and say so) and writes its record to cleans.log under it; automatic cleans stop at the
             // 120 s limit, manual ones have none (E9, E22, R4).
             service = new AutoCleanService(MemorySnapshot.Take,
-                job => GuiCleanLog.Run(job, powerServices, Cleaner.Clean, AppendLog, () => DateTime.UtcNow),
+                job => GuiCleanLog.Run(job, powerServices, CleanWithProgress, AppendLog, () => DateTime.UtcNow),
                 () => DateTime.UtcNow, SystemConditions.AwakeTime, SystemConditions.Read, new GateOptions(), Cleaner.AutoCleanDeadline);
             // On the tick's worker thread: the append may wait briefly for another writer.
             service.Rebound += (entry, s) =>
@@ -353,6 +356,7 @@ namespace RamOptimiser.App
             SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged;
             StopHotkey();
             if (service != null) service.Dispose();
+            CloseFlyout();
             if (tray != null) tray.Dispose();
             if (instance != null) { instance.ActivationRequested -= OnActivationRequested; instance.Dispose(); instance = null; }
             if (window != null) window.Close();
@@ -436,6 +440,7 @@ namespace RamOptimiser.App
             try { SystemEvents.PowerModeChanged -= OnPowerModeChanged; } catch (Exception) { }
             try { StopHotkey(); } catch (Exception) { }
             try { if (service != null) service.Dispose(); } catch (Exception) { }
+            try { CloseFlyout(); } catch (Exception) { }
             try { if (tray != null) tray.Dispose(); } catch (Exception) { }
             try { if (instance != null) instance.Dispose(); } catch (Exception) { }
         }
@@ -613,6 +618,7 @@ namespace RamOptimiser.App
             {
                 AppNative.RemoveMaximizeBox(new System.Windows.Interop.WindowInteropHelper(window).Handle);
                 theme.ApplyWindowFrame(window);
+                ApplyBackdrop();
             };
             window.Closing += OnClosing;
             window.Activated += delegate { CheckSettingsFile(); };
@@ -1468,6 +1474,7 @@ namespace RamOptimiser.App
         void OnSampled(MemorySnapshot s)
         {
             lastSnapshot = s;
+            RecordLoad(s);
             MemoryViewState before = memView.State;
             memView.Sampled(DateTime.Now);
             if (readFailing)
@@ -1631,7 +1638,8 @@ namespace RamOptimiser.App
         {
             ulong bytes = map.Bytes(part);
             SetFigure(value, bytes, animate);
-            AutomationProperties.SetName(row, AppText.RowName(label, null, Format.Bytes(bytes)));
+            // After a clean the row's name carries its change too (7A), as the line under the figure shows it.
+            AutomationProperties.SetName(row, AppText.RowName(label, null, Format.Bytes(bytes), PartChange(part)));
         }
 
         /// <summary>Figures tween (QuinticEase, 700 ms) to their new value, or jump on the first reading and
@@ -1818,6 +1826,9 @@ namespace RamOptimiser.App
         {
             // Before SetCleaning, whose tray update shows it.
             lastClean = new LastCleanInfo { Utc = DateTime.UtcNow, Reason = reason, Report = report, Error = cleanError };
+            history.MarkClean(lastClean.Utc);
+            // Before the after-sample below, whose rows then carry the change in their names.
+            ShowChanges(report, lastClean.Utc);
             SetCleaning(false);
             ShowResult(report, cleanError, reason != CleanReason.Manual);
             cleanError = null;
@@ -1848,6 +1859,8 @@ namespace RamOptimiser.App
         {
             if (on && cleanButton.IsKeyboardFocused) refocusClean = true;
             cleaningUi = on;
+            if (on) StartProgress();
+            else FinishProgress();
             SetCleanLabel();
             UpdateCleanButton();
             if (!on && refocusClean && cleanButton.IsEnabled)
@@ -2338,6 +2351,7 @@ namespace RamOptimiser.App
             RefreshAutoRow();
             UpdateTray();
             if (settings.Theme != before.Theme) ReapplyTheme();
+            else if (settings.UseMica != before.UseMica) ApplyBackdrop();
             bool servicesChanged = string.Join(",", settings.PowerServices.ToArray()) != string.Join(",", before.PowerServices.ToArray());
             if (servicesChanged && powerRows.Count > 0) RefreshServices();
             // A shortcut changed in settings.ini by hand (or by a reset) is registered again.
@@ -2559,6 +2573,7 @@ namespace RamOptimiser.App
                 settingsAutoSwitch.IsChecked = settings.AutoCleanEnabled;
                 settingsPowerSwitch.IsChecked = settings.PowerClean;
                 notifyCheck.IsChecked = settings.NotifyProblems;
+                SyncMica();
                 string note = AppText.PowerNote(settings.PowerClean, ChosenServiceCount());
                 powerNote.Text = note ?? "";
                 powerNote.Visibility = note == null ? Visibility.Collapsed : Visibility.Visible;
@@ -2735,9 +2750,12 @@ namespace RamOptimiser.App
             if (exiting) return;
             theme.Apply(settings.Theme);
             theme.ApplyWindowFrame(window);
+            // Mica follows the theme (dark Mica under dark mode) and steps aside under high contrast.
+            ApplyBackdrop();
+            SyncMica();
             taskbarLight = theme.TaskbarIsLight();
             ShowThemeNote();
-            UpdateTray();
+            UpdateTray(); // also repaints the chart, whose colours are tokens read at paint time
         }
 
         /// <summary>Under high contrast the Theme box's choice has no effect: a line under it says so.</summary>
@@ -2764,6 +2782,7 @@ namespace RamOptimiser.App
             tray.SetStatusLine(skipped ?? TrayStatus.MenuLine(lastClean, localNow, culture));
             tray.SetCleanShortcut(hotkey == null || hotkey.Active == null ? null : hotkey.Active.Format());
             tray.Update(lastSnapshot, settings.ShowTrayPercent, taskbarLight, TrayStatus.TooltipLines(auto, autoInfo, lastClean, localNow, culture));
+            RefreshVisuals();
         }
 
         /// <summary>The tray's status item: the window, on the Memory tab, where the result line and its areas are.</summary>
