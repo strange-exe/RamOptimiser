@@ -87,7 +87,16 @@ namespace RamOptimiser.App
         MapPanel mapBar;
         Border[] segments;
         Border commitUsed, commitRest;
-        TextBlock commitValue;
+        TextBlock commitValue, commitNote, commitWarningText;
+        // U15: the warning near the commit limit (on at 90%, off below 87%).
+        LiveRegion commitWarning;
+        bool commitWarnOn;
+        int commitWarnGeneration;
+        // R1: will a clean help now, under Clean memory (display only), steadied over two samples.
+        Grid adviceLine;
+        Path adviceGlyph;
+        TextBlock adviceText;
+        readonly AdviceSmoother advice = new AdviceSmoother();
         Button cleanButton, restartButton;
         LiveRegion resultPanel;
         Path resultGlyph;
@@ -107,6 +116,8 @@ namespace RamOptimiser.App
         Button autoBarResume, autoBarDismiss;
         /// <summary>The service's pause, back-off and hold as last read (null before the service exists).</summary>
         AutoCleanStatus autoInfo;
+        /// <summary>Where the current pause came from (tray, Settings, an earlier run), for the bar's second line.</summary>
+        PauseOrigin pauseOrigin;
         AutoNotice barNotice;
         /// <summary>The back-off message the user dismissed; AppText.NextAutoBar forgets it once that message goes.</summary>
         string dismissedBarKey;
@@ -139,6 +150,7 @@ namespace RamOptimiser.App
         RadioButton showApps, showServices;
         Run appsCount, servicesCount;
         TextBox startupSearch;
+        Button clearSearchButton;
         ComboBox verdictBox, sortBox;
         List<StartupApp> startupApps;
         List<StartupService> startupServices;
@@ -156,6 +168,7 @@ namespace RamOptimiser.App
         TextBlock saveError, cooldownText, areaReason, startupReason, thresholdValue, themeNote, pauseNote;
         Border pauseRow;
         Button pauseButton;
+        LiveRegion areaReasonRegion;
         Slider thresholdSlider;
         DispatcherTimer thresholdTimer;
         /// <summary>A slider value waiting for its 400 ms pause; flushed on exit and before an elevated restart.</summary>
@@ -234,7 +247,7 @@ namespace RamOptimiser.App
             tray.CleanRequested += delegate { RequestClean(); };
             tray.StatusClicked += delegate { ShowMemoryTab(); };
             tray.AutoCleanToggled += delegate { SetAutoClean(!settings.AutoCleanEnabled); };
-            tray.PauseRequested += delegate { PauseAutoClean(); };
+            tray.PauseRequested += delegate { PauseAutoClean(PauseOrigin.Tray); };
             tray.ResumeRequested += delegate { ResumeAutoClean(); };
             tray.RestartRequested += delegate { RestartElevated(); };
             tray.ExitRequested += delegate { Exit(); };
@@ -262,7 +275,8 @@ namespace RamOptimiser.App
             service.HoldChanged += r => Post(RefreshAutoRow);
             service.Update(ServiceSettings());
             // A pause outlasts a restart, cut to an hour from now: settings.ini is user-writable.
-            if (elevated && settings.AutoCleanEnabled) service.RestorePause(settings.AutoCleanPausedUntilUtc);
+            if (elevated && settings.AutoCleanEnabled && service.RestorePause(settings.AutoCleanPausedUntilUtc))
+                pauseOrigin = PauseOrigin.Restored;
             RefreshAutoRow();
             string logPath = CleanLog.DefaultPath;
             activityPath.Text = logPath ?? "";
@@ -444,6 +458,12 @@ namespace RamOptimiser.App
             commitValue = F<TextBlock>("CommitValue");
             commitUsed = F<Border>("CommitUsed");
             commitRest = F<Border>("CommitRest");
+            commitNote = F<TextBlock>("CommitNote");
+            commitWarning = F<LiveRegion>("CommitWarning");
+            commitWarningText = F<TextBlock>("CommitWarningText");
+            adviceLine = F<Grid>("AdviceLine");
+            adviceGlyph = F<Path>("AdviceGlyph");
+            adviceText = F<TextBlock>("AdviceText");
             cleanButton = F<Button>("CleanButton");
             powerNote = F<TextBlock>("PowerNote");
             restartButton = F<Button>("RestartButton");
@@ -482,6 +502,7 @@ namespace RamOptimiser.App
             appsCount = F<Run>("AppsCount");
             servicesCount = F<Run>("ServicesCount");
             startupSearch = F<TextBox>("StartupSearch");
+            clearSearchButton = F<Button>("ClearSearchButton");
             verdictBox = F<ComboBox>("VerdictBox");
             sortBox = F<ComboBox>("SortBox");
 
@@ -495,6 +516,7 @@ namespace RamOptimiser.App
             thresholdValue = F<TextBlock>("ThresholdValue");
             intervalBox = F<ComboBox>("IntervalBox");
             areaReason = F<TextBlock>("AreaReason");
+            areaReasonRegion = F<LiveRegion>("AreaReasonRegion");
             moreAreas = F<Expander>("MoreAreas");
             settingsPowerSwitch = F<CheckBox>("SettingsPowerSwitch");
             powerList = F<StackPanel>("PowerList");
@@ -564,7 +586,25 @@ namespace RamOptimiser.App
         {
             showApps.Checked += delegate { if (!syncing) BuildStartupList(); };
             showServices.Checked += delegate { if (!syncing) BuildStartupList(); };
-            startupSearch.TextChanged += delegate { BuildStartupList(); };
+            startupSearch.TextChanged += delegate
+            {
+                clearSearchButton.Visibility = string.IsNullOrEmpty(startupSearch.Text) ? Visibility.Collapsed : Visibility.Visible;
+                BuildStartupList();
+            };
+            clearSearchButton.Click += delegate
+            {
+                startupSearch.Text = "";
+                startupSearch.Focus();
+            };
+            // U16: Esc clears a search that has text and keeps focus in the box; on an empty box the key is left alone.
+            startupSearch.PreviewKeyDown += (s, e) =>
+            {
+                if (e.Key == Key.Escape && Keyboard.Modifiers == ModifierKeys.None && StartupFilter.EscapeClears(startupSearch.Text))
+                {
+                    startupSearch.Text = "";
+                    e.Handled = true;
+                }
+            };
             foreach (VerdictFilter f in StartupFilter.Filters)
                 verdictBox.Items.Add(new ComboBoxItem { Content = StartupFilter.Label(f, 0), Tag = f });
             verdictBox.SelectedIndex = 0;
@@ -581,7 +621,7 @@ namespace RamOptimiser.App
             pauseButton.Click += delegate
             {
                 if (autoInfo != null && autoInfo.Paused) ResumeAutoClean();
-                else PauseAutoClean();
+                else PauseAutoClean(PauseOrigin.Settings);
             };
             OnToggle(settingsPowerSwitch, SetPowerClean);
             restoreButton.Click += delegate { RestoreServices(); };
@@ -621,6 +661,8 @@ namespace RamOptimiser.App
                 Areas area = pair.Value;
                 OnToggle(box, on =>
                 {
+                    // U21: the last area stays focusable, so unticking it is refused here, with the reason read out.
+                    if (!on && !AreaRules.CanUntick(settings.Areas, area)) { RefuseLastArea(box, area); return; }
                     settings.Areas = AreaRules.Toggle(settings.Areas, area, on);
                     SaveAndApply();
                 });
@@ -1068,6 +1110,7 @@ namespace RamOptimiser.App
             var dismiss = new Button { Content = IconPath("IconClose", "Text"), Tag = key + "|err", Margin = new Thickness(4, -4, 0, 0), VerticalAlignment = VerticalAlignment.Top };
             dismiss.SetResourceReference(FrameworkElement.StyleProperty, "SubtleButton");
             AutomationProperties.SetName(dismiss, "Dismiss error");
+            dismiss.ToolTip = "Dismiss";
             dismiss.Click += delegate
             {
                 ClearRowError(key);
@@ -1154,6 +1197,8 @@ namespace RamOptimiser.App
             cleanButton.IsEnabled = AppText.CleanEnabled(elevated, cleaningUi, memView.State);
             string note = AppText.PowerNote(settings.PowerClean, ChosenServiceCount());
             AutomationProperties.SetHelpText(cleanButton, AppText.CleanHelp(elevated, memView.State, note));
+            // U21: a disabled button still shows why on hover (ToolTipService.ShowOnDisabled in MainWindow.xaml).
+            cleanButton.ToolTip = AppText.CleanTooltip(elevated, cleaningUi, memView.State);
         }
 
         /// <summary>
@@ -1262,6 +1307,8 @@ namespace RamOptimiser.App
                 UpdateCleanButton();
             }
             RefreshResultLine();
+            // Every sample, seen or not, so the two-sample rule counts real samples (R1; display only).
+            advice.Next(CleanEstimate.Advise(s));
             // Every sample: catches a pause ending and the back-off streak changing (cheap when nothing changed).
             RefreshAutoRow();
             if (!WindowShowing || !memoryTab.IsSelected)
@@ -1342,9 +1389,68 @@ namespace RamOptimiser.App
             double pct = s.CommitLimit == 0 ? 0 : Math.Min(100, s.CommitPercent);
             Motion.To(commitUsed, MapPanel.WeightProperty, pct, Motion.MapDuration, Motion.Spring, animate);
             Motion.To(commitRest, MapPanel.WeightProperty, 100 - pct, Motion.MapDuration, Motion.Spring, animate);
-            AutomationProperties.SetName(commitRow, AppText.CommitName(s));
+            ShowCommitWarning(AppText.CommitWarnOn(commitWarnOn, s), s);
+            ShowAdvice(s);
             mapReady = true;
             UpdateTray();
+        }
+
+        /// <summary>
+        /// U15: near the commit limit the bar's fill turns Caution (fill and glyph change together, at once) and the
+        /// warning line takes the note's place: it fades in (320 ms, ease out) and out (200 ms, ease in), instantly with
+        /// Windows animations off. Read out only on Normal to Warning while the window shows.
+        /// </summary>
+        void ShowCommitWarning(bool warn, MemorySnapshot s)
+        {
+            bool entering = warn && !commitWarnOn;
+            bool leaving = !warn && commitWarnOn;
+            commitWarnOn = warn;
+            commitUsed.SetResourceReference(Border.BackgroundProperty, warn ? "Caution" : "Accent");
+            AutomationProperties.SetName(commitRow, AppText.CommitName(s, warn));
+            if (entering)
+            {
+                int gen = ++commitWarnGeneration;
+                commitWarningText.Text = AppText.CommitWarning;
+                AutomationProperties.SetName(commitWarning, AppText.CommitWarning);
+                commitNote.Visibility = Visibility.Collapsed;
+                commitWarning.Visibility = Visibility.Visible;
+                bool animate = WindowShowing && Motion.On;
+                if (animate) Motion.To(commitWarning, UIElement.OpacityProperty, 0, TimeSpan.Zero, null, false);
+                Motion.To(commitWarning, UIElement.OpacityProperty, 1, Motion.EnterDuration, Motion.Enter, animate);
+                if (WindowShowing)
+                    dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => { if (gen == commitWarnGeneration && commitWarnOn) commitWarning.Announce(); }));
+            }
+            else if (leaving)
+            {
+                int gen = ++commitWarnGeneration;
+                Motion.To(commitWarning, UIElement.OpacityProperty, 0, Motion.ExitDuration, Motion.Exit, WindowShowing, () =>
+                {
+                    if (gen != commitWarnGeneration) return;
+                    commitWarning.Visibility = Visibility.Collapsed;
+                    commitNote.Visibility = Visibility.Visible;
+                });
+            }
+        }
+
+        /// <summary>
+        /// R1: the line under Clean memory, from Windows' low/high memory signal and the commit level, steadied over two
+        /// samples. Display only (it never gates auto-clean, owner 2026-11-17), and hidden unless the figures are live.
+        /// </summary>
+        void ShowAdvice(MemorySnapshot s)
+        {
+            CleanAdvice a = AppText.AdviceVisible(memView.State) ? advice.Shown : CleanAdvice.None;
+            string text = a == CleanAdvice.None ? null : AppText.CleanAdvice(a, s);
+            string glyph = AppText.AdviceGlyph(a);
+            if (text == null || glyph == null)
+            {
+                adviceLine.Visibility = Visibility.Collapsed;
+                return;
+            }
+            adviceText.Text = text;
+            adviceText.SetResourceReference(TextBlock.ForegroundProperty, AppText.AdviceTextBrush(a));
+            adviceGlyph.Data = Icon(glyph);
+            adviceGlyph.SetResourceReference(Shape.StrokeProperty, AppText.AdviceStroke(a));
+            adviceLine.Visibility = Visibility.Visible;
         }
 
         void SetRow(SummaryPanel row, TextBlock value, MapPart part, string label, MemoryMap map, bool animate)
@@ -1406,6 +1512,10 @@ namespace RamOptimiser.App
             lastReadNote.Text = lastRead ?? "";
             lastReadNote.Visibility = stale ? Visibility.Visible : Visibility.Collapsed;
             if (stale) AutomationProperties.SetName(loadCard, AppText.LoadCardName(lastSnapshot) + ". " + lastRead);
+            // The advice speaks about now: a failing read hides it, and the next good read shows its own at once.
+            advice.Reset();
+            adviceLine.Visibility = Visibility.Collapsed;
+            if (memView.State == MemoryViewState.FailedNoData) ShowCommitWarning(false, null);
             UpdateCleanButton();
         }
 
@@ -1419,7 +1529,8 @@ namespace RamOptimiser.App
             ThreadPool.QueueUserWorkItem(delegate
             {
                 List<AppMemory> top = null;
-                try { top = AppMemoryList.Top(TopAppsCount); }
+                // R5: by private bytes, which a clean does not change, so the order holds while pages fault back in.
+                try { top = AppMemoryList.Top(TopAppsCount, AppSort.Private); }
                 catch (Exception) { top = null; }
                 Post(() => { topBusy = false; BuildTopList(top); });
             });
@@ -1435,19 +1546,22 @@ namespace RamOptimiser.App
                 topList.Children.Add(none);
                 return;
             }
-            ulong max = Math.Max(1UL, top[0].Bytes);
+            ulong max = Math.Max(1UL, top[0].PrivateBytes);
             foreach (AppMemory a in top)
             {
-                var row = new SummaryPanel { Padding = new Thickness(0, 3, 0, 3) };
+                // Transparent, not null: the tooltip then shows on hover anywhere on the row (U17). Rows stay out of the
+                // tab order (read-only data); the name below is the keyboard and screen-reader path.
+                var row = new SummaryPanel { Padding = new Thickness(0, 3, 0, 3), Background = Brushes.Transparent };
                 AutomationProperties.SetName(row, AppText.TopAppName(a));
+                row.ToolTip = TopAppTip(a);
                 var stack = new StackPanel();
-                var line = new DockPanel();
-                var figure = new TextBlock { Text = Format.Bytes(a.Bytes) };
-                figure.SetResourceReference(FrameworkElement.StyleProperty, "FigureText");
-                DockPanel.SetDock(figure, Dock.Right);
-                line.Children.Add(figure);
+                // Same columns as the heads in MainWindow.xaml: name, In RAM (muted), Private (the ranking figure).
+                var line = new Grid();
+                line.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                line.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(80) });
+                line.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(80) });
                 var name = new TextBlock { TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
-                name.Inlines.Add(new Run(a.Name));
+                name.Inlines.Add(new Run(AppText.DisplayName(a.Name)));
                 if (a.Processes > 1)
                 {
                     var count = new Run("  " + a.Processes.ToString(CultureInfo.InvariantCulture) + " processes") { FontSize = 12 };
@@ -1455,9 +1569,18 @@ namespace RamOptimiser.App
                     name.Inlines.Add(count);
                 }
                 line.Children.Add(name);
+                var resident = new TextBlock { Text = Format.Bytes(a.Bytes), FontSize = 13 };
+                resident.SetResourceReference(FrameworkElement.StyleProperty, "FigureText");
+                resident.SetResourceReference(TextBlock.ForegroundProperty, "MutedText");
+                Grid.SetColumn(resident, 1);
+                line.Children.Add(resident);
+                var figure = new TextBlock { Text = Format.Bytes(a.PrivateBytes) };
+                figure.SetResourceReference(FrameworkElement.StyleProperty, "FigureText");
+                Grid.SetColumn(figure, 2);
+                line.Children.Add(figure);
                 stack.Children.Add(line);
 
-                double share = (double)a.Bytes / max;
+                double share = (double)a.PrivateBytes / max;
                 var bar = new Grid { Height = 3, Margin = new Thickness(0, 4, 0, 0) };
                 bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.01, share), GridUnitType.Star) });
                 bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0, 1 - share), GridUnitType.Star) });
@@ -1474,6 +1597,23 @@ namespace RamOptimiser.App
                 row.Child = stack;
                 topList.Children.Add(row);
             }
+        }
+
+        /// <summary>
+        /// U17: the full name, then what each figure means, one wrapping line each; plain text only (process names
+        /// are chosen by whoever names the exe, so they go through AppText.DisplayName and never into markup).
+        /// </summary>
+        static UIElement TopAppTip(AppMemory a)
+        {
+            var panel = new StackPanel { MaxWidth = 300 };
+            List<string> lines = AppText.TopAppTip(a);
+            for (int i = 0; i < lines.Count; i++)
+            {
+                var t = new TextBlock { Text = lines[i], TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, i == 0 ? 0 : 4, 0, 0) };
+                if (i == 0) t.FontWeight = FontWeights.SemiBold;
+                panel.Children.Add(t);
+            }
+            return panel;
         }
 
         // ------------------------------------------------------------------ cleaning
@@ -1549,6 +1689,14 @@ namespace RamOptimiser.App
                 }
             }
             resultCount = resultRows.Children.Count;
+            // E8: each area's time is in its row; the whole clean's under them ("Took 3.4 s.").
+            string took = resultCount > 0 ? AppText.TookLine(report) : null;
+            if (took != null)
+            {
+                var tookText = new TextBlock { Text = took, FontSize = 12, Margin = new Thickness(0, 4, 0, 6) };
+                tookText.SetResourceReference(TextBlock.ForegroundProperty, "MutedText");
+                resultRows.Children.Add(tookText);
+            }
             resultDetails.IsExpanded = false;
             resultDetails.Header = AppText.DetailsLabel(false, resultCount);
             resultDetails.Visibility = resultCount > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -1613,11 +1761,12 @@ namespace RamOptimiser.App
                 row.BorderThickness = new Thickness(0, 1, 0, 0);
                 row.SetResourceReference(Border.BorderBrushProperty, "Hairline");
             }
-            AutomationProperties.SetName(row, line.Label + ": " + line.Status);
+            AutomationProperties.SetName(row, AppText.AreaRowName(line));
 
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -1652,9 +1801,18 @@ namespace RamOptimiser.App
                 if (line.State == AreaState.Failed) status.FontWeight = FontWeights.SemiBold;
                 Grid.SetRow(status, 1);
                 Grid.SetColumn(status, 1);
-                Grid.SetColumnSpan(status, 2);
+                Grid.SetColumnSpan(status, 3);
             }
             grid.Children.Add(status);
+            // E8: how long the area took, muted at the row's end; a skipped area ran nothing and shows no time.
+            if (line.Time != null)
+            {
+                var time = new TextBlock { Text = line.Time, FontSize = 12, Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+                time.SetResourceReference(FrameworkElement.StyleProperty, "FigureText");
+                time.SetResourceReference(TextBlock.ForegroundProperty, "MutedText");
+                Grid.SetColumn(time, 3);
+                grid.Children.Add(time);
+            }
             row.Child = grid;
             return row;
         }
@@ -1678,12 +1836,13 @@ namespace RamOptimiser.App
         }
 
         /// <summary>Holds automatic cleans for an hour (tray, Settings). Only offered when it changes something.</summary>
-        void PauseAutoClean()
+        void PauseAutoClean(PauseOrigin origin)
         {
             if (exiting || service == null || !AppText.CanPause(AppText.AutoState(settings.AutoCleanEnabled, elevated, service.GetStatus())))
                 return;
             try { service.Pause(AutoCleanService.PauseLength); }
             catch (ObjectDisposedException) { return; }
+            pauseOrigin = origin; // the bar's second line says where it came from
             RefreshAutoRow();
         }
 
@@ -2030,11 +2189,12 @@ namespace RamOptimiser.App
         void RefreshAutoRow()
         {
             autoInfo = service == null ? null : service.GetStatus();
+            pauseOrigin = AppText.KeepPauseOrigin(pauseOrigin, autoInfo);
             AutoCleanState state = AppText.AutoState(settings.AutoCleanEnabled, elevated, autoInfo);
             CultureInfo culture = CultureInfo.CurrentCulture;
             string description = AppText.Sentence(AppText.AutoDescription(settings));
             AutoNotice card = AppText.AutoCard(state, autoInfo, settings, DateTime.UtcNow, culture);
-            barNotice = AppText.AutoBar(state, autoInfo, settings, culture);
+            barNotice = AppText.AutoBar(state, autoInfo, settings, culture, pauseOrigin);
             string pauseNote = AppText.PauseNote(autoInfo, culture);
             string cooldown = AppText.Sentence(AppText.CooldownText(settings.CooldownSeconds, Streak));
             // Runs on every 2-second sample, tray-hidden too: the visual tree is touched only when something it shows changed.
@@ -2188,23 +2348,50 @@ namespace RamOptimiser.App
                 cooldownText.Text = AppText.Sentence(AppText.CooldownText(settings.CooldownSeconds, Streak));
                 SelectByTag(intervalBox, settings.IntervalMinutes);
                 SelectByTag(themeBox, settings.Theme);
-                bool anyLocked = false;
+                // U21: the last selected area stays enabled and focusable (a disabled box leaves the Tab order and
+                // hides its reason); its status and help say it must stay, and unticking it is refused.
+                string lockedReason = null;
                 foreach (KeyValuePair<CheckBox, Areas> pair in areaBoxes)
                 {
                     pair.Key.IsChecked = (settings.Areas & pair.Value) != 0;
                     bool locked = !AreaRules.CanUntick(settings.Areas, pair.Value);
-                    pair.Key.IsEnabled = !locked;
+                    AutomationProperties.SetItemStatus(pair.Key, locked ? AppText.MustStaySelected : "");
                     string help = pair.Value == Areas.StandbyList ? AppText.StandbyHelp : "";
-                    if (locked) help = (help + " " + AppText.LastAreaReason).Trim();
+                    if (locked)
+                    {
+                        lockedReason = AppText.LastAreaReasonFor(pair.Value);
+                        help = (help + " " + lockedReason).Trim();
+                    }
                     AutomationProperties.SetHelpText(pair.Key, help);
-                    anyLocked |= locked;
                 }
-                areaReason.Visibility = anyLocked ? Visibility.Visible : Visibility.Collapsed;
+                ShowAreaReason(lockedReason);
                 closeToTrayCheck.IsChecked = settings.CloseToTray;
                 trayPercentCheck.IsChecked = settings.ShowTrayPercent;
             }
             finally { syncing = false; }
             UpdateStartupUi();
+        }
+
+        /// <summary>The line under the areas list, shown while one area is locked on; null hides it.</summary>
+        void ShowAreaReason(string reason)
+        {
+            areaReason.Text = reason ?? "";
+            AutomationProperties.SetName(areaReasonRegion, reason ?? "");
+            areaReasonRegion.Visibility = reason == null ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        /// <summary>
+        /// U21: unticking the last area is refused: the box is ticked again without saving, and the reason is shown and
+        /// read out on every attempt, so a box that looks enabled never refuses silently.
+        /// </summary>
+        void RefuseLastArea(CheckBox box, Areas area)
+        {
+            bool wasSyncing = syncing;
+            syncing = true;
+            try { box.IsChecked = true; }
+            finally { syncing = wasSyncing; }
+            ShowAreaReason(AppText.LastAreaReasonFor(area));
+            dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => areaReasonRegion.Announce()));
         }
 
         static void SelectByTag(ComboBox box, object tag)
@@ -2290,6 +2477,8 @@ namespace RamOptimiser.App
             startupReason.Text = reason ?? "";
             startupReason.Visibility = string.IsNullOrEmpty(reason) ? Visibility.Collapsed : Visibility.Visible;
             AutomationProperties.SetHelpText(startupCheck, reason ?? "");
+            // U21: disabled, the switch still shows its reason on hover (ShowOnDisabled in MainWindow.xaml).
+            startupCheck.ToolTip = AppText.DisabledTip(startupCheck.IsEnabled, reason);
         }
 
         static string FirstLine(string text, string fallback)

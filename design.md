@@ -190,8 +190,8 @@ streak above 0), Armed. It drives four places:
   cleans did not help." and a dismiss button; a dismissed bar returns when the streak changes. No "Reset wait"
   action (owner, adopted from the preview). Read out once on entering each state, not per streak step. Enters with
   opacity and an 8 px drop (320 ms QuinticEase out), leaves with opacity and 4 px (200 ms CubicEase in), instant
-  with Windows animations off. Its fill is Card with a ControlBorder edge: the preview's info tokens were not added,
-  because Light/Dark/Styles.xaml belong to later packages.
+  with Windows animations off. Its fill was Card with a ControlBorder edge until wave 5A added the preview's info
+  tokens (see below).
 - **Auto-clean card line** under the description: "Paused: needs administrator rights"; "Paused until 15:41." with
   a Resume link; the P5 hold reason (woke up, full screen, locked or on battery with a schedule); or the back-off in
   two lines, "Waiting longer: the last 2 cleans left load at 85% or more." and "Next clean for high load after 15:20.
@@ -241,6 +241,69 @@ Contrast of the new pairs (from the tokens above): Caution glyph on Card 5.07 li
 Card above 6 in both; muted text on Card 6.46 / 8.46; ControlBorder edge on Surface 3.28 light. All pass.
 Verified: offscreen renders of the paused, backing-off and held states in light and dark (XAML only, no app run).
 Not verified: high contrast, Narrator on the tray menu, a real sleep and wake.
+
+### Memory tab additions (wave 5A: R5, U15, U16, U17, U21, R1 and E8 wiring)
+
+- **Top apps by private memory (R5).** The list ranks by private bytes (`Process.PrivateMemorySize64`, summed per
+  name), not the working set: the default `workingsets` area trims exactly that, so right after a clean every app
+  looked small and the order shuffled while pages faulted back in. Private bytes include paged-out and compressed
+  pages (unlike Task Manager's default "active private working set" column), and a trim does not change them.
+  Owner's wording (2026-11-17): columns **Private** (Text, the ranking figure and the bar) and **In RAM** (MutedText,
+  the working set now), under the heading line "Ranked by private memory. Cleaning does not shrink it; closing the
+  app does." Row name: "msedge: 2.9 GB private, 1.6 GB in RAM, 24 processes". Process names go through
+  `AppText.DisplayName` everywhere they show: control, format (bidi, zero-width) and separator characters dropped,
+  cut to 64 characters with "...", "(no name)" when empty. Plain text only, never markup.
+- **Row tooltips (U17).** Hovering anywhere on a row (transparent fill) shows the full name, then "Private: 2.9 GB.
+  Memory only this app can use. A clean does not change it." and "In RAM: 1.6 GB. The part held in physical memory
+  now. A clean lowers it for a while, then it grows back." Rows stay out of the Tab order (read-only data); their
+  accessible name is the keyboard and screen-reader path. One ToolTip style for the whole app: Text on Card
+  (16.82 light, 14.16 dark), ControlBorder edge (3.52 / 5.03 against Card), radius 4, 12 px, max 320 px wide.
+- **Shortcuts (U16).** Tabs have tooltips ("Memory (Ctrl+1)") and `AutomationProperties.AcceleratorKey`; the search
+  placeholder reads "Search (Ctrl+F)". A 28 px clear button (IconClose, "Clear search (Esc)") shows inside the box
+  while it has text; the box's right padding is 34 px so text never runs under it. Esc clears a search with text
+  and keeps focus there; on an empty box the key is left alone. Row-error dismiss buttons have a "Dismiss" tooltip.
+- **Commit warning (U15).** At 90% of the commit limit the bar's fill swaps Accent for Caution (at once, never a fade
+  between the two) and the note under it is replaced by IconWarn (Caution) plus "Close to the limit: apps may fail to
+  start or to save work. Cleaning does not lower this; closing apps does." in Text. Off below 87% (hysteresis, so 2 s
+  samples do not flicker it), never with an unknown limit or before any figure was read. The line fades in (320 ms
+  QuinticEase out) and out (200 ms CubicEase in), instant with Windows animations off; it is a polite live region,
+  read out only on Normal to Warning while the window shows. The commit row's name ends ". Close to the limit".
+  No red. Contrast: Caution bar on its track 4.49 light / 9.57 dark; Caution glyph on Card 5.07 / 10.73.
+- **Will a clean help (R1 wiring).** One line under Clean memory (after the admin line), glyph plus words from
+  `AppText.CleanAdvice`: IconWarn (Caution) with Text for commit-bound and low memory, IconInfo (MutedText) with
+  MutedText for "not short" and "plenty". Display only: it never gates auto-clean (owner, 2026-11-17). A different
+  advice shows only after two equal samples in a row (`AdviceSmoother`); the first reading shows at once. Hidden
+  unless the figures are live (a failing read hides it, and the next good read shows its own at once).
+- **Locked controls (U21).** The last selected area stays enabled and in the Tab order; unticking it is refused (the
+  box stays ticked, nothing is saved) and "At least one area must stay selected, so Process working sets stays on."
+  shows under the list as a polite live region, read out on every attempt. While locked the box has ItemStatus
+  "Must stay selected" and the sentence in its help text. Clean memory and Start with Windows stay disabled (the
+  standard pattern), with `ToolTipService.ShowOnDisabled` and their reason as a tooltip.
+- **Timing (E8 wiring).** Each per-area row ends with its time in MutedText ("1.8 s", "<0.1 s"); a skipped area shows
+  none; the row's name ends ", 1.8 s". Under the rows: "Took 3.4 s.".
+- **Info-tinted bar (2A carry-over).** New tokens InfoBackground (#EAF2FB light, #1F2D3A dark) and InfoBorder
+  (#B9D2EC, #34506A; Window and WindowText in high contrast) and a `NoticeBar` style; the auto-clean bar uses it, so
+  it reads apart from the danger-tinted error bar. Its edge is decorative (glyph and words carry the state). A pause's
+  second line says where it came from: "Paused from the tray for 1 hour.", "Paused from Settings for 1 hour." or
+  "Paused before the app restarted.", then "Manual cleans still work."; the origin is forgotten when the pause ends.
+
+Contrast of the new pairs (WCAG formula, from Light.xaml / Dark.xaml; also asserted in tests/MemoryTabTests.cs):
+
+| Pair | Needs | Light | Dark |
+|---|---|---|---|
+| Text on InfoBackground | 4.5 | 15.41 | 14.05 |
+| MutedText on InfoBackground (bar detail) | 4.5 | 5.92 | 8.40 |
+| Accent glyph on InfoBackground (pause) | 3 | 5.58 | 7.81 |
+| Caution glyph on InfoBackground (back-off) | 3 | 4.65 | 10.64 |
+| ControlBorder on InfoBackground (Resume edge) | 3 | 3.22 | 4.99 |
+| InfoBorder on Surface (decorative) | none | 1.40 | 1.94 |
+| Caution bar on TrackBackground | 3 | 4.49 | 9.57 |
+| Text on Card (tooltip) | 4.5 | 16.82 | 14.16 |
+
+Verified: offscreen renders (RenderTargetBitmap from XAML loaded as the app loads it, AppShell's own render methods
+called directly, without starting the app) of the calm and under-pressure Memory tab, the locked area, the search
+clear button and the top-app tooltip, light and dark. Not verified: high contrast, a live hover, Narrator, an
+elevated session, and that real samples keep the top-app order stable across a clean.
 
 ## Website (download page), started 2026-11-17
 

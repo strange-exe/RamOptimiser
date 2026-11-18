@@ -54,7 +54,7 @@ namespace RamOptimiser.App
         {
             "Surface", "Card", "Hairline", "WindowBorder", "ControlBorder", "Text", "MutedText", "DisabledText",
             "Accent", "OnAccent", "TrackBackground", "TrackEdge", "SecondaryButton", "Ok", "Caution", "Danger", "DangerBackground",
-            "FocusRing", "MapInUse", "MapModified", "MapStandby", "MapFree"
+            "InfoBackground", "InfoBorder", "FocusRing", "MapInUse", "MapModified", "MapStandby", "MapFree"
         };
 
         readonly Application app;
@@ -142,6 +142,8 @@ namespace RamOptimiser.App
             d["Caution"] = SystemColors.WindowTextBrush;
             d["Danger"] = SystemColors.WindowTextBrush;
             d["DangerBackground"] = SystemColors.WindowBrush;
+            d["InfoBackground"] = SystemColors.WindowBrush;
+            d["InfoBorder"] = SystemColors.WindowTextBrush;
             d["FocusRing"] = SystemColors.WindowTextBrush;
             // Map parts stay apart in system colours.
             d["MapInUse"] = SystemColors.WindowTextBrush;

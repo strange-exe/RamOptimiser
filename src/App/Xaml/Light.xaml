@@ -20,6 +20,9 @@
   <SolidColorBrush x:Key="Caution" Color="#9D5D00"/>
   <SolidColorBrush x:Key="Danger" Color="#C42B1C"/>
   <SolidColorBrush x:Key="DangerBackground" Color="#FDE7E9"/>
+  <!-- Info-tinted bar (auto-clean paused or waiting longer): fill and its decorative edge. -->
+  <SolidColorBrush x:Key="InfoBackground" Color="#EAF2FB"/>
+  <SolidColorBrush x:Key="InfoBorder" Color="#B9D2EC"/>
   <SolidColorBrush x:Key="FocusRing" Color="#1A1A1A"/>
   <SolidColorBrush x:Key="MapInUse" Color="#005FB8"/>
   <!-- Modified: accent hatching, so the part differs from in use by pattern as well as tone. -->

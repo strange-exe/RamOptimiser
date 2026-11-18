@@ -19,6 +19,8 @@
   <SolidColorBrush x:Key="Caution" Color="#FCE100"/>
   <SolidColorBrush x:Key="Danger" Color="#FF99A4"/>
   <SolidColorBrush x:Key="DangerBackground" Color="#442726"/>
+  <SolidColorBrush x:Key="InfoBackground" Color="#1F2D3A"/>
+  <SolidColorBrush x:Key="InfoBorder" Color="#34506A"/>
   <SolidColorBrush x:Key="FocusRing" Color="#FFFFFF"/>
   <SolidColorBrush x:Key="MapInUse" Color="#60CDFF"/>
   <DrawingBrush x:Key="MapModified" TileMode="Tile" Viewport="0,0,5,5" ViewportUnits="Absolute" Viewbox="0,0,5,5" ViewboxUnits="Absolute">
