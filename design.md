@@ -270,10 +270,16 @@ Not verified: high contrast, Narrator on the tray menu, a real sleep and wake.
   read out only on Normal to Warning while the window shows. The commit row's name ends ". Close to the limit".
   No red. Contrast: Caution bar on its track 4.49 light / 9.57 dark; Caution glyph on Card 5.07 / 10.73.
 - **Will a clean help (R1 wiring).** One line under Clean memory (after the admin line), glyph plus words from
-  `AppText.CleanAdvice`: IconWarn (Caution) with Text for commit-bound and low memory, IconInfo (MutedText) with
+  `AppText.CleanAdvice`: IconWarn (Caution) with Text for low memory, IconInfo (MutedText) with
   MutedText for "not short" and "plenty". Display only: it never gates auto-clean (owner, 2026-11-17). A different
   advice shows only after two equal samples in a row (`AdviceSmoother`); the first reading shows at once. Hidden
-  unless the figures are live (a failing read hides it, and the next good read shows its own at once).
+  unless the figures are live (a failing read hides it, and the next good read shows its own at once). The line
+  never repeats the commit warning: `AppText.AdviceFor` swaps the engine's commit-bound advice for Windows' own
+  low or plenty signal, as the preview's under-pressure state does, since the warning is always on at 90% or more.
+- **Process names.** `SafeText.Name` (src/Core.cs) is the one cleaner for the window, `ramopt top` and the
+  per-process trim summary: it walks code points, so supplementary format characters (tag characters) and
+  unpaired surrogates go too, and terminal escape sequences lose their control character. `top --json` keeps the
+  raw name (the JSON writer escapes it); it is data, not display.
 - **Locked controls (U21).** The last selected area stays enabled and in the Tab order; unticking it is refused (the
   box stays ticked, nothing is saved) and "At least one area must stay selected, so Process working sets stays on."
   shows under the list as a polite live region, read out on every attempt. While locked the box has ItemStatus

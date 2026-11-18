@@ -408,7 +408,7 @@ namespace RamOptimiser.Tests
             Check("dry run: registry row", lines.Contains("  registry      no memory figure: writes registry changes to disk"), w.ToString());
             Check("dry run: in-use line", lines.Contains("In use could drop by about 560.0 MB, and by up to 1.0 GB more from the file cache, plus whatever trimming releases."), w.ToString());
             Check("dry run: advice line", lines.Count > 0
-                && lines[lines.Count - 1] == "Windows is not short of memory. A clean frees some now, and programs read part of it back.", w.ToString());
+                && lines[lines.Count - 1] == "Windows is not short of memory. A clean frees some now, and apps read part of it back.", w.ToString());
             Check("dry run: no admin note when lists are readable", !w.ToString().Contains("elevated terminal"));
 
             MemorySnapshot refused = ListSnap();
@@ -577,8 +577,8 @@ namespace RamOptimiser.Tests
         {
             var s = new MemorySnapshot { CommitTotal = 92, CommitLimit = 100 };
             string bound = AppText.CleanAdvice(CleanAdvice.CommitBound, s);
-            Check("advice text: commit bound names the percent", bound == "Programs have reserved 92% of the memory Windows can give out. "
-                + "Cleaning does not lower that; closing programs does.", bound);
+            Check("advice text: commit bound names the percent", bound == "Apps have reserved 92% of the memory Windows can give out. "
+                + "Cleaning does not lower that; closing apps does.", bound);
             Check("advice text: none is null", AppText.CleanAdvice(CleanAdvice.None, s) == null);
             bool tidy = true;
             foreach (CleanAdvice a in new[] { CleanAdvice.CommitBound, CleanAdvice.WillHelp, CleanAdvice.Mixed, CleanAdvice.NotNeeded })
@@ -588,7 +588,7 @@ namespace RamOptimiser.Tests
             }
             Check("advice text: sentences end with a full stop and have no exclamation mark", tidy);
             Check("advice text: mixed wording", AppText.CleanAdvice(CleanAdvice.Mixed, s)
-                == "Windows is not short of memory. A clean frees some now, and programs read part of it back.");
+                == "Windows is not short of memory. A clean frees some now, and apps read part of it back.");
             Check("advice text: null snapshot is safe", AppText.CleanAdvice(CleanAdvice.CommitBound, null) != null);
             // One source for the shared sentences: the app and the terminal say the same thing.
             bool same = true;

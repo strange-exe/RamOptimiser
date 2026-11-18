@@ -46,6 +46,15 @@ namespace RamOptimiser
             return n;
         }
 
+        /// <summary>The longest process name the summary shows, as in the app's top-apps list.</summary>
+        const int MaxShownName = 64;
+
+        /// <summary>A process name for the summary: without ".exe", invisible and control characters dropped, cut.</summary>
+        static string ShownName(string name)
+        {
+            return SafeText.Name(Bare(name), MaxShownName, "...");
+        }
+
         static bool IsSystem(ProcessSample p)
         {
             if (p.Id == 0 || p.Id == 4) return true;
@@ -242,8 +251,9 @@ namespace RamOptimiser
             foreach (var kv in plan)
             {
                 if (kv.Value == SpareReason.None) todo.Add(kv.Key.Id);
-                else if (kv.Value == SpareReason.Foreground) sparedForeground.Add(Bare(kv.Key.Name));
-                else if (kv.Value == SpareReason.Excluded) sparedExcluded.Add(Bare(kv.Key.Name));
+                // The names reach the terminal and cleans.log; whoever named the exe chose them (SafeText).
+                else if (kv.Value == SpareReason.Foreground) sparedForeground.Add(ShownName(kv.Key.Name));
+                else if (kv.Value == SpareReason.Excluded) sparedExcluded.Add(ShownName(kv.Key.Name));
             }
             int trimmed = 0, refused = 0, notRun = 0;
             CleanStop stopped = CleanStop.None;

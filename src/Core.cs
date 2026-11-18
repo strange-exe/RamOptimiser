@@ -1151,6 +1151,70 @@ namespace RamOptimiser
         }
     }
 
+    /// <summary>Names other processes chose (exe names), made safe to show on one line in the app and the terminal.</summary>
+    public static class SafeText
+    {
+        /// <summary>Shown for a name with nothing visible left.</summary>
+        public const string NoName = "(no name)";
+
+        /// <summary>
+        /// A name as shown: Visible, trimmed, and cut to max characters ending in ellipsis without splitting a
+        /// surrogate pair; NoName when nothing is left. Plain text for a TextBlock or a terminal, never markup. Pure.
+        /// </summary>
+        public static string Name(string raw, int max, string ellipsis)
+        {
+            string name = Visible(raw).Trim();
+            if (name.Length == 0) return NoName;
+            if (name.Length <= max) return name;
+            int keep = Math.Max(0, max - ellipsis.Length);
+            if (keep > 0 && char.IsHighSurrogate(name[keep - 1])) keep--;
+            return name.Substring(0, keep).TrimEnd() + ellipsis;
+        }
+
+        /// <summary>
+        /// raw without control characters (terminal escape sequences start with one), format characters (bidi
+        /// overrides, zero-width marks, and the supplementary ones such as tag characters), line and paragraph
+        /// separators and unpaired surrogates. Walks code points, so a surrogate pair is judged as one character.
+        /// Null gives "". Pure.
+        /// </summary>
+        public static string Visible(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "";
+            var sb = new System.Text.StringBuilder(raw.Length);
+            int i = 0;
+            while (i < raw.Length)
+            {
+                int width;
+                UnicodeCategory cat = CategoryAt(raw, i, out width);
+                if (!Hidden(cat)) sb.Append(raw, i, width);
+                i += width;
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// The category of the code point at i. A surrogate pair is read as one character (width 2); a surrogate
+        /// without its partner reads Surrogate (width 1).
+        /// </summary>
+        public static UnicodeCategory CategoryAt(string s, int i, out int width)
+        {
+            char c = s[i];
+            if (char.IsHighSurrogate(c) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+            {
+                width = 2;
+                return CharUnicodeInfo.GetUnicodeCategory(s, i);
+            }
+            width = 1;
+            return char.GetUnicodeCategory(c);
+        }
+
+        static bool Hidden(UnicodeCategory cat)
+        {
+            return cat == UnicodeCategory.Control || cat == UnicodeCategory.Format || cat == UnicodeCategory.Surrogate
+                || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator;
+        }
+    }
+
     /// <summary>What the current sample says about cleaning now. Recomputed per sample; no stored state.</summary>
     public enum CleanAdvice { None, CommitBound, WillHelp, Mixed, NotNeeded }
 
@@ -1267,7 +1331,7 @@ namespace RamOptimiser
             switch (a)
             {
                 case CleanAdvice.WillHelp: return "Windows reports low memory: a clean can make room now.";
-                case CleanAdvice.Mixed: return "Windows is not short of memory. A clean frees some now, and programs read part of it back.";
+                case CleanAdvice.Mixed: return "Windows is not short of memory. A clean frees some now, and apps read part of it back.";
                 case CleanAdvice.NotNeeded: return "Windows has plenty of free memory. Cleaning now mostly empties cache and slows the next few minutes.";
                 default: return null;
             }
@@ -1281,7 +1345,13 @@ namespace RamOptimiser
         {
             if (s == null) return CleanAdvice.None;
             if (s.CommitLimit > 0 && s.CommitPercent >= CommitBoundPercent) return CleanAdvice.CommitBound;
-            switch (s.Condition)
+            return ForCondition(s.Condition);
+        }
+
+        /// <summary>Windows' own signal alone: low means a clean helps, high means it is not needed, in between is mixed.</summary>
+        public static CleanAdvice ForCondition(MemoryCondition c)
+        {
+            switch (c)
             {
                 case MemoryCondition.Low: return CleanAdvice.WillHelp;
                 case MemoryCondition.High: return CleanAdvice.NotNeeded;

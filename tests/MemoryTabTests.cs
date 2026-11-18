@@ -92,6 +92,26 @@ namespace RamOptimiser.Tests
             string cut = AppText.DisplayName(pair);
             Check("display name: never splits a surrogate pair", !char.IsHighSurrogate(cut[cut.Length - 4]) || char.IsLowSurrogate(cut[cut.Length - 3]), cut);
             Check("display name: keeps ordinary names", AppText.DisplayName("Code") == "Code" && AppText.DisplayName(" ms-teams ") == "ms-teams");
+
+            // Format characters outside the basic plane come as surrogate pairs: tag characters (invisible-text
+            // smuggling) and musical formatting marks must go too, and so must a surrogate with no partner.
+            string tag = "a" + char.ConvertFromUtf32(0xE0041) + "b" + char.ConvertFromUtf32(0xE0001) + "c";
+            Check("display name: drops supplementary tag characters", AppText.DisplayName(tag) == "abc", Codes(AppText.DisplayName(tag)));
+            string music = "a" + char.ConvertFromUtf32(0x1D173) + "b";
+            Check("display name: drops supplementary format marks", AppText.DisplayName(music) == "ab", Codes(AppText.DisplayName(music)));
+            string loneHigh = "a" + (char)0xD800 + "b", loneLow = "a" + (char)0xDC00 + "b", lastHigh = "ab" + (char)0xDBFF;
+            Check("display name: drops unpaired surrogates", AppText.DisplayName(loneHigh) == "ab" && AppText.DisplayName(loneLow) == "ab"
+                && AppText.DisplayName(lastHigh) == "ab", Codes(AppText.DisplayName(loneHigh)) + " / " + Codes(AppText.DisplayName(loneLow)));
+            string smile = "a" + char.ConvertFromUtf32(0x1F600);
+            Check("display name: keeps a real supplementary character", AppText.DisplayName(smile) == smile, Codes(AppText.DisplayName(smile)));
+        }
+
+        static string Codes(string s)
+        {
+            if (s == null) return "null";
+            var parts = new List<string>();
+            foreach (char c in s) parts.Add(((int)c).ToString("X4", CultureInfo.InvariantCulture));
+            return string.Join(" ", parts.ToArray());
         }
 
         // ---------------------------------------------------------------- U15
@@ -145,6 +165,26 @@ namespace RamOptimiser.Tests
             Check("area rules unchanged", !AreaRules.CanUntick(Areas.WorkingSets, Areas.WorkingSets)
                 && AreaRules.Toggle(Areas.WorkingSets, Areas.WorkingSets, false) == Areas.WorkingSets);
 
+            // U21 state machine: what one tick or untick does, decided without WPF.
+            Areas two = Areas.WorkingSets | Areas.ModifiedList;
+            AreaToggle tickOn = AreaRules.Decide(Areas.WorkingSets, Areas.ModifiedList, true);
+            Check("area toggle: ticking another area saves it", !tickOn.Refused && tickOn.Save && tickOn.Selected == two && tickOn.Reason == null);
+            AreaToggle untickOne = AreaRules.Decide(two, Areas.ModifiedList, false);
+            Check("area toggle: unticking one of two saves", !untickOne.Refused && untickOne.Save && untickOne.Selected == Areas.WorkingSets
+                && untickOne.Reason == null);
+            AreaToggle untickLast = AreaRules.Decide(Areas.WorkingSets, Areas.WorkingSets, false);
+            Check("area toggle: unticking the last area is refused, nothing saved, the reason given", untickLast.Refused && !untickLast.Save
+                && untickLast.Selected == Areas.WorkingSets && untickLast.Reason == AppText.LastAreaReasonFor(Areas.WorkingSets));
+            AreaToggle untickLastStandby = AreaRules.Decide(Areas.StandbyList, Areas.StandbyList, false);
+            Check("area toggle: the refusal names the area that stays", untickLastStandby.Refused
+                && untickLastStandby.Reason == AppText.LastAreaReasonFor(Areas.StandbyList));
+            AreaToggle tickSame = AreaRules.Decide(Areas.WorkingSets, Areas.WorkingSets, true);
+            Check("area toggle: ticking a ticked area changes nothing", !tickSame.Refused && !tickSame.Save && tickSame.Selected == Areas.WorkingSets);
+            AreaToggle untickUnticked = AreaRules.Decide(Areas.WorkingSets, Areas.ModifiedList, false);
+            Check("area toggle: unticking an unticked area changes nothing", !untickUnticked.Refused && !untickUnticked.Save
+                && untickUnticked.Selected == Areas.WorkingSets);
+            Check("area toggle: the window uses the decision", ShellSource().Contains("AreaRules.Decide(settings.Areas, area, on)"));
+
             Check("clean tip: needs admin", AppText.CleanTooltip(false, false, MemoryViewState.Live) == AppText.CleanNeedsAdmin);
             Check("clean tip: waits for data", AppText.CleanTooltip(true, false, MemoryViewState.FailedNoData) == AppText.CleanNeedsData);
             Check("clean tip: none when it works", AppText.CleanTooltip(true, false, MemoryViewState.Live) == null);
@@ -180,6 +220,37 @@ namespace RamOptimiser.Tests
             Check("advice: shown only on live figures", AppText.AdviceVisible(MemoryViewState.Live)
                 && !AppText.AdviceVisible(MemoryViewState.LiveWithError) && !AppText.AdviceVisible(MemoryViewState.FailedNoData)
                 && !AppText.AdviceVisible(MemoryViewState.Initial));
+            // The commit warning (U15) and the advice line (R1) must never say the same thing twice: while the warning
+            // shows, the line gives Windows' own low or plenty signal instead, and the GUI says "apps" throughout.
+            bool once = true, apps = true;
+            string example = null;
+            foreach (MemoryCondition c in new[] { MemoryCondition.Low, MemoryCondition.Neutral, MemoryCondition.High, MemoryCondition.Unknown })
+                for (ulong pct = 80; pct <= 100; pct++)
+                    foreach (bool wasOn in new[] { false, true })
+                    {
+                        var snap = new MemorySnapshot { CommitTotal = pct, CommitLimit = 100, Condition = c };
+                        CleanAdvice a = AppText.AdviceFor(snap);
+                        string text = AppText.CleanAdvice(a, snap);
+                        if (AppText.CommitWarnOn(wasOn, snap) && (a == CleanAdvice.CommitBound || (text != null && text.Contains("does not lower"))))
+                        {
+                            once = false;
+                            example = c + " " + pct + "%: " + text;
+                        }
+                    }
+            Check("advice: no second commit sentence while the commit warning shows", once, example);
+            var at92 = new MemorySnapshot { CommitTotal = 92, CommitLimit = 100, Condition = MemoryCondition.Low };
+            Check("advice: at 92% with low memory the line says a clean can help", AppText.CommitWarnOn(false, at92)
+                && AppText.AdviceFor(at92) == CleanAdvice.WillHelp, AppText.AdviceFor(at92).ToString());
+            Check("advice: at 92% with no signal the line hides", AppText.AdviceFor(new MemorySnapshot { CommitTotal = 92, CommitLimit = 100 }) == CleanAdvice.None);
+            Check("advice: below the warning it follows the engine", AppText.AdviceFor(new MemorySnapshot { CommitTotal = 50, CommitLimit = 100,
+                Condition = MemoryCondition.High }) == CleanAdvice.NotNeeded && AppText.AdviceFor(null) == CleanAdvice.None);
+            foreach (CleanAdvice a in new[] { CleanAdvice.CommitBound, CleanAdvice.WillHelp, CleanAdvice.Mixed, CleanAdvice.NotNeeded })
+            {
+                string text = AppText.CleanAdvice(a, at92);
+                if (text != null && text.IndexOf("program", StringComparison.OrdinalIgnoreCase) >= 0) { apps = false; example = text; }
+            }
+            Check("advice: the window says apps, not programs", apps, example);
+            Check("advice: the window feeds the smoother the window's advice", ShellSource().Contains("advice.Next(AppText.AdviceFor(s));"));
             Check("advice: display only, never in the auto-clean gate", !File.ReadAllText(SrcPath("Gui", "AutoCleanGate.cs")).Contains("Advise")
                 && !File.ReadAllText(SrcPath("Gui", "AutoCleanService.cs")).Contains("Advise"));
         }
@@ -260,7 +331,6 @@ namespace RamOptimiser.Tests
                 && tipStyle.Value.Contains("Property=\"Foreground\" Value=\"{DynamicResource Text}\"")
                 && tipStyle.Value.Contains("Property=\"BorderBrush\" Value=\"{DynamicResource ControlBorder}\""));
             Check("top app rows get a tooltip", shell.Contains("row.ToolTip = TopAppTip(a);"));
-            Check("top app rows are not tab stops", !Regex.IsMatch(shell, "row\\.Focusable = true"));
             Check("top apps: column heads", main.Contains("Text=\"In RAM\"") && main.Contains("Text=\"Private\""));
             Check("top apps: the note under the heading", main.Contains("x:Name=\"TopAppsNote\""));
 
@@ -291,7 +361,7 @@ namespace RamOptimiser.Tests
             // R1 wiring
             Check("advice line under Clean memory", main.Contains("x:Name=\"AdviceLine\"") && main.Contains("x:Name=\"AdviceText\"") && main.Contains("x:Name=\"AdviceGlyph\""));
             Check("info glyph defined", styles.Contains("x:Key=\"IconInfo\""));
-            Check("advice comes from the engine", shell.Contains("CleanEstimate.Advise("));
+            Check("advice comes from the engine", File.ReadAllText(SrcPath("App", Path.Combine("Logic", "AppText.cs"))).Contains("CleanEstimate.Advise(s)"));
 
             // 2A carry-over: info-tinted bar tokens, contrast-checked.
             Check("info tokens in light", Token(light, "InfoBackground") == "#EAF2FB" && Token(light, "InfoBorder") == "#B9D2EC");

@@ -639,29 +639,14 @@ namespace RamOptimiser.App
         const int MaxDisplayName = 64;
 
         /// <summary>
-        /// A process name as shown: whoever names an exe controls it, so control, format (bidi, zero-width) and line or
-        /// paragraph separator characters are dropped, the rest is trimmed and cut to 64 characters with "...", and an
-        /// empty result reads "(no name)". A surrogate pair is never split. Pure.
+        /// A process name as shown: whoever names an exe controls it, so control, format (bidi, zero-width, tag) and
+        /// line or paragraph separator characters and unpaired surrogates are dropped, code point by code point; the
+        /// rest is trimmed and cut to 64 characters with "...", and an empty result reads "(no name)". A surrogate
+        /// pair is never split. The terminal's top uses the same SafeText.Name. Pure.
         /// </summary>
         public static string DisplayName(string raw)
         {
-            var sb = new StringBuilder();
-            if (raw != null)
-            {
-                foreach (char c in raw)
-                {
-                    UnicodeCategory cat = char.GetUnicodeCategory(c);
-                    if (cat == UnicodeCategory.Control || cat == UnicodeCategory.Format
-                        || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator) continue;
-                    sb.Append(c);
-                }
-            }
-            string name = sb.ToString().Trim();
-            if (name.Length == 0) return "(no name)";
-            if (name.Length <= MaxDisplayName) return name;
-            int keep = MaxDisplayName - 3;
-            if (char.IsHighSurrogate(name[keep - 1])) keep--;
-            return name.Substring(0, keep).TrimEnd() + "...";
+            return SafeText.Name(raw, MaxDisplayName, "...");
         }
 
         /// <summary>The top-apps row as one phrase: "msedge: 2.9 GB private, 1.6 GB in RAM, 24 processes".</summary>
@@ -743,6 +728,17 @@ namespace RamOptimiser.App
         static bool AdviceStrong(RamOptimiser.CleanAdvice a)
         {
             return a == RamOptimiser.CleanAdvice.WillHelp || a == RamOptimiser.CleanAdvice.CommitBound;
+        }
+
+        /// <summary>
+        /// The window's advice for one sample: the engine's, except that commit-bound gives way to Windows' own low or
+        /// plenty signal. The commit warning (U15) owns that message and is always on at 90% or more, where the engine
+        /// says commit-bound, so the screen never says "cleaning does not lower this" twice. Pure.
+        /// </summary>
+        public static RamOptimiser.CleanAdvice AdviceFor(MemorySnapshot s)
+        {
+            RamOptimiser.CleanAdvice a = CleanEstimate.Advise(s);
+            return a == RamOptimiser.CleanAdvice.CommitBound ? CleanEstimate.ForCondition(s.Condition) : a;
         }
 
         /// <summary>The advice is about now: shown only while the figures are live, never from a stale or missing read.</summary>
@@ -1233,13 +1229,13 @@ namespace RamOptimiser.App
             }
         }
 
-        /// <summary>Case-insensitive search over the shown name and the real name; blank matches everything.</summary>
         /// <summary>Esc in the search box clears it only when there is text; on an empty box the key is left alone.</summary>
         public static bool EscapeClears(string text)
         {
             return !string.IsNullOrEmpty(text);
         }
 
+        /// <summary>Case-insensitive search over the shown name and the real name; blank matches everything.</summary>
         public static bool Matches(string search, string label, string name)
         {
             if (string.IsNullOrWhiteSpace(search)) return true;
@@ -1313,6 +1309,31 @@ namespace RamOptimiser.App
             if (on) return (selected | area) & Areas.All;
             return CanUntick(selected, area) ? selected & ~area & Areas.All : selected;
         }
+
+        /// <summary>
+        /// U21: what ticking (on) or unticking one area box does. Unticking the last selected area is refused: the box
+        /// is ticked again, nothing is saved, and the reason is shown and read out. Otherwise the new selection is
+        /// saved when it changed. Pure.
+        /// </summary>
+        public static AreaToggle Decide(Areas selected, Areas area, bool on)
+        {
+            if (!on && !CanUntick(selected, area))
+                return new AreaToggle { Selected = selected, Refused = true, Reason = AppText.LastAreaReasonFor(area) };
+            Areas next = Toggle(selected, area, on);
+            return new AreaToggle { Selected = next, Save = next != selected };
+        }
+    }
+
+    /// <summary>One area toggle's outcome (AreaRules.Decide).</summary>
+    public sealed class AreaToggle
+    {
+        /// <summary>The areas to keep: the new selection, or the old one when refused.</summary>
+        public Areas Selected;
+        /// <summary>The selection changed: save and apply it.</summary>
+        public bool Save;
+        /// <summary>Unticking the last area: tick the box again, save nothing, show Reason.</summary>
+        public bool Refused;
+        public string Reason;
     }
 
     public static class ThemeResolver

@@ -662,8 +662,10 @@ namespace RamOptimiser.App
                 OnToggle(box, on =>
                 {
                     // U21: the last area stays focusable, so unticking it is refused here, with the reason read out.
-                    if (!on && !AreaRules.CanUntick(settings.Areas, area)) { RefuseLastArea(box, area); return; }
-                    settings.Areas = AreaRules.Toggle(settings.Areas, area, on);
+                    AreaToggle t = AreaRules.Decide(settings.Areas, area, on);
+                    if (t.Refused) { RefuseLastArea(box, t.Reason); return; }
+                    if (!t.Save) return;
+                    settings.Areas = t.Selected;
                     SaveAndApply();
                 });
             }
@@ -1308,7 +1310,7 @@ namespace RamOptimiser.App
             }
             RefreshResultLine();
             // Every sample, seen or not, so the two-sample rule counts real samples (R1; display only).
-            advice.Next(CleanEstimate.Advise(s));
+            advice.Next(AppText.AdviceFor(s));
             // Every sample: catches a pause ending and the back-off streak changing (cheap when nothing changed).
             RefreshAutoRow();
             if (!WindowShowing || !memoryTab.IsSelected)
@@ -2384,13 +2386,13 @@ namespace RamOptimiser.App
         /// U21: unticking the last area is refused: the box is ticked again without saving, and the reason is shown and
         /// read out on every attempt, so a box that looks enabled never refuses silently.
         /// </summary>
-        void RefuseLastArea(CheckBox box, Areas area)
+        void RefuseLastArea(CheckBox box, string reason)
         {
             bool wasSyncing = syncing;
             syncing = true;
             try { box.IsChecked = true; }
             finally { syncing = wasSyncing; }
-            ShowAreaReason(AppText.LastAreaReasonFor(area));
+            ShowAreaReason(reason);
             dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => areaReasonRegion.Announce()));
         }
 

@@ -25,8 +25,9 @@ namespace RamOptimiser.App
                 case Advice.CommitBound:
                     string reserved = s == null || s.CommitLimit == 0 ? "most"
                         : s.CommitPercent.ToString(CultureInfo.InvariantCulture) + "%";
-                    return "Programs have reserved " + reserved + " of the memory Windows can give out. "
-                        + "Cleaning does not lower that; closing programs does.";
+                    // The window shows the commit warning instead (AdviceFor); this stays for a caller with no warning.
+                    return "Apps have reserved " + reserved + " of the memory Windows can give out. "
+                        + "Cleaning does not lower that; closing apps does.";
                 default: return CleanEstimate.AdviceSentence(a); // shared with ramopt; null for None
             }
         }

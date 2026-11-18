@@ -34,6 +34,54 @@ namespace RamOptimiser.Tests
             catch (T ex) { return ex.Message; }
         }
 
+        /// <summary>True when s has no control character but CR and LF, no format character and no unpaired surrogate.</summary>
+        static bool Clean(string s)
+        {
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '\r' || c == '\n') continue;
+                if (char.IsHighSurrogate(c))
+                {
+                    if (i + 1 >= s.Length || !char.IsLowSurrogate(s[i + 1])) return false;
+                    if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(s, i) == System.Globalization.UnicodeCategory.Format) return false;
+                    i++;
+                    continue;
+                }
+                if (char.IsLowSurrogate(c) || char.IsControl(c)
+                    || char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.Format) return false;
+            }
+            return true;
+        }
+
+        static string Codes(string s)
+        {
+            if (s == null) return "null";
+            var parts = new List<string>();
+            foreach (char c in s) parts.Add(c >= 0x20 && c < 0x7F ? c.ToString() : "<" + ((int)c).ToString("X4") + ">");
+            return string.Join("", parts.ToArray());
+        }
+
+        /// <summary>
+        /// Guard: the app and ramopt may run elevated, and per-process trim must stay limited to what an ordinary
+        /// administrator token can open. Nothing may enable SeDebugPrivilege or call Process.EnterDebugMode.
+        /// </summary>
+        static void DebugPrivilegeGuard()
+        {
+            string root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, Path.Combine("..", "src")));
+            var hits = new List<string>();
+            foreach (string f in Directory.GetFiles(root, "*.cs", SearchOption.AllDirectories))
+            {
+                string text = File.ReadAllText(f);
+                if (text.Contains("\"SeDebugPrivilege\"") || text.Contains("EnterDebugMode") || text.Contains("SE_DEBUG_NAME"))
+                    hits.Add(Path.GetFileName(f));
+            }
+            Check("guard: nothing enables SeDebugPrivilege", Directory.Exists(root) && hits.Count == 0, string.Join(", ", hits.ToArray()));
+            Check("guard: per-process trim opens with set-quota and limited query only",
+                File.ReadAllText(Path.Combine(root, "ProcessTrimmer.cs")).Contains(
+                    "Native.OpenProcess(Native.PROCESS_SET_QUOTA | Native.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)"));
+        }
+
         public static int Run()
         {
             PlanTests();
@@ -43,6 +91,7 @@ namespace RamOptimiser.Tests
             TopTests();
             OptionTests();
             CliTests();
+            DebugPrivilegeGuard();
             return failed;
         }
 
@@ -163,6 +212,19 @@ namespace RamOptimiser.Tests
             Check("trim each: the message names the spared apps",
                 r.Message == "trimmed 0 processes; spared msedge (in front) and obs64 (your list); 1 refused", r.Message);
 
+            // The app in front is named by whoever named its exe: its name reaches the terminal and cleans.log cleaned.
+            string hostile = (char)0x202E + "evil" + (char)27 + "[2J" + char.ConvertFromUtf32(0xE0041) + (char)0xD800;
+            var rh = new AreaResult { Area = Areas.WorkingSets };
+            ProcessTrimmer.TrimEach(new CleanRequest { Trim = TrimMode.EachProcess }, rh,
+                new List<ProcessSample> { P(50, hostile), P(51, "other") }, 50, Self, pid => true, () => CleanStop.None);
+            Check("trim each: the spared app's name is cleaned", rh.Message == "trimmed 1 process; spared evil[2J (in front)", Codes(rh.Message));
+            var rn = new AreaResult { Area = Areas.WorkingSets };
+            ProcessTrimmer.TrimEach(new CleanRequest { Trim = TrimMode.EachProcess }, rn,
+                new List<ProcessSample> { P(60, ((char)0x200B).ToString() + "x"), P(61, "other") }, 60, Self, pid => true, () => CleanStop.None);
+            Check("trim each: a name that is only invisible characters reads (no name)",
+                ProcessTrimmer.Summarise(0, new List<string> { SafeText.Name(((char)0x200B).ToString(), 64, "...") }, null, 0)
+                == "trimmed 0 processes; spared (no name) (in front)" && rn.Message == "trimmed 1 process; spared x (in front)", Codes(rn.Message));
+
             var procs = new List<ProcessSample> { P(Self, "ramopt") };
             for (int i = 1; i <= 5; i++) procs.Add(P(100 + i, "app" + i));
             var r2 = new AreaResult { Area = Areas.WorkingSets };
@@ -238,6 +300,20 @@ namespace RamOptimiser.Tests
             Check("top: the footer explains the columns", lines[lines.Length - 1]
                 == "Private: memory only that app uses. Working set: RAM it holds now, shared pages included; it drops right after a clean.",
                 lines[lines.Length - 1]);
+            // Names are chosen by whoever names an exe: no escape sequence, bidi override or tag character reaches the
+            // terminal, and a cut never splits a surrogate pair.
+            string hostile = (char)27 + "]0;owned" + (char)7 + (char)0x202E + "app" + char.ConvertFromUtf32(0xE0041) + (char)0xDC00;
+            string pairAtCut = new string('x', 18) + char.ConvertFromUtf32(0x1F600) + "yyyy";
+            var odd = new StringWriter();
+            Program.PrintTop(odd, new List<AppMemory> {
+                new AppMemory { Name = hostile, Processes = 1, PrivateBytes = 1, Bytes = 1 },
+                new AppMemory { Name = pairAtCut, Processes = 1, PrivateBytes = 1, Bytes = 1 } });
+            string[] oddLines = odd.ToString().Replace("\r\n", "\n").TrimEnd('\n').Split('\n');
+            Check("top: a hostile name is printed cleaned", oddLines.Length > 2 && oddLines[1].StartsWith("]0;ownedapp   ")
+                && Clean(odd.ToString()), oddLines.Length > 1 ? Codes(oddLines[1]) : odd.ToString());
+            Check("top: a cut never splits a surrogate pair", oddLines.Length > 2 && oddLines[2].StartsWith(new string('x', 18) + "..")
+                && Clean(oddLines[2]), oddLines.Length > 2 ? Codes(oddLines[2]) : "");
+
             var empty = new StringWriter();
             Program.PrintTop(empty, new List<AppMemory>());
             Check("top: an empty list says so", empty.ToString().Contains("No apps could be read."), empty.ToString());
@@ -297,6 +373,15 @@ namespace RamOptimiser.Tests
             Throws<ArgumentException>("options: --trim not with a dry run", () => Options.Parse(new[] { "clean", "--dry-run", "--trim", "each" }));
             Throws<ArgumentException>("options: --trim each needs the workingsets area",
                 () => Options.Parse(new[] { "clean", "--trim", "each", "--areas", "standby-low" }));
+            // A repeated option is a conflict, not "the last one wins": a second --spare would silently drop the first list.
+            string twiceTrim = Message<ArgumentException>(() => Options.Parse(new[] { "clean", "--trim", "system", "--trim", "each" }));
+            Check("options: --trim twice is refused", twiceTrim == "--trim given twice.", twiceTrim);
+            string twiceBy = Message<ArgumentException>(() => Options.Parse(new[] { "top", "--by", "ws", "--by", "private" }));
+            Check("options: --by twice is refused", twiceBy == "--by given twice.", twiceBy);
+            string twiceSpare = Message<ArgumentException>(() => Options.Parse(new[] { "clean", "--trim", "each", "--spare", "obs64", "--spare", "steam" }));
+            Check("options: --spare twice is refused", twiceSpare == "--spare given twice.", twiceSpare);
+            Check("options: --trim each with --no-spare-foreground in either order",
+                !Options.Parse(new[] { "clean", "--no-spare-foreground", "--trim", "each" }).SpareForeground);
         }
 
         // ---------------------------------------------------------------- cli

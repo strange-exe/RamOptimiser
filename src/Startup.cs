@@ -286,15 +286,21 @@ namespace RamOptimiser
             if (name == null) return null;
             var sb = new StringBuilder(Math.Min(name.Length, MaxNameChars * 2));
             bool space = false;
-            foreach (char c in name)
+            int i = 0;
+            while (i < name.Length)
             {
-                UnicodeCategory cat = char.GetUnicodeCategory(c);
-                if (cat == UnicodeCategory.Format) continue;
-                bool blank = char.IsWhiteSpace(c) || cat == UnicodeCategory.Control
+                // Code point by code point: a supplementary format character (a tag character) comes as a surrogate
+                // pair, and a surrogate without its partner is dropped too.
+                int width;
+                UnicodeCategory cat = SafeText.CategoryAt(name, i, out width);
+                int at = i;
+                i += width;
+                if (cat == UnicodeCategory.Format || cat == UnicodeCategory.Surrogate) continue;
+                bool blank = (width == 1 && char.IsWhiteSpace(name[at])) || cat == UnicodeCategory.Control
                     || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator;
                 if (blank) { space = sb.Length > 0; continue; }
                 if (space) { sb.Append(' '); space = false; }
-                sb.Append(c);
+                sb.Append(name, at, width);
                 if (sb.Length > MaxNameChars) break;
             }
             int n = Math.Min(sb.Length, MaxNameChars);

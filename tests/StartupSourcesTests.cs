@@ -29,7 +29,22 @@ namespace RamOptimiser.Tests
             RowTests();
             WordingTests();
             ListingTests();
+            CleanNameTests();
             return failed;
+        }
+
+        // ------------------------------------------------------------------ names from the registry and shortcuts
+
+        static void CleanNameTests()
+        {
+            // Format characters outside the basic plane arrive as surrogate pairs; each half alone reads "Surrogate".
+            string tag = "a" + char.ConvertFromUtf32(0xE0041) + "b";
+            Check("startup name: drops supplementary tag characters", StartupApps.CleanName(tag) == "ab", StartupApps.CleanName(tag));
+            Check("startup name: drops unpaired surrogates", StartupApps.CleanName("a" + (char)0xD800 + "b") == "ab"
+                && StartupApps.CleanName("a" + (char)0xDC00 + "b") == "ab");
+            string smile = "a" + char.ConvertFromUtf32(0x1F600);
+            Check("startup name: keeps a real supplementary character", StartupApps.CleanName(smile) == smile);
+            Check("startup name: controls still become one space", StartupApps.CleanName("a" + (char)9 + (char)10 + "b") == "a b");
         }
 
         // ------------------------------------------------------------------ .lnk fixtures (MS-SHLLINK 2.1 to 2.5)

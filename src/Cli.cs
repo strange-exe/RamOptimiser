@@ -57,7 +57,7 @@ namespace RamOptimiser
                     return o;
                 default: throw new ArgumentException("Unknown command '" + args[0] + "'.");
             }
-            bool onlyJson = true, topOnly = true, sawCount = false, sawBy = false, sawTrim = false, sawSpare = false;
+            bool onlyJson = true, topOnly = true, sawCount = false, sawBy = false, sawTrim = false, sawSpare = false, sawTrimMode = false;
             for (int i = 1; i < args.Length; i++)
             {
                 string a = args[i].ToLowerInvariant();
@@ -72,9 +72,10 @@ namespace RamOptimiser
                 if (a != "--json" && a != "--by") topOnly = false;
                 switch (a)
                 {
-                    case "--by": o.TopBy = SortBy(Value(args, ref i)); sawBy = true; break;
-                    case "--trim": o.TrimMode = Trim(Value(args, ref i)); sawTrim = true; break;
-                    case "--spare": o.Spare = SpareList(Value(args, ref i)); sawSpare = true; break;
+                    // Given twice is a conflict, never "the last one wins": a second --spare would drop the first list.
+                    case "--by": Once(ref sawBy, args[i]); o.TopBy = SortBy(Value(args, ref i)); break;
+                    case "--trim": Once(ref sawTrimMode, args[i]); o.TrimMode = Trim(Value(args, ref i)); sawTrim = true; break;
+                    case "--spare": Once(ref sawSpare, args[i]); o.Spare = SpareList(Value(args, ref i)); break;
                     case "--no-spare-foreground": o.SpareForeground = false; sawTrim = true; break;
                     case "--json": o.Json = true; break;
                     case "--no-log": o.NoLog = true; break;
@@ -148,6 +149,13 @@ namespace RamOptimiser
             if (ProcessTrimmer.CountEntries(v) > ProcessTrimmer.MaxExclusions)
                 throw new ArgumentException("--spare takes at most " + ProcessTrimmer.MaxExclusions + " names.");
             return ProcessTrimmer.ParseExclusions(v);
+        }
+
+        /// <summary>Marks an option seen, refusing a second one.</summary>
+        private static void Once(ref bool seen, string option)
+        {
+            if (seen) throw new ArgumentException(option.ToLowerInvariant() + " given twice.");
+            seen = true;
         }
 
         private static string Value(string[] args, ref int i)
@@ -766,8 +774,8 @@ namespace RamOptimiser
             w.WriteLine(row, "App", "Processes", "Private", "Working set");
             foreach (AppMemory a in apps)
             {
-                string name = a.Name ?? "";
-                if (name.Length > TopNameWidth) name = name.Substring(0, TopNameWidth - 2) + "..";
+                // Any process can name its exe: no escape sequence or bidi override reaches the terminal (SafeText).
+                string name = SafeText.Name(a.Name, TopNameWidth, "..");
                 w.WriteLine(row, name, a.Processes.ToString(CultureInfo.InvariantCulture), Format.Bytes(a.PrivateBytes), Format.Bytes(a.Bytes));
             }
             w.WriteLine(TopFooter);
