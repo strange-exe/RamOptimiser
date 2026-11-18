@@ -7,7 +7,7 @@ using System.Threading;
 
 namespace RamOptimiser
 {
-    public enum Command { Help, Status, Clean, Watch }
+    public enum Command { Help, Status, Clean, Watch, Top }
 
     public sealed class Options
     {
@@ -24,6 +24,16 @@ namespace RamOptimiser
         public bool Json;
         /// <summary>clean and watch --no-log: do not add cleans to the clean log.</summary>
         public bool NoLog;
+        /// <summary>top N: how many apps to list (1-100).</summary>
+        public int TopCount = 10;
+        /// <summary>top --by: private bytes (the default; the working set collapses right after a clean) or ws.</summary>
+        public AppSort TopBy = AppSort.Private;
+        /// <summary>clean and watch --trim: system (the default) or each (app by app, sparing the app in front).</summary>
+        public TrimMode TrimMode = TrimMode.System;
+        /// <summary>--trim each --spare: exe names to leave alone, without ".exe".</summary>
+        public List<string> Spare = new List<string>();
+        /// <summary>--trim each: false with --no-spare-foreground.</summary>
+        public bool SpareForeground = true;
 
         public static Options Parse(string[] args)
         {
@@ -34,6 +44,7 @@ namespace RamOptimiser
                 case "status": o.Command = Command.Status; break;
                 case "clean": o.Command = Command.Clean; break;
                 case "watch": o.Command = Command.Watch; break;
+                case "top": o.Command = Command.Top; break;
                 case "help": case "-h": case "--help": case "/?":
                     // Anything after help is ignored, as before, except output options: a script asking for JSON
                     // must not get the help text on stdout with exit 0.
@@ -46,13 +57,25 @@ namespace RamOptimiser
                     return o;
                 default: throw new ArgumentException("Unknown command '" + args[0] + "'.");
             }
-            bool onlyJson = true;
+            bool onlyJson = true, topOnly = true, sawCount = false, sawBy = false, sawTrim = false, sawSpare = false;
             for (int i = 1; i < args.Length; i++)
             {
                 string a = args[i].ToLowerInvariant();
                 if (a != "--json") onlyJson = false;
+                if (o.Command == Command.Top && !a.StartsWith("-", StringComparison.Ordinal))
+                {
+                    if (sawCount) throw new ArgumentException("'top' takes one number.");
+                    o.TopCount = TopNumber(args[i]);
+                    sawCount = true;
+                    continue;
+                }
+                if (a != "--json" && a != "--by") topOnly = false;
                 switch (a)
                 {
+                    case "--by": o.TopBy = SortBy(Value(args, ref i)); sawBy = true; break;
+                    case "--trim": o.TrimMode = Trim(Value(args, ref i)); sawTrim = true; break;
+                    case "--spare": o.Spare = SpareList(Value(args, ref i)); sawSpare = true; break;
+                    case "--no-spare-foreground": o.SpareForeground = false; sawTrim = true; break;
                     case "--json": o.Json = true; break;
                     case "--no-log": o.NoLog = true; break;
                     case "--areas": o.Areas = AreaNames.Parse(Value(args, ref i)); break;
@@ -71,7 +94,60 @@ namespace RamOptimiser
                 throw new ArgumentException("--no-log works only with 'clean' and 'watch'.");
             if (o.Command == Command.Status && !onlyJson)
                 throw new ArgumentException("'status' takes no options other than --json.");
+            if (o.Command == Command.Top && !topOnly)
+                throw new ArgumentException("'top' takes only a number, --by and --json.");
+            if (sawBy && o.Command != Command.Top)
+                throw new ArgumentException("--by works only with 'top'.");
+            bool trimOptions = sawTrim || sawSpare;
+            if (trimOptions && o.Command != Command.Clean && o.Command != Command.Watch)
+                throw new ArgumentException("--trim, --spare and --no-spare-foreground work only with 'clean' and 'watch'.");
+            if (trimOptions && o.DryRun)
+                throw new ArgumentException("--trim, --spare and --no-spare-foreground don't work with --dry-run.");
+            if ((sawSpare || !o.SpareForeground) && o.TrimMode != TrimMode.EachProcess)
+                throw new ArgumentException("--spare and --no-spare-foreground work only with --trim each.");
+            if (o.TrimMode == TrimMode.EachProcess && (o.Areas & Areas.WorkingSets) == 0)
+                throw new ArgumentException("--trim each needs the workingsets area.");
             return o;
+        }
+
+        /// <summary>top N: a whole number from 1 to 100.</summary>
+        private static int TopNumber(string v)
+        {
+            int n;
+            if (!int.TryParse(v, NumberStyles.None, CultureInfo.InvariantCulture, out n) || n < 1 || n > 100)
+                throw new ArgumentException("top N must be a whole number from 1 to 100.");
+            return n;
+        }
+
+        private static AppSort SortBy(string v)
+        {
+            switch (v.ToLowerInvariant())
+            {
+                case "private": return AppSort.Private;
+                case "ws": return AppSort.WorkingSet;
+                default: throw new ArgumentException("--by must be 'private' or 'ws'.");
+            }
+        }
+
+        private static TrimMode Trim(string v)
+        {
+            switch (v.ToLowerInvariant())
+            {
+                case "system": return TrimMode.System;
+                case "each": return TrimMode.EachProcess;
+                default: throw new ArgumentException("--trim must be 'system' or 'each'.");
+            }
+        }
+
+        /// <summary>--spare: exe names only. Unlike a settings file, a typed list is refused, not filtered, when an entry is wrong.</summary>
+        private static List<string> SpareList(string v)
+        {
+            string bad = ProcessTrimmer.FirstInvalidExclusion(v);
+            if (bad != null)
+                throw new ArgumentException("--spare: '" + bad + "' is not an exe name (letters, digits, spaces and . _ ( ) + - only; no path or wildcard).");
+            if (ProcessTrimmer.CountEntries(v) > ProcessTrimmer.MaxExclusions)
+                throw new ArgumentException("--spare takes at most " + ProcessTrimmer.MaxExclusions + " names.");
+            return ProcessTrimmer.ParseExclusions(v);
         }
 
         private static string Value(string[] args, ref int i)
@@ -341,8 +417,20 @@ namespace RamOptimiser
         internal static int Dispatch(Options o, TextWriter output, Func<MemorySnapshot> sample, Func<Areas, int> runClean,
             Func<Options, int> runWatch, Func<DateTime> utcNow)
         {
+            return Dispatch(o, output, sample, runClean, runWatch, utcNow, AppMemoryList.Top);
+        }
+
+        /// <summary>As above, with top's app list (n, sort) passed in too. top only reads and needs no admin.</summary>
+        internal static int Dispatch(Options o, TextWriter output, Func<MemorySnapshot> sample, Func<Areas, int> runClean,
+            Func<Options, int> runWatch, Func<DateTime> utcNow, Func<int, AppSort, List<AppMemory>> top)
+        {
             switch (o.Command)
             {
+                case Command.Top:
+                    List<AppMemory> apps = top(o.TopCount, o.TopBy);
+                    if (o.Json) output.WriteLine(TopJson(apps, o.TopBy, utcNow()));
+                    else PrintTop(output, apps);
+                    return ExitOk;
                 case Command.Status:
                     if (o.Json) output.WriteLine(StatusJson(sample(), utcNow()));
                     else PrintStatus(output, sample());
@@ -459,7 +547,10 @@ namespace RamOptimiser
                 Areas = areas,
                 Cancel = cancel,
                 Deadline = o.TimeoutSeconds > 0 ? TimeSpan.FromSeconds(o.TimeoutSeconds) : (TimeSpan?)null,
-                LockWait = lockWait
+                LockWait = lockWait,
+                Trim = o.TrimMode,
+                TrimExclusions = o.Spare,
+                SpareForeground = o.SpareForeground
             };
         }
 
@@ -656,6 +747,61 @@ namespace RamOptimiser
             return w.ToString();
         }
 
+        /// <summary>The line under top's table: what the two figures mean.</summary>
+        internal const string TopFooter =
+            "Private: memory only that app uses. Working set: RAM it holds now, shared pages included; it drops right after a clean.";
+
+        /// <summary>The longest app name top shows in full; longer ones are cut, so the columns stay lined up.</summary>
+        const int TopNameWidth = 21;
+
+        /// <summary>ramopt top: one row per app (name, processes, private, working set), then TopFooter.</summary>
+        public static void PrintTop(TextWriter w, List<AppMemory> apps)
+        {
+            if (apps == null || apps.Count == 0)
+            {
+                w.WriteLine("No apps could be read.");
+                return;
+            }
+            const string row = "{0,-23}{1,9}{2,11}{3,14}";
+            w.WriteLine(row, "App", "Processes", "Private", "Working set");
+            foreach (AppMemory a in apps)
+            {
+                string name = a.Name ?? "";
+                if (name.Length > TopNameWidth) name = name.Substring(0, TopNameWidth - 2) + "..";
+                w.WriteLine(row, name, a.Processes.ToString(CultureInfo.InvariantCulture), Format.Bytes(a.PrivateBytes), Format.Bytes(a.Bytes));
+            }
+            w.WriteLine(TopFooter);
+        }
+
+        /// <summary>
+        /// top --json: {"v":1,"type":"top","time":..,"by":"private"|"ws","apps":[{"name","processes","private",
+        /// "workingSet"}]}, bytes throughout, largest first by "by". Pure.
+        /// </summary>
+        internal static string TopJson(List<AppMemory> apps, AppSort by, DateTime utc)
+        {
+            var w = new JsonWriter();
+            w.BeginObject();
+            w.Name("v"); w.Number(1);
+            w.Name("type"); w.String("top");
+            w.Name("time"); w.String(CleanLog.Time(utc));
+            w.Name("by"); w.String(by == AppSort.WorkingSet ? "ws" : "private");
+            w.Name("apps");
+            w.BeginArray();
+            if (apps != null)
+                foreach (AppMemory a in apps)
+                {
+                    w.BeginObject();
+                    w.Name("name"); w.String(a.Name);
+                    w.Name("processes"); w.Number(a.Processes);
+                    w.Name("private"); w.Number(a.PrivateBytes);
+                    w.Name("workingSet"); w.Number(a.Bytes);
+                    w.EndObject();
+                }
+            w.EndArray();
+            w.EndObject();
+            return w.ToString();
+        }
+
         /// <summary>Windows' own memory signal in words, for the status line.</summary>
         internal static string ConditionText(MemoryCondition c)
         {
@@ -767,6 +913,9 @@ namespace RamOptimiser
             w.WriteLine();
             w.WriteLine("Usage:");
             w.WriteLine("  ramopt status [--json]                 show memory use (no admin needed)");
+            w.WriteLine("  ramopt top [N] [--by private|ws] [--json]");
+            w.WriteLine("                                         list the N apps using the most private memory (default 10); no admin needed");
+            w.WriteLine("                                         --by ws ranks by working set instead, which drops right after a clean");
             w.WriteLine("  ramopt clean [--areas LIST | --all] [--timeout S] [--no-log] [--json]");
             w.WriteLine("                                         clean once; Ctrl+C stops it after the current step");
             w.WriteLine("  ramopt clean --dry-run [--areas LIST | --all] [--json]");
@@ -778,7 +927,13 @@ namespace RamOptimiser
                 1 << AutoCleanPolicy.MaxBackoffSteps);
             w.WriteLine("  --timeout S                            end each clean after S seconds (1-3600), once the step under way finishes");
             w.WriteLine("  --no-log                               clean and watch: don't add cleans to the clean log");
-            w.WriteLine("  --json                                 print JSON on stdout: one object (status, clean, clean --dry-run),");
+            w.WriteLine("  --trim each                            trim app by app instead of all at once; spares the app in front.");
+            w.WriteLine("                                         Frees less: Windows services and protected processes are left alone.");
+            w.WriteLine("                                         Works with clean and watch; --trim system (the default) trims all at once.");
+            w.WriteLine("  --spare LIST                           with --trim each: also spare these apps (comma separated exe names, up to {0})",
+                ProcessTrimmer.MaxExclusions);
+            w.WriteLine("  --no-spare-foreground                  with --trim each: trim the app in front too");
+            w.WriteLine("  --json                                 print JSON on stdout: one object (status, top, clean, clean --dry-run),");
             w.WriteLine("                                         or one line per clean (watch); messages and errors go to stderr");
             w.WriteLine("clean and watch add one line per clean to {0} unless --no-log; a dry run never does.", LogPathText);
             w.WriteLine("If another clean is running, clean waits up to {0} s for it and then gives up; watch skips that turn.",

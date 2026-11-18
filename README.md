@@ -124,15 +124,24 @@ bin\ramopt.exe clean --all                 # adds the full standby purge and the
 bin\ramopt.exe watch --threshold 85        # clean when load reaches 85%, at most every 5 minutes
 bin\ramopt.exe status --json               # one JSON object on stdout
 bin\ramopt.exe clean --no-log              # don't add this clean to cleans.log
+bin\ramopt.exe top                         # the 10 apps using the most private memory (no admin needed)
+bin\ramopt.exe top 20 --by ws              # the 20 apps holding the most RAM right now
 ```
 
+`top [N]` lists 1 to 100 apps (default 10), each app's processes added together. It ranks by private bytes, the
+memory only that app uses, because the working set (RAM it holds now, shared pages included) collapses right after
+a clean; `--by ws` ranks by working set instead. It reads only names, pids and memory figures, never paths or
+command lines.
+
 `clean` and `watch` add one line per clean to `%LOCALAPPDATA%\RamOptimiser\cleans.log` (see Clean log below)
-unless `--no-log`; `clean --dry-run` never does. `--json` works with `status`, `clean`, `clean --dry-run` and
-`watch`, and prints JSON on stdout while messages, notes and errors go to stderr:
+unless `--no-log`; `clean --dry-run` never does. `--json` works with `status`, `top`, `clean`, `clean --dry-run`
+and `watch`, and prints JSON on stdout while messages, notes and errors go to stderr:
 
 - `status --json`: one object, `{"v":1,"time",...}` with `totalPhys`, `availablePhys`, `inUse`, `loadPercent`,
   `systemCache`, `lists` (null when the memory lists can't be read), `commit` (null when unknown), `condition` and
   `advice`.
+- `top --json`: one `"type":"top"` object, `{"v":1,"type":"top","time",...}` with `by` (`private` or `ws`) and
+  `apps`, largest first: each with `name`, `processes`, `private` and `workingSet`, in bytes.
 - `clean --dry-run --json`: one `"type":"estimate"` object: `areas` (each with `name`, `kind` of `bytes`,
   `unknown` or `none`, `bytes` (null unless the kind is `bytes`), `upperBound` (true when the figure is "up to"
   rather than "about") and `note`), `inUseDropAtLeast`, `fileCacheDropUpTo` and `advice`.
