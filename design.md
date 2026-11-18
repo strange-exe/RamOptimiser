@@ -335,14 +335,20 @@ elevated session, and that real samples keep the top-app order stable across a c
   a minute; a clean it starts is logged as `hotkey-clean`. The Clean memory tooltip reads "Clean memory
   (Ctrl+Shift+M)" (5A carry-over, `AppText.CleanButtonTip`), the button's AcceleratorKey is the same keys, and the
   tray item shows them at its right. The window's own Ctrl+1/2/3 and Ctrl+F are not taken while the box has focus.
+  While the box has focus the registration is suspended (`HotkeyBinding.Suspend`/`Resume`, the spec's
+  Recording(previous) state): a new combination is registered only to check Windows accepts it, then let go until
+  focus leaves. Skipped presses write one `hotkey-skipped` record a minute at most (`HotkeyGate.ShouldLogSkip`), so
+  a program sending the keys in a loop cannot push real cleans out of cleans.log.
 - **Reset (P16, reset only).** An OutlineButton "Reset" (name "Reset settings") opens an inline GroupPanel, not a
   dialog: "Reset all settings? This cannot be undone." with "Reset settings" and "Cancel"; focus goes to Cancel, Esc
   or focus leaving the panel cancels. A reset keeps Start with Windows (the logon task is its record), ends any pause
-  (auto-clean goes off), clears the shortcut and notifications, saves, re-applies the theme, and says "Settings were
-  reset." in a polite live line, adding that services Power Clean stopped stay stopped when there are any. Logged as
-  `settings-reset`.
+  (auto-clean goes off), clears the shortcut and notifications, saves, re-applies the theme and the Power Clean
+  service rows (ApplySettings diffs against the settings the reset replaced), and says "Settings were reset." in a
+  polite live line, adding that services Power Clean stopped stay stopped when there are any. Logged as
+  `settings-reset`. When the save fails, the SaveError line is the only message and nothing is logged.
 - **Read-out status lines (U9).** Each status line sits in an `app:LiveRegion`: the sample error bar, the startup
-  summary, error, empty state and search count, Power Clean's status and the new shortcut and reset lines are Polite;
+  summary, error, empty state and search count, Power Clean's status, the Memory tab's auto-clean card line (read when
+  its reason changes, and only when the auto bar above it has no notice, since the bar reads its own) and the new shortcut and reset lines are Polite;
   the restart failure and the settings save failure are Assertive. `AnnounceGate` reads a line only when its text is
   new since it was last hidden, so a sample error repeated every 2 s is read once. The search count ("12 shown",
   "Nothing matches") shows only while the list is narrowed and is read 300 ms after typing stops.

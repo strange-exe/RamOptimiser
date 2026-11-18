@@ -79,8 +79,10 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
     and Shift with a letter, a digit or F1 to F24 (not F12, which Windows keeps; the Windows key is not allowed).
     Delete removes it and Esc leaves it as it was. The shortcut works anywhere in Windows, but only while the app
     runs as administrator; without admin rights it is saved and marked not active. If another app already uses the
-    keys, Windows refuses them and the row says so; the previous shortcut stays. A press less than 60 seconds after
-    the last clean is ignored, logged, and shown in the tray menu for a minute, because any program can send keys.
+    keys, Windows refuses them and the row says so; the previous shortcut stays. While the box has focus the current
+    shortcut is let go, so pressing it there records it rather than cleaning; a combination another app holds never
+    reaches the box, so it cannot be recorded. A press less than 60 seconds after the last clean is ignored, shown in
+    the tray menu for a minute and logged (once a minute at most), because any program can send keys.
     The shortcut shows in the Clean memory tooltip and next to **Clean memory** in the tray menu.
   - **Reset settings**: asks first, then puts every setting back to its default (auto-clean off, no shortcut,
     notifications off). Start with Windows is left as it is, and services Power Clean stopped stay stopped until you
@@ -207,7 +209,7 @@ flush), 3 not elevated, 4 `watch` stopped after 5 errors in a row, 5 another cle
   clean.
 - `"type":"event"` (the app): `time`, `source`, `event` (`paused`, `resumed`, `pause-ended`, `backoff-started`,
   `backoff-ended`, `read-failed`, `read-recovered`, `hotkey-clean` (the shortcut started a clean; its own `clean`
-  line follows with reason `manual`), `hotkey-skipped` (a press within 60 s of the last clean), `notice-shown` (a
+  line follows with reason `manual`), `hotkey-skipped` (a press within 60 s of the last clean; at most one a minute), `notice-shown` (a
   notification was shown) and `settings-reset`) and `text`, the line shown under Recent activity.
 
 Fields are only ever added; a breaking change bumps `v`. Text is cut to 200 characters and escaped, so a message

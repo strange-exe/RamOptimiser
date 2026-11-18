@@ -105,7 +105,7 @@ namespace RamOptimiser.App
         StackPanel resultRows;
         TextBlock valInUse, valModified, valStandby, valFree;
         TextBlock autoDescription, autoStatusText, autoStatusDetail;
-        StackPanel autoStatusLine;
+        LiveRegion autoStatusRegion;
         Path autoStatusGlyph;
         Button autoResumeButton;
         CheckBox autoSwitch;
@@ -145,7 +145,7 @@ namespace RamOptimiser.App
         // Startup tab
         ScrollViewer startupView;
         TextBlock startupSummary, startupNote, startupError, startupEmptyTitle, startupEmptyText;
-        StackPanel startupList, startupLoadingPanel, startupEmpty;
+        StackPanel startupList, startupLoadingPanel;
         Border startupCard;
         RadioButton showApps, showServices;
         Run appsCount, servicesCount;
@@ -200,7 +200,7 @@ namespace RamOptimiser.App
         HotkeyListener hotkeyListener;
         HotkeyBinding hotkey = new HotkeyBinding(null);
         /// <summary>When the shortcut last started a clean, and when a press was last ignored by the 60 s floor.</summary>
-        DateTime? hotkeyCleanUtc, hotkeySkippedUtc;
+        DateTime? hotkeyCleanUtc, hotkeySkippedUtc, hotkeySkipLoggedUtc;
 
         // P16: reset to defaults, confirmed inline.
         Button resetButton, resetYes, resetNo;
@@ -515,7 +515,7 @@ namespace RamOptimiser.App
             resultRows = F<StackPanel>("ResultRows");
             topList = F<StackPanel>("TopList");
             autoDescription = F<TextBlock>("AutoDescription");
-            autoStatusLine = F<StackPanel>("AutoStatusLine");
+            autoStatusRegion = F<LiveRegion>("AutoStatusRegion");
             autoStatusGlyph = F<Path>("AutoStatusGlyph");
             autoStatusText = F<TextBlock>("AutoStatus");
             autoStatusDetail = F<TextBlock>("AutoStatusDetail");
@@ -540,7 +540,6 @@ namespace RamOptimiser.App
             startupList = F<StackPanel>("StartupList");
             startupCard = F<Border>("StartupCard");
             startupLoadingPanel = F<StackPanel>("StartupLoading");
-            startupEmpty = F<StackPanel>("StartupEmpty");
             startupEmptyTitle = F<TextBlock>("StartupEmptyTitle");
             startupEmptyText = F<TextBlock>("StartupEmptyText");
             showApps = F<RadioButton>("ShowAppsButton");
@@ -738,7 +737,10 @@ namespace RamOptimiser.App
             OnToggle(trayPercentCheck, on => { settings.ShowTrayPercent = on; SaveAndApply(); });
             OnToggle(notifyCheck, on => { settings.NotifyProblems = on; SaveAndApply(); });
             hotkeyBox.PreviewKeyDown += OnHotkeyBoxKey;
-            hotkeyBox.LostKeyboardFocus += delegate { ShowHotkey(); };
+            // Windows takes a registered combination before the box sees it, so the shortcut is let go while the box
+            // has focus: pressing it there records it rather than cleaning.
+            hotkeyBox.GotKeyboardFocus += delegate { hotkey.Suspend(); };
+            hotkeyBox.LostKeyboardFocus += delegate { ResumeHotkey(); };
             hotkeyRemove.Click += delegate
             {
                 ApplyHotkeyResult(hotkey.Remove());
@@ -945,7 +947,7 @@ namespace RamOptimiser.App
             {
                 startupLoadingPanel.Visibility = Visibility.Visible;
                 startupCard.Visibility = Visibility.Collapsed;
-                startupEmpty.Visibility = Visibility.Collapsed;
+                startupEmptyRegion.Visibility = Visibility.Collapsed;
                 return;
             }
             startupLoadingPanel.Visibility = Visibility.Collapsed;
@@ -1002,7 +1004,8 @@ namespace RamOptimiser.App
 
             bool empty = shown.Count == 0;
             startupCard.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
-            startupEmpty.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
+            // The region itself collapses, so no empty group stays in the UIA tree while the list has rows.
+            startupEmptyRegion.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
             if (empty)
             {
                 if (all.Count == 0)
@@ -2202,6 +2205,8 @@ namespace RamOptimiser.App
             int stopped = ServiceTrimmer.StoppedThisSession().Count;
             restoreButton.IsEnabled = elevated && !servicesBusy && stopped > 0;
             powerStatus.Text = elevated ? AppText.RestoreStatus(stopped) : AppText.ServicesNeedAdmin;
+            // The region is a named group in the UIA tree: its name follows the text (only Restore reads it out).
+            AutomationProperties.SetName(powerStatusRegion, powerStatus.Text);
         }
 
         /// <summary>
@@ -2209,9 +2214,18 @@ namespace RamOptimiser.App
         /// app's own change wins for the key it changed. A failed save keeps the baseline, so a later merge still
         /// knows what the app changed, and the app runs on the new values until it closes (and says so).
         /// </summary>
-        void SaveAndApply()
+        bool SaveAndApply()
         {
-            AppSettings before = settings.Clone();
+            return SaveAndApply(null);
+        }
+
+        /// <param name="before">The settings ahead of the change, for ApplySettings to diff against; null for the
+        /// current ones. A reset passes the settings it replaced, so the theme and the service rows follow it.</param>
+        /// <returns>False when the save failed (the SaveError line is showing).</returns>
+        bool SaveAndApply(AppSettings before)
+        {
+            if (before == null) before = settings.Clone();
+            bool saved = false;
             FileStamp now = SettingsStore.Stamp(settingsPath);
             // Only a file that was read and exists is merged: an unreadable one must not reset other settings, so the
             // app's own settings are saved as they are.
@@ -2225,10 +2239,12 @@ namespace RamOptimiser.App
                 stamp = SettingsStore.Stamp(settingsPath);
                 syncState = SettingsSync.Next(syncState, SettingsSyncEvent.SaveOk);
                 HideStatus(saveErrorRegion);
+                saved = true;
             }
             catch (IOException ex) { SaveFailed(ex); }
             catch (UnauthorizedAccessException ex) { SaveFailed(ex); }
             ApplySettings(before);
+            return saved;
         }
 
         void SaveFailed(Exception ex)
@@ -2373,12 +2389,15 @@ namespace RamOptimiser.App
         void ShowAutoCard(AutoNotice n)
         {
             bool hadFocus = autoResumeButton.IsKeyboardFocused;
-            autoStatusLine.Visibility = n == null ? Visibility.Collapsed : Visibility.Visible;
-            if (n != null)
+            if (n == null) HideStatus(autoStatusRegion);
+            else
             {
+                autoStatusRegion.Visibility = Visibility.Visible;
                 autoStatusText.Text = n.Title;
-                // Both back-off sentences in one name, so a screen reader that lands on the line hears the advice too.
-                AutomationProperties.SetName(autoStatusLine, n.Name);
+                // U9: both back-off sentences in one name, so a screen reader that lands on the line hears the advice
+                // too. It is read out when the reason (Key) changes, not when the advice's countdown moves, and only
+                // when the bar above it on the same tab has nothing to say: the bar reads its own news (U1).
+                Announce(autoStatusRegion, n.Name, n.Key, barNotice == null);
                 autoStatusDetail.Text = n.Detail ?? "";
                 autoStatusDetail.Visibility = n.Detail == null ? Visibility.Collapsed : Visibility.Visible;
                 SetGlyph(autoStatusGlyph, n);
@@ -2717,11 +2736,21 @@ namespace RamOptimiser.App
         /// <summary>Names the region and reads it out after layout, unless that text was the last one it read.</summary>
         void Announce(LiveRegion region, string message)
         {
+            Announce(region, message, message, true);
+        }
+
+        /// <summary>
+        /// Names the region; key decides whether this is news (AnnounceGate). speak false records the key without
+        /// reading it out, so the same news is not read later when its view comes to the front.
+        /// </summary>
+        void Announce(LiveRegion region, string name, string key, bool speak)
+        {
             if (region == null) return;
-            AutomationProperties.SetName(region, message ?? "");
+            AutomationProperties.SetName(region, name ?? "");
             string last;
-            if (!AnnounceGate.ShouldAnnounce(announced.TryGetValue(region, out last) ? last : null, message)) return;
-            announced[region] = message;
+            if (!AnnounceGate.ShouldAnnounce(announced.TryGetValue(region, out last) ? last : null, key)) return;
+            announced[region] = key;
+            if (!speak) return;
             dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => { if (!exiting) region.Announce(); }));
         }
 
@@ -2738,7 +2767,7 @@ namespace RamOptimiser.App
         {
             if (exiting) return;
             LiveRegion region = null;
-            if (searchShown == 0 && startupEmpty.Visibility == Visibility.Visible) region = startupEmptyRegion;
+            if (searchShown == 0 && startupEmptyRegion.Visibility == Visibility.Visible) region = startupEmptyRegion;
             else if (searchCountRegion.Visibility == Visibility.Visible) region = searchCountRegion;
             if (region != null) region.Announce();
         }
@@ -2781,6 +2810,15 @@ namespace RamOptimiser.App
             HotkeyListener l = hotkeyListener;
             hotkeyListener = null;
             l.Dispose();
+        }
+
+        /// <summary>Focus left the shortcut box: the saved shortcut is registered again, and a refusal is shown.</summary>
+        void ResumeHotkey()
+        {
+            if (hotkey == null) return;
+            hotkey.Resume();
+            ShowHotkey();
+            if (hotkey.Message != null) ShowStatus(hotkeyMessageRegion, hotkeyMessage, hotkey.Message);
         }
 
         /// <summary>The row shows the saved shortcut ("None" when empty, from the box's Tag), its note and the Remove link.</summary>
@@ -2859,7 +2897,13 @@ namespace RamOptimiser.App
             if (!HotkeyGate.Allow(HotkeyGate.Latest(service.LastClean, hotkeyCleanUtc), now, HotkeyGate.Floor))
             {
                 hotkeySkippedUtc = now;
-                AddActivity(AppText.ShortcutSkippedEvent());
+                // One record a minute at most, so a program sending the keys in a loop cannot push real cleans out of
+                // cleans.log; the tray line follows every press.
+                if (HotkeyGate.ShouldLogSkip(hotkeySkipLoggedUtc, now))
+                {
+                    hotkeySkipLoggedUtc = now;
+                    AddActivity(AppText.ShortcutSkippedEvent());
+                }
                 UpdateTray();
                 return;
             }
@@ -2867,6 +2911,7 @@ namespace RamOptimiser.App
             if (!TryRequestClean()) return;
             hotkeyCleanUtc = now;
             hotkeySkippedUtc = null;
+            hotkeySkipLoggedUtc = null;
             AddActivity(AppText.ShortcutCleanEvent(used));
         }
 
@@ -2894,13 +2939,21 @@ namespace RamOptimiser.App
             // A slider value still waiting for its save goes in now, so it cannot land on top of the reset later.
             FlushThreshold();
             bool stopped = ServiceTrimmer.StoppedThisSession().Count > 0;
+            AppSettings old = settings.Clone();
             settings = AppSettings.ResetDefaults(settings);
-            SaveAndApply(); // ApplySettings moves the UI and the theme, and registers the (now empty) shortcut again
+            // ApplySettings diffs against the settings the reset replaced, so it re-applies the theme, rebuilds the
+            // Power Clean service rows and registers the (now empty) shortcut again.
+            bool saved = SaveAndApply(old);
             SyncSettingsUi(true);
             moreAreas.IsExpanded = false;
-            AddActivity(AppText.ResetEvent());
-            announced.Remove(resetStatusRegion);
-            ShowStatus(resetStatusRegion, resetStatus, AppText.ResetDone(stopped));
+            // A failed save leaves the SaveError line as the only message: the app runs on the defaults until it
+            // closes, and the reset is not logged as done.
+            if (saved)
+            {
+                AddActivity(AppText.ResetEvent());
+                announced.Remove(resetStatusRegion);
+                ShowStatus(resetStatusRegion, resetStatus, AppText.ResetDone(stopped));
+            }
             resetButton.Focus();
         }
 

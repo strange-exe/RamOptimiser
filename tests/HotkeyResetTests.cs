@@ -158,6 +158,20 @@ namespace RamOptimiser.Tests
             Check("hotkey gate: skip line gone after a minute", HotkeyGate.SkipLine(T0, T0.AddSeconds(-20), T0.AddSeconds(61)) == null);
             Check("hotkey gate: skip line gone after a later clean", HotkeyGate.SkipLine(T0, T0.AddSeconds(5), T0.AddSeconds(10)) == null);
             Check("hotkey gate: no skip, no line", HotkeyGate.SkipLine(null, T0, T0) == null);
+
+            // Any program can send the keys in a loop: skipped presses write one record a minute, not one each.
+            DateTime? logged = null;
+            int records = 0;
+            for (int i = 0; i < 100; i++)
+            {
+                DateTime at = T0.AddMilliseconds(i * 590);
+                if (HotkeyGate.ShouldLogSkip(logged, at)) { logged = at; records++; }
+            }
+            Check("hotkey gate: 100 skipped presses in a minute log once", records == 1, records.ToString(Inv));
+            Check("hotkey gate: first skip logs", HotkeyGate.ShouldLogSkip(null, T0));
+            Check("hotkey gate: skip 59 s after a logged one is quiet", !HotkeyGate.ShouldLogSkip(T0, T0.AddSeconds(59)));
+            Check("hotkey gate: skip a minute later logs again", HotkeyGate.ShouldLogSkip(T0, T0.AddSeconds(60)));
+            Check("hotkey gate: skip after the clock went back logs", HotkeyGate.ShouldLogSkip(T0.AddMinutes(5), T0));
         }
 
         /// <summary>Stands in for RegisterHotKey: a set of taken gestures and a log of calls.</summary>
@@ -245,6 +259,61 @@ namespace RamOptimiser.Tests
             Check("binding: stop unregisters", stop.Registered == null && s.Active == null);
             s.Stop();
             Check("binding: stop twice is harmless", stop.Registered == null);
+
+            // While the shortcut box has focus the shortcut is let go, so pressing it there records it instead of
+            // cleaning; it is registered again when focus leaves.
+            var sus = new FakeRegistrar();
+            var h = new HotkeyBinding(sus);
+            h.Start(P("Ctrl+Shift+M"));
+            h.Suspend();
+            Check("binding: suspend lets the keys go while recording", sus.Registered == null && h.Suspended && h.Active == null
+                && h.State == HotkeyState.Registered && h.Current.Format() == "Ctrl+Shift+M");
+            int regs = sus.Registers;
+            r = h.Record(P("Ctrl+Shift+M"));
+            Check("binding: same shortcut while recording saves and stays let go", r.Save && sus.Registered == null && sus.Registers == regs);
+            r = h.Record(P("Ctrl+Shift+K"));
+            Check("binding: new shortcut while recording is checked, then let go", r.Save && h.State == HotkeyState.Registered
+                && h.Current.Format() == "Ctrl+Shift+K" && sus.Registered == null && sus.Registers == regs + 1);
+            sus.Taken.Add("Ctrl+Alt+K");
+            r = h.Record(P("Ctrl+Alt+K"));
+            Check("binding: refused while recording keeps the saved one, let go", !r.Save && r.Error == 1409
+                && h.Current.Format() == "Ctrl+Shift+K" && sus.Registered == null, sus.Registered);
+            h.Resume();
+            Check("binding: resume registers the saved shortcut", !h.Suspended && sus.Registered == "Ctrl+Shift+K"
+                && h.State == HotkeyState.Registered && h.Active != null);
+            h.Resume();
+            Check("binding: resume twice is harmless", sus.Registered == "Ctrl+Shift+K" && h.State == HotkeyState.Registered);
+            h.Suspend();
+            sus.Taken.Add("Ctrl+Shift+K");
+            h.Resume();
+            Check("binding: resume refused is taken", h.State == HotkeyState.Taken && h.Error == 1409 && h.Active == null && h.Message != null);
+
+            var first = new FakeRegistrar();
+            var f = new HotkeyBinding(first);
+            f.Start(null);
+            f.Suspend();
+            r = f.Record(P("Ctrl+Shift+J"));
+            Check("binding: first shortcut while recording waits for focus to leave", r.Save && first.Registered == null
+                && f.State == HotkeyState.Registered && f.Active == null);
+            f.Start(P("Ctrl+Shift+L"));
+            Check("binding: reload while recording stays let go", first.Registered == null && f.Current.Format() == "Ctrl+Shift+L"
+                && f.State == HotkeyState.Registered);
+            f.Resume();
+            Check("binding: resume after reload registers it", first.Registered == "Ctrl+Shift+L" && f.Active != null);
+            f.Suspend();
+            r = f.Remove();
+            f.Resume();
+            Check("binding: remove while recording stays removed", r.Save && first.Registered == null && f.State == HotkeyState.None);
+            f.Start(P("Ctrl+Shift+L"));
+            f.Suspend();
+            f.Stop();
+            Check("binding: stop ends the suspension", !f.Suspended && first.Registered == null && f.Active == null);
+
+            var offline = new HotkeyBinding(null);
+            offline.Start(P("Ctrl+Shift+M"));
+            offline.Suspend();
+            offline.Resume();
+            Check("binding: suspend without a registrar changes nothing", !offline.Suspended && offline.State == HotkeyState.Inactive);
         }
 
         static void HotkeyWordingTests()
@@ -431,7 +500,7 @@ namespace RamOptimiser.Tests
             var ns = new XmlNamespaceManager(doc.NameTable);
             ns.AddNamespace("x", "http://schemas.microsoft.com/winfx/2006/xaml");
             foreach (string name in new[] { "SampleError", "RestartError", "SaveError", "StartupError", "StartupEmpty", "SearchCount",
-                         "StartupSummary", "PowerStatus", "HotkeyMessage", "ResetStatus" })
+                         "StartupSummary", "PowerStatus", "HotkeyMessage", "ResetStatus", "AutoStatusLine" })
             {
                 var e = doc.SelectSingleNode("//*[@x:Name='" + name + "']", ns) as XmlElement;
                 if (e == null) { Check("status lines are live regions: " + name + " exists", false); continue; }
@@ -441,7 +510,17 @@ namespace RamOptimiser.Tests
             }
             Check("errors that need action are assertive", Setting(doc, ns, "RestartError") == "Assertive" && Setting(doc, ns, "SaveError") == "Assertive");
             Check("other status lines are polite", Setting(doc, ns, "StartupError") == "Polite" && Setting(doc, ns, "SearchCount") == "Polite"
-                && Setting(doc, ns, "SampleError") == "Polite" && Setting(doc, ns, "PowerStatus") == "Polite" && Setting(doc, ns, "HotkeyMessage") == "Polite");
+                && Setting(doc, ns, "SampleError") == "Polite" && Setting(doc, ns, "PowerStatus") == "Polite" && Setting(doc, ns, "HotkeyMessage") == "Polite"
+                && Setting(doc, ns, "AutoStatusLine") == "Polite");
+            // The empty state's region itself collapses, so no empty group named "Nothing matches" sits in the tree.
+            var emptyRegion = doc.SelectSingleNode("//*[@x:Name='StartupEmptyRegion']", ns) as XmlElement;
+            var emptyPanel = doc.SelectSingleNode("//*[@x:Name='StartupEmpty']", ns) as XmlElement;
+            Check("startup empty region collapses itself, unnamed", emptyRegion != null && emptyRegion.GetAttribute("Visibility") == "Collapsed"
+                && !emptyRegion.HasAttribute("AutomationProperties.Name") && emptyPanel != null && !emptyPanel.HasAttribute("Visibility"));
+            var autoRegion = doc.SelectSingleNode("//*[@x:Name='AutoStatusRegion']", ns) as XmlElement;
+            var autoLine = doc.SelectSingleNode("//*[@x:Name='AutoStatusLine']", ns) as XmlElement;
+            Check("auto status region collapses itself", autoRegion != null && autoRegion.GetAttribute("Visibility") == "Collapsed"
+                && autoLine != null && !autoLine.HasAttribute("Visibility"));
             var sample = doc.SelectSingleNode("//*[@x:Name='SampleError']", ns) as XmlElement;
             Check("sample error keeps the info bar look", sample != null && sample.GetAttribute("Style") == "{StaticResource InfoBar}");
 
@@ -476,6 +555,38 @@ namespace RamOptimiser.Tests
             string listener = File.ReadAllText(Path.Combine(app, "HotkeyListener.cs"));
             Check("listener: message-only window", listener.Contains("new IntPtr(-3)") && listener.Contains("0x0312"));
             Check("listener: unregisters before dispose", listener.Contains("UnregisterHotKey"));
+
+            // Review fixes (4A integration).
+            string reset = Body(shell, "void ResetSettings()");
+            int old = reset.IndexOf("AppSettings old = settings.Clone();", StringComparison.Ordinal);
+            int defaults = reset.IndexOf("AppSettings.ResetDefaults(settings)", StringComparison.Ordinal);
+            Check("reset diffs against the settings before it (theme, services)", old >= 0 && old < defaults
+                && reset.Contains("bool saved = SaveAndApply(old);"), reset);
+            int savedIf = reset.IndexOf("if (saved)", StringComparison.Ordinal);
+            int done = reset.IndexOf("ShowStatus(resetStatusRegion", StringComparison.Ordinal);
+            int logged = reset.IndexOf("AddActivity(AppText.ResetEvent())", StringComparison.Ordinal);
+            Check("reset says done and logs only after a save that worked", savedIf > 0 && done > savedIf && logged > savedIf, reset);
+            string save = Body(shell, "bool SaveAndApply(AppSettings before)");
+            Check("save reports whether it saved and diffs against before", save.Contains("return saved;") && save.Contains("ApplySettings(before);")
+                && save.Contains("if (before == null) before = settings.Clone();"), save);
+            Check("restore status keeps the region's name current", Body(shell, "void UpdateRestoreUi()").Contains("AutomationProperties.SetName(powerStatusRegion, powerStatus.Text);"));
+            string onHotkey = Body(shell, "void OnHotkey()");
+            Check("skipped presses are logged once a minute", onHotkey.Contains("HotkeyGate.ShouldLogSkip(hotkeySkipLoggedUtc, now)"), onHotkey);
+            Check("shortcut box lets the shortcut go while it has focus", shell.Contains("hotkeyBox.GotKeyboardFocus += delegate { hotkey.Suspend(); };")
+                && shell.Contains("hotkeyBox.LostKeyboardFocus += delegate { ResumeHotkey(); };"));
+            Check("startup empty state toggles its region", !shell.Contains("startupEmpty.Visibility") && shell.Contains("startupEmptyRegion.Visibility"));
+            string card = Body(shell, "void ShowAutoCard(AutoNotice n)");
+            Check("auto status line is read out when its reason changes, unless the bar speaks", card.Contains("Announce(autoStatusRegion, n.Name, n.Key, barNotice == null)")
+                && card.Contains("HideStatus(autoStatusRegion)"), card);
+        }
+
+        /// <summary>A method's text from its signature to the closing brace at class-member indent.</summary>
+        static string Body(string source, string signature)
+        {
+            int start = source.IndexOf(signature, StringComparison.Ordinal);
+            if (start < 0) return "";
+            int end = source.IndexOf("\n        }", start, StringComparison.Ordinal);
+            return end < 0 ? "" : source.Substring(start, end - start);
         }
 
         static int Count(string s, string part)

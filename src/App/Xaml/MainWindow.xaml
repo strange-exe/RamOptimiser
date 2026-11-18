@@ -271,16 +271,18 @@
                 <TextBlock x:Name="AutoDescription" Style="{StaticResource Small}" Text="When load reaches 85%"/>
                 <!-- Why automatic cleans wait: admin rights, the user's pause (with Resume), the system (P5) or the
                      back-off (R2, two lines with a warning glyph). -->
-                <StackPanel x:Name="AutoStatusLine" Margin="0,2,0,0" Visibility="Collapsed">
-                  <DockPanel>
-                    <Path x:Name="AutoStatusGlyph" DockPanel.Dock="Left" Style="{StaticResource IconPath}" VerticalAlignment="Top"
-                          Margin="0,0,6,0" Visibility="Collapsed"/>
-                    <Button x:Name="AutoResumeButton" DockPanel.Dock="Right" Style="{StaticResource LinkButton}" Content="Resume"
-                            Margin="8,-4,0,0" VerticalAlignment="Top" Visibility="Collapsed" AutomationProperties.Name="Resume auto-clean"/>
-                    <TextBlock x:Name="AutoStatus" Style="{StaticResource Small}" VerticalAlignment="Center"/>
-                  </DockPanel>
-                  <TextBlock x:Name="AutoStatusDetail" Style="{StaticResource Small}" Visibility="Collapsed"/>
-                </StackPanel>
+                <app:LiveRegion x:Name="AutoStatusRegion" Margin="0,2,0,0" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite">
+                  <StackPanel x:Name="AutoStatusLine">
+                    <DockPanel>
+                      <Path x:Name="AutoStatusGlyph" DockPanel.Dock="Left" Style="{StaticResource IconPath}" VerticalAlignment="Top"
+                            Margin="0,0,6,0" Visibility="Collapsed"/>
+                      <Button x:Name="AutoResumeButton" DockPanel.Dock="Right" Style="{StaticResource LinkButton}" Content="Resume"
+                              Margin="8,-4,0,0" VerticalAlignment="Top" Visibility="Collapsed" AutomationProperties.Name="Resume auto-clean"/>
+                      <TextBlock x:Name="AutoStatus" Style="{StaticResource Small}" VerticalAlignment="Center"/>
+                    </DockPanel>
+                    <TextBlock x:Name="AutoStatusDetail" Style="{StaticResource Small}" Visibility="Collapsed"/>
+                  </StackPanel>
+                </app:LiveRegion>
               </StackPanel>
               <CheckBox x:Name="AutoSwitch" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
                         VerticalAlignment="Center" AutomationProperties.Name="Auto-clean"/>
@@ -370,8 +372,8 @@
             <!-- Empty: nothing in this list, or nothing matches the search and filter. Read out through the search
                  debounce (U9), not on every rebuild. -->
             <app:LiveRegion x:Name="StartupEmptyRegion" HorizontalAlignment="Center" AutomationProperties.LiveSetting="Polite"
-                            AutomationProperties.Name="Nothing matches">
-              <StackPanel x:Name="StartupEmpty" Margin="0,24,0,0" Visibility="Collapsed">
+                            Visibility="Collapsed">
+              <StackPanel x:Name="StartupEmpty" Margin="0,24,0,0">
                 <Path Style="{StaticResource IconPath}" Data="{StaticResource IconEmpty}" Stroke="{DynamicResource MutedText}"
                       HorizontalAlignment="Center" RenderTransformOrigin="0.5,0.5">
                   <Path.RenderTransform>

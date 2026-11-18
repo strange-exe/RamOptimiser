@@ -219,6 +219,17 @@ namespace RamOptimiser.App
             TimeSpan since = nowUtc - skippedUtc.Value;
             return since >= TimeSpan.Zero && since < Floor ? AppText.ShortcutSkipped : null;
         }
+
+        /// <summary>
+        /// Whether a skipped press goes to cleans.log and Recent activity. Any program can send the keys in a loop, so
+        /// a skip is written at most once per floor; the tray line still follows every press.
+        /// </summary>
+        public static bool ShouldLogSkip(DateTime? lastLoggedUtc, DateTime nowUtc)
+        {
+            if (lastLoggedUtc == null) return true;
+            TimeSpan since = nowUtc - lastLoggedUtc.Value;
+            return since < TimeSpan.Zero || since >= Floor;
+        }
     }
 
     /// <summary>RegisterHotKey and UnregisterHotKey for one id; HotkeyListener in the app, a fake in the tests.</summary>
@@ -268,7 +279,7 @@ namespace RamOptimiser.App
         public int Error { get; private set; }
 
         /// <summary>The shortcut Windows is sending, or null.</summary>
-        public HotkeyGesture Active { get { return State == HotkeyState.Registered ? Current : null; } }
+        public HotkeyGesture Active { get { return State == HotkeyState.Registered && !Suspended ? Current : null; } }
 
         /// <summary>The line the Settings row shows for the current state (Taken), or null.</summary>
         public string Message { get { return State == HotkeyState.Taken ? AppText.HotkeyError(Current, Error) : null; } }
@@ -282,7 +293,11 @@ namespace RamOptimiser.App
             if (saved == null) { State = HotkeyState.None; return; }
             if (registrar == null) { State = HotkeyState.Inactive; return; }
             int error;
-            if (registrar.TryRegister(saved, out error)) State = HotkeyState.Registered;
+            if (registrar.TryRegister(saved, out error))
+            {
+                State = HotkeyState.Registered;
+                if (Suspended) registrar.Unregister(); // checked, then let go until the box loses focus
+            }
             else { State = HotkeyState.Taken; Error = error; }
         }
 
@@ -307,10 +322,12 @@ namespace RamOptimiser.App
                 Current = candidate;
                 State = HotkeyState.Registered;
                 Error = 0;
+                // While recording, registering only checks that Windows accepts it; Resume registers it for good.
+                if (Suspended) registrar.Unregister();
                 return new HotkeyResult { Save = true, Message = warning };
             }
-            // Refused: the shortcut that worked before goes back, and the setting stays as it was.
-            if (previous != null)
+            // Refused: the shortcut that worked before goes back (at Resume while recording), and the setting stays.
+            if (previous != null && !Suspended)
             {
                 int again;
                 if (!registrar.TryRegister(previous, out again)) { State = HotkeyState.Taken; Error = again; }
@@ -327,9 +344,34 @@ namespace RamOptimiser.App
             return new HotkeyResult { Save = true };
         }
 
+        /// <summary>
+        /// True while the shortcut box has focus (the R7 Recording state): Windows would take the registered keys
+        /// before the box sees them, so they are let go, and a press there records instead of cleaning.
+        /// </summary>
+        public bool Suspended { get; private set; }
+
+        /// <summary>The box got focus: lets the keys go. State and Current stay; Active is null until Resume.</summary>
+        public void Suspend()
+        {
+            if (registrar == null || Suspended) return;
+            registrar.Unregister();
+            Suspended = true;
+        }
+
+        /// <summary>The box lost focus: the saved shortcut is registered again (Taken when Windows now refuses it).</summary>
+        public void Resume()
+        {
+            if (!Suspended) return;
+            Suspended = false;
+            if (State != HotkeyState.Registered || Current == null) return;
+            int error;
+            if (!registrar.TryRegister(Current, out error)) { State = HotkeyState.Taken; Error = error; }
+        }
+
         /// <summary>On exit: unregisters, keeping Current. Safe to call twice.</summary>
         public void Stop()
         {
+            Suspended = false;
             if (registrar != null) registrar.Unregister();
             if (State == HotkeyState.Registered) State = Current == null ? HotkeyState.None : HotkeyState.Inactive;
         }

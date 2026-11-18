@@ -241,7 +241,7 @@ namespace RamOptimiser.Tests
             // A file that could not be read (locked, too big, refused) is never taken for a file of defaults.
             Check("settings reload only applies a file it could read", checkBody.Contains("SettingsStore.TryLoad(settingsPath, out disk)")
                 && checkBody.Contains("SettingsSyncEvent.ReloadFailed") && !checkBody.Contains("SettingsStore.Load("), checkBody);
-            int save = shell.IndexOf("void SaveAndApply()", StringComparison.Ordinal);
+            int save = shell.IndexOf("bool SaveAndApply(AppSettings before)", StringComparison.Ordinal);
             int saveEnd = save < 0 ? -1 : shell.IndexOf("\n        }", save, StringComparison.Ordinal);
             string saveBody = save < 0 || saveEnd < 0 ? "" : shell.Substring(save, saveEnd - save);
             Check("save merges only a file it could read", saveBody.Contains("SettingsStore.TryLoad(settingsPath, out disk)")
