@@ -244,8 +244,8 @@ namespace RamOptimiser
 
     /// <summary>
     /// Where Power Clean records the services it stops, so the names outlive a crash, a kill or a sign-out before
-    /// the exit restore. The desktop app sets ServiceTrimmer.Journal; the CLI leaves it null. Both methods return
-    /// false when the record could not be written.
+    /// the exit restore. The desktop app sets ServiceTrimmer.Journal (PowerCleanJournal, an administrators-only HKLM
+    /// key); the CLI leaves it null. Both methods return false when the record could not be written.
     /// </summary>
     public interface IStoppedServiceJournal
     {
@@ -254,12 +254,13 @@ namespace RamOptimiser
     }
 
     /// <summary>
-    /// The journal's rules, free of I/O. The journal file sits in a folder the non-elevated user can write, so the
-    /// elevated app trusts none of it: only catalog service names are kept, whatever the file says.
+    /// The journal's rules, free of I/O. Only catalog service names are kept, whatever the journal holds: the HKLM
+    /// key is administrators-only and checked before use, and this filter stays as a second line of defence.
+    /// Parse and Serialize are the one-name-per-line text form of the list.
     /// </summary>
     public static class StoppedServiceJournal
     {
-        /// <summary>The catalog has 25 rules; per-user ones can have a few instances. More lines are not ours.</summary>
+        /// <summary>The catalog has 25 rules; per-user ones can have a few instances. More names are not ours.</summary>
         public const int MaxNames = 64;
         /// <summary>Windows' own limit for a service name.</summary>
         public const int MaxNameLength = 256;

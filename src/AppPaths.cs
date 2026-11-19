@@ -6,8 +6,9 @@ namespace RamOptimiser
     /// <summary>
     /// Where the desktop app and ramopt.exe keep their files: %LOCALAPPDATA%\RamOptimiser of the account the process
     /// runs as. An elevated copy started under another account (over-the-shoulder UAC) therefore uses that account's
-    /// folder; the app says so on screen. settings.ini, error.log, stopped-services.txt and cleans.log all live here,
-    /// and every write there goes through SafeUserFolder, because the folder is writable without elevation.
+    /// folder; the app says so on screen. settings.ini, error.log and cleans.log live here, and every write there goes
+    /// through SafeUserFolder, because the folder is writable without elevation. Power Clean's journal, which the
+    /// elevated app acts on, is not here: it is in an administrators-only HKLM key (PowerCleanJournal).
     /// </summary>
     public static class AppPaths
     {
