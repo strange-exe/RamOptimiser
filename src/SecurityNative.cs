@@ -44,6 +44,15 @@ namespace RamOptimiser
         public const uint OPEN_EXISTING = 3, OPEN_ALWAYS = 4;
         public const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000, FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
         public const uint MOVEFILE_REPLACE_EXISTING = 0x1;
+        public const uint SECURITY_SQOS_PRESENT = 0x00100000, SECURITY_IDENTIFICATION = 0x00010000;
+
+        /// <summary>
+        /// Security quality of service for every raw CreateFileW in src. A path a medium process can steer (the data
+        /// folder, a Run value, the Startup folder) may reach a named pipe, and the open connects before any by-handle
+        /// check runs. With these flags the pipe's server gets an identification-level token: it can see who connected
+        /// but can't act as them, whatever the OS default would be. Regular files and volumes ignore them.
+        /// </summary>
+        public const uint SqosIdentification = SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);

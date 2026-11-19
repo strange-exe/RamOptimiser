@@ -115,6 +115,9 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
 - Settings are stored in `%LOCALAPPDATA%\RamOptimiser\settings.ini`. Crashes are logged to `error.log` in the same folder.
   The app refuses to use that folder if it is a link (junction or symbolic link), if `settings.ini` is a link
   or has a second hard link, or if the folder is owned by anyone other than you, Administrators or SYSTEM.
+  When Windows reports `%LOCALAPPDATA%` as a device path (`\\?\...`, `\\.\...`) or a named pipe
+  (`\\server\pipe\...`), the app treats it like an account with no local app data folder and writes no clean log;
+  a normal drive or network share is fine.
   The minimum wait between automatic cleans is 60 seconds, whatever the file says. `NotifyProblems` (`true` or
   `false`) is the notification switch and `CleanHotkey` the shortcut as text (`Ctrl+Shift+M`; empty for none); a
   shortcut the app would not accept from the keyboard is read as none. `UseMica=true` turns the backdrop on; the

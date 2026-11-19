@@ -258,6 +258,13 @@ namespace RamOptimiser
             }
         }
 
+        /// <summary>Flags of the held-folder open: a folder, opened as itself if it is a link, SQOS as every raw open.</summary>
+        internal const uint FolderOpenFlags = SecurityNative.FILE_FLAG_BACKUP_SEMANTICS | SecurityNative.FILE_FLAG_OPEN_REPARSE_POINT
+            | SecurityNative.SqosIdentification;
+
+        /// <summary>Flags of the log open: opened as itself if it is a link, SQOS as every raw open.</summary>
+        internal const uint LogOpenFlags = SecurityNative.FILE_FLAG_OPEN_REPARSE_POINT | SecurityNative.SqosIdentification;
+
         /// <summary>
         /// One append. The folder is held open for the whole call without delete sharing, so while it is open it can't
         /// be renamed away and replaced by a junction. The log is opened without following a link and checked by
@@ -274,7 +281,7 @@ namespace RamOptimiser
             Directory.CreateDirectory(folder);
             using (SafeFileHandle dir = SecurityNative.CreateFileW(folder, SecurityNative.FILE_LIST_DIRECTORY,
                 SecurityNative.FILE_SHARE_READ | SecurityNative.FILE_SHARE_WRITE, IntPtr.Zero, SecurityNative.OPEN_EXISTING,
-                SecurityNative.FILE_FLAG_BACKUP_SEMANTICS | SecurityNative.FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero))
+                FolderOpenFlags, IntPtr.Zero))
             {
                 if (dir.IsInvalid) throw new IOException("Could not open " + folder + ".", Marshal.GetHRForLastWin32Error());
                 SecurityNative.BY_HANDLE_FILE_INFORMATION dirInfo;
@@ -313,7 +320,7 @@ namespace RamOptimiser
         {
             SafeFileHandle h = SecurityNative.CreateFileW(file, SecurityNative.GENERIC_WRITE | SecurityNative.FILE_READ_ATTRIBUTES,
                 SecurityNative.FILE_SHARE_READ | SecurityNative.FILE_SHARE_DELETE, IntPtr.Zero, SecurityNative.OPEN_ALWAYS,
-                SecurityNative.FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
+                LogOpenFlags, IntPtr.Zero);
             if (h.IsInvalid)
             {
                 int hr = Marshal.GetHRForLastWin32Error();
