@@ -66,6 +66,9 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
   - Store apps that start with Windows (new Teams, Phone Link, WhatsApp and others) are listed too, read-only:
     **Open Startup settings** goes to Settings, Apps, Startup, where Windows turns them on or off. RunOnce entries
     (a program set to run once at the next sign-in) are listed read-only and never removed.
+  - Any program can choose its own entry name and path, so names and the "Runs" path are shown with control, bidi,
+    zero-width and line-separator characters removed (long names are cut to 64 characters). Only what is shown
+    changes: switches still act on the entry's real name.
   - Each app's details say who signed its program, from its Authenticode signature checked on this PC with no
     network access, and whether that matches the company the file names. An unsigned program, a signature that
     does not check out, a signer that differs from the named company, or a program such as rundll32 or PowerShell
@@ -237,8 +240,10 @@ flush), 3 not elevated, 4 `watch` stopped after 5 errors in a row, 5 another cle
   line follows with reason `manual`), `hotkey-skipped` (a press within 60 s of the last clean; at most one a minute), `notice-shown` (a
   notification was shown) and `settings-reset`) and `text`, the line shown under Recent activity.
 
-Fields are only ever added; a breaking change bumps `v`. Text is cut to 200 characters and escaped, so a message
-can't start a new line. The file is kept under 256 KB, with one older copy in `cleans.log.old`, and is written only
+Fields are only ever added; a breaking change bumps `v`. Area messages and error text are made one line first (line
+breaks become spaces; control, bidi and zero-width characters are removed). All text is cut to 200 characters, and
+any control, bidi, zero-width or line-separator character left in a value is written as a `\u` escape, so a value
+can't start a new line or act on a terminal. The same escaping applies to `--json` output. The file is kept under 256 KB, with one older copy in `cleans.log.old`, and is written only
 after the same folder checks as `settings.ini`.
 
 ## How it works

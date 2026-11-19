@@ -1239,6 +1239,40 @@ namespace RamOptimiser
         }
 
         /// <summary>
+        /// One safe line of free text (an error message, an activity row): CR, LF, tab and the Unicode line and
+        /// paragraph separators become spaces, so words either side stay apart; other control and format characters
+        /// (bidi overrides, zero-width marks) are dropped by category, lone surrogates are dropped, and the text is cut
+        /// at max characters without splitting a pair. Null gives "". It lives here rather than in the app's
+        /// ActivityLog so that CleanLog, which ramopt.exe compiles too, can clean its messages the same way. Pure.
+        /// </summary>
+        public static string Line(string text, int max)
+        {
+            if (text == null) return "";
+            var sb = new System.Text.StringBuilder(Math.Min(text.Length, max));
+            for (int i = 0; i < text.Length && sb.Length < max; i++)
+            {
+                char ch = text[i];
+                if (char.IsHighSurrogate(ch))
+                {
+                    if (i + 1 >= text.Length || !char.IsLowSurrogate(text[i + 1])) continue;
+                    UnicodeCategory pair = CharUnicodeInfo.GetUnicodeCategory(text, i);
+                    i++;
+                    if (pair == UnicodeCategory.Format || pair == UnicodeCategory.Control) continue;
+                    if (sb.Length + 2 > max) break;
+                    sb.Append(ch).Append(text[i]);
+                    continue;
+                }
+                if (char.IsLowSurrogate(ch)) continue;
+                UnicodeCategory cat = char.GetUnicodeCategory(ch);
+                if (ch == '\r' || ch == '\n' || ch == '\t' || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator)
+                    sb.Append(' ');
+                else if (cat != UnicodeCategory.Control && cat != UnicodeCategory.Format)
+                    sb.Append(ch);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
         /// The category of the code point at i. A surrogate pair is read as one character (width 2); a surrogate
         /// without its partner reads Surrogate (width 1).
         /// </summary>

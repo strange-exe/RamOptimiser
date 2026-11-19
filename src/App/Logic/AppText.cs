@@ -824,6 +824,29 @@ namespace RamOptimiser.App
             }
         }
 
+        /// <summary>
+        /// An app row's name as shown: the built-in list's label, else the row's own name through DisplayName. That
+        /// name is a Run value name or Startup-folder file name any same-user program can pick, or a package's
+        /// manifest DisplayName, so control, bidi and line-separator characters must not forge lines or reorder the
+        /// row. Display only: StartupApp.Name stays raw, since it is the value or file name the switch acts on. Pure.
+        /// </summary>
+        public static string StartupLabel(StartupApp a)
+        {
+            return a.Known != null ? a.Known.Label : DisplayName(a.Name);
+        }
+
+        /// <summary>The longest path Windows accepts, so the 'Runs' line never cuts a real path.</summary>
+        const int MaxShownPath = 32767;
+
+        /// <summary>
+        /// A program path as the 'Runs' line shows it: SafeText's filter (control, format and separator characters
+        /// dropped) with no practical length cap, because that line is the row's identity check. Pure.
+        /// </summary>
+        static string ShownPath(string path)
+        {
+            return SafeText.Name(path, MaxShownPath, "...");
+        }
+
         /// <summary>As below, with the real Windows folder.</summary>
         public static string AppDetail(StartupApp a)
         {
@@ -843,8 +866,9 @@ namespace RamOptimiser.App
                 parts.Add(a.Known.Purpose);
                 // A run-once row has no off to describe.
                 if (!string.IsNullOrEmpty(a.Known.Effect) && !StartupApps.IsRunOnce(a.Source)) parts.Add("If off: " + a.Known.Effect);
-                // The list matches by file name only, so say which file this row really runs.
-                parts.Add("Runs " + (a.ExePath ?? a.Name));
+                // The list matches by file name only, so say which file this row really runs (shown cleaned, so a
+                // crafted path can't fake a second line or reorder itself).
+                parts.Add("Runs " + ShownPath(a.ExePath ?? a.Name));
             }
             parts.Add(PublisherLine(a, windowsFolder));
             if (a.NeedsAdmin) parts.Add("Starts for every user");
