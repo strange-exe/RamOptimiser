@@ -1251,9 +1251,10 @@ namespace RamOptimiser
         /// counts as one). For text that is an identity check, such as the Startup tab's 'Runs &lt;path&gt;' line:
         /// dropping hidden characters there would let a crafted path read exactly like a protected one, and a no-break
         /// space in "Program Files" reads like the real one, while a visible mark ('?' cannot be in a Windows path)
-        /// shows that it is not. Only U+0020 is kept as a space. Code points the runtime reads as unassigned are marked
-        /// too: .NET Framework 4.8's category table predates format characters such as U+13430-1343F, U+0890-0891,
-        /// U+08E2 and U+110CD, so they would otherwise pass as visible. Null gives "". Pure.
+        /// shows that it is not. Only U+0020 is kept as a space. Format characters newer than the runtime are marked
+        /// too (LaterFormat): .NET Framework 4.8's category table (Unicode 8.0) reads them as unassigned, so they
+        /// would otherwise pass as visible. Other code points it reads as unassigned are mostly letters and symbols
+        /// added since (CJK, Adlam, emoji) and stay, so a real user or folder name is not flagged. Null gives "". Pure.
         /// </summary>
         public static string Marked(string raw, string mark)
         {
@@ -1265,7 +1266,7 @@ namespace RamOptimiser
                 int width;
                 UnicodeCategory cat = CategoryAt(raw, i, out width);
                 int cp = CodePointAt(raw, i, width);
-                if (Hidden(cat) || Ignorable(cp) || LookAlikeSpace(cp, cat) || cat == UnicodeCategory.OtherNotAssigned) sb.Append(mark);
+                if (Hidden(cat) || Ignorable(cp) || LookAlikeSpace(cp, cat) || LaterFormat(cp)) sb.Append(mark);
                 else sb.Append(raw, i, width);
                 i += width;
             }
@@ -1357,10 +1358,27 @@ namespace RamOptimiser
 
         static bool Ignorable(int cp)
         {
-            for (int k = 0; k < IgnorableRanges.Length; k += 2)
+            return InRanges(IgnorableRanges, cp);
+        }
+
+        /// <summary>
+        /// The Cf code points of Unicode 18.0 (DerivedGeneralCategory.txt) that .NET Framework 4.8 reads as unassigned
+        /// and Ignorable does not cover: U+0890-0891, U+08E2, U+110CD and U+13430-1343F. Pairs, in order.
+        /// </summary>
+        static readonly int[] LaterFormatRanges = { 0x0890, 0x0891, 0x08E2, 0x08E2, 0x110CD, 0x110CD, 0x13430, 0x1343F };
+
+        /// <summary>A format character the runtime's table is too old to know (it reads it as unassigned).</summary>
+        static bool LaterFormat(int cp)
+        {
+            return InRanges(LaterFormatRanges, cp);
+        }
+
+        static bool InRanges(int[] ranges, int cp)
+        {
+            for (int k = 0; k < ranges.Length; k += 2)
             {
-                if (cp < IgnorableRanges[k]) return false;
-                if (cp <= IgnorableRanges[k + 1]) return true;
+                if (cp < ranges[k]) return false;
+                if (cp <= ranges[k + 1]) return true;
             }
             return false;
         }

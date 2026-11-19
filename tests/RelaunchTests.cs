@@ -142,10 +142,28 @@ namespace RamOptimiser.Tests
                         SingleInstance.OwnerSidOf(ackHandle));
             }
 
-            // No handler (the copy is exiting): no answer, and a stale acknowledgement left set does not count.
+            // No handler yet (the copy is still starting): answered at once, and the request is kept for the first
+            // handler, so the launch exits instead of waiting for a lock a live copy holds.
+            string startingId = Unique();
+            using (var activated = new ManualResetEvent(false))
+            using (var first = new SingleInstance(startingId))
+            {
+                using (var second = new SingleInstance(startingId))
+                {
+                    var watch = Stopwatch.StartNew();
+                    ActivationAnswer a = second.SignalAndWaitForAck(TimeSpan.FromSeconds(2));
+                    Check("ack: a copy that is still starting answers", a == ActivationAnswer.Acknowledged && watch.ElapsedMilliseconds < 2000,
+                        a + " after " + watch.ElapsedMilliseconds + " ms");
+                }
+                first.ActivationRequested += (s, e) => activated.Set();
+                Check("ack: the kept request reaches the first handler", activated.WaitOne(5000));
+            }
+
+            // The handler removed again (the copy is exiting): no answer, and a stale acknowledgement left set does not count.
             string quietId = Unique();
             using (var first = new SingleInstance(quietId))
             {
+                Exiting(first);
                 using (SafeWaitHandle stale = GuiNative.OpenEvent(GuiNative.EVENT_MODIFY_STATE, false, SingleInstance.AckName(quietId)))
                     Check("ack: stale answer set for the test", !stale.IsInvalid && GuiNative.SetEvent(stale));
                 using (var second = new SingleInstance(quietId))
@@ -156,6 +174,61 @@ namespace RamOptimiser.Tests
                         a + " after " + watch.ElapsedMilliseconds + " ms");
                 }
                 Check("ack: the first instance does not ask itself", first.SignalAndWaitForAck(TimeSpan.FromMilliseconds(50)) == ActivationAnswer.Unconfirmed);
+            }
+
+            // Launches asking at the same moment: each gets the answer, even when their signals merge into one wake
+            // of the waiter. The first request's handler holds the waiter until both later launches have signalled.
+            string busyId = Unique();
+            using (var gate = new ManualResetEvent(false))
+            using (var first = new SingleInstance(busyId))
+            {
+                int calls = 0;
+                first.ActivationRequested += (s, e) => { if (Interlocked.Increment(ref calls) == 1) gate.WaitOne(5000); };
+                using (var opener = new SingleInstance(busyId))
+                    Check("ack together: the first request is answered", opener.SignalAndWaitForAck(TimeSpan.FromSeconds(3)) == ActivationAnswer.Acknowledged);
+                var answers = new ActivationAnswer[2];
+                var askers = new Thread[2];
+                for (int n = 0; n < askers.Length; n++)
+                {
+                    int slot = n;
+                    askers[n] = new Thread(() =>
+                    {
+                        using (var asker = new SingleInstance(busyId))
+                            answers[slot] = asker.SignalAndWaitForAck(TimeSpan.FromSeconds(3));
+                    }) { IsBackground = true };
+                    askers[n].Start();
+                }
+                Thread.Sleep(400);
+                gate.Set();
+                foreach (Thread t in askers) t.Join(10000);
+                Check("ack together: every launch is answered", answers[0] == ActivationAnswer.Acknowledged && answers[1] == ActivationAnswer.Acknowledged,
+                    answers[0] + " / " + answers[1]);
+            }
+
+            // An older running copy (lock and activation event, no acknowledgement event): it never answers, so the
+            // launch does not wait for it. The request is still sent, and the answer is Unconfirmed: exit as before.
+            string oldId = Unique();
+            string own = "O:" + sid + "D:(A;;GA;;;" + sid + ")";
+            using (SafeWaitHandle oldMutex = CreateMutexWithSddl(SingleInstance.MutexName(oldId), own))
+            using (SafeWaitHandle oldEvent = GuiPlumbingTests.CreateEventWithSddl(SingleInstance.EventName(oldId), own))
+            using (EventWaitHandle oldWait = EventWaitHandle.OpenExisting(SingleInstance.EventName(oldId)))
+            {
+                using (var second = new SingleInstance(oldId))
+                {
+                    var watch = Stopwatch.StartNew();
+                    ActivationAnswer a = second.SignalAndWaitForAck(TimeSpan.FromSeconds(2));
+                    Check("old copy: the lock is held", !oldMutex.IsInvalid && !oldEvent.IsInvalid && !second.IsFirstInstance);
+                    Check("old copy: not waited on", a == ActivationAnswer.Unconfirmed && watch.ElapsedMilliseconds < 1500,
+                        a + " after " + watch.ElapsedMilliseconds + " ms");
+                }
+                Check("old copy: the request is still sent", oldWait.WaitOne(0));
+                Check("old copy: no acknowledgement event is left behind", !EventExists(SingleInstance.AckName(oldId)));
+                SingleInstance taken;
+                int created = 0;
+                SecondLaunchOutcome o = SecondLaunch.Run(new SingleInstance(oldId), () => { created++; return new SingleInstance(oldId); },
+                    TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(50), out taken);
+                Check("old copy: the launch exits at once", o == SecondLaunchOutcome.Unconfirmed && taken == null && created == 0,
+                    o + ", " + created + " creates");
             }
 
             // The acknowledgement name squatted (no SYNCHRONIZE): the lock still works, activation still goes through,
@@ -187,13 +260,39 @@ namespace RamOptimiser.Tests
             }
         }
 
+        /// <summary>A named mutex with the given security descriptor, as an older copy of the app made its lock.</summary>
+        static SafeWaitHandle CreateMutexWithSddl(string name, string sddl)
+        {
+            IntPtr sd;
+            if (!GuiNative.ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, GuiNative.SDDL_REVISION_1, out sd, IntPtr.Zero))
+                throw new System.ComponentModel.Win32Exception();
+            try
+            {
+                var sa = new GuiNative.SECURITY_ATTRIBUTES
+                {
+                    nLength = System.Runtime.InteropServices.Marshal.SizeOf(typeof(GuiNative.SECURITY_ATTRIBUTES)),
+                    lpSecurityDescriptor = sd,
+                    bInheritHandle = false
+                };
+                return GuiNative.CreateMutex(ref sa, false, name);
+            }
+            finally { GuiNative.LocalFree(sd); }
+        }
+
+        static bool EventExists(string name)
+        {
+            using (SafeWaitHandle h = GuiNative.OpenEvent(SecurityNative.READ_CONTROL, false, name))
+                return !h.IsInvalid;
+        }
+
         // ---------------------------------------------------------------- Run: the decision with real objects
 
         static void RunTests()
         {
-            // The holder has no handler and lets go after 400 ms, as an exiting copy does after its restore.
+            // The holder's handler is gone and it lets go after 400 ms, as an exiting copy does after its restore.
             string id = Unique();
             var holder = new SingleInstance(id);
+            Exiting(holder);
             var second = new SingleInstance(id);
             var t = new Thread(() => { Thread.Sleep(400); holder.Dispose(); }) { IsBackground = true };
             int created = 0;
@@ -230,6 +329,7 @@ namespace RamOptimiser.Tests
             string heldId = Unique();
             using (var keeper = new SingleInstance(heldId))
             {
+                Exiting(keeper);
                 watch = Stopwatch.StartNew();
                 o = SecondLaunch.Run(new SingleInstance(heldId), () => new SingleInstance(heldId),
                     TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(50), out taken);
@@ -239,6 +339,14 @@ namespace RamOptimiser.Tests
             }
             using (var after = new SingleInstance(heldId))
                 Check("run: no retry instance is left holding the name", after.IsFirstInstance);
+        }
+
+        /// <summary>As AppShell.Exit leaves the instance: its handler added at start-up and removed again.</summary>
+        static void Exiting(SingleInstance instance)
+        {
+            EventHandler h = (s, e) => { };
+            instance.ActivationRequested += h;
+            instance.ActivationRequested -= h;
         }
 
         // ---------------------------------------------------------------- AppMain and the waiter, checked in source
@@ -264,14 +372,11 @@ namespace RamOptimiser.Tests
                 body.Contains("outcome == SecondLaunchOutcome.StillHeld") && body.Contains("ErrorLog.TryWrite(ErrorLog.DefaultPath, SecondLaunch.StillHeldLine"), body);
             Check("wiring: a failure while waiting exits as before", body.Contains("catch (Exception ex)") && body.IndexOf("return 0;", StringComparison.Ordinal) > run, body);
             Check("wiring: no relaunch anywhere on this path", !main.Contains("Process.Start") && !body.Contains("Elevation."), body);
-
-            string inst = Source("Gui", "SingleInstance.cs");
-            int loop = inst.IndexOf("void WaitLoop()", StringComparison.Ordinal);
-            int loopEnd = loop < 0 ? -1 : inst.IndexOf("\n        }", loop, StringComparison.Ordinal);
-            string waitLoop = loopEnd < 0 ? "" : inst.Substring(loop, loopEnd - loop);
-            int none = waitLoop.IndexOf("if (handler == null)", StringComparison.Ordinal);
-            int ack = waitLoop.IndexOf("GuiNative.SetEvent(", StringComparison.Ordinal);
-            Check("wiring: the waiter acknowledges only after it has found a handler", none >= 0 && ack > none, waitLoop);
+            // The shell gets the lock this launch took, not the asking instance Run has already disposed.
+            int became = body.IndexOf("if (outcome != SecondLaunchOutcome.BecameFirst)", StringComparison.Ordinal);
+            int handed = body.IndexOf("instance = taken;", StringComparison.Ordinal);
+            Check("wiring: BecameFirst hands the taken lock to the shell", became >= 0 && handed > became
+                && body.IndexOf("instance = taken;", handed + 1, StringComparison.Ordinal) < 0, body);
         }
     }
 }

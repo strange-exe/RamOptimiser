@@ -47,12 +47,13 @@ namespace RamOptimiser.Tests
         /// <summary>
         /// .NET Framework 4.8's category table predates format characters added since (the Egyptian hieroglyph format
         /// controls U+13430-1343F, the Arabic pound and piastre marks above U+0890-0891, U+08E2, the Kaithi number sign
-        /// U+110CD), so it reads them as unassigned (Cn), not Cf. The identity line marks every code point it reads as
-        /// unassigned; labels (Visible) are unchanged. U+E1000 is unassigned too, just past the variation selectors.
+        /// U+110CD), so it reads them as unassigned (Cn), not Cf. The identity line marks exactly those (the Cf code
+        /// points of Unicode 18.0 the runtime does not know); labels (Visible) are unchanged. Letters and symbols
+        /// assigned since Unicode 8.0 read as unassigned too, and stay as they are.
         /// </summary>
         static void Unassigned()
         {
-            int[] unassigned = { 0x13430, 0x13438, 0x13439, 0x1343F, 0x0890, 0x0891, 0x08E2, 0x110CD, 0xE1000 };
+            int[] unassigned = { 0x13430, 0x13438, 0x13439, 0x1343F, 0x0890, 0x0891, 0x08E2, 0x110CD };
             foreach (int cp in unassigned)
             {
                 string s = char.ConvertFromUtf32(cp);
@@ -62,9 +63,27 @@ namespace RamOptimiser.Tests
                 string m = SafeText.Marked(@"C:\Prog" + s + @"ram Files\x.exe", "?");
                 Check("unassigned U+" + hex + " (" + cat + "): marked once in the identity line", m == @"C:\Prog?ram Files\x.exe", m);
             }
-            // Visible stays as it is: E1000 is not Default_Ignorable and not hidden by category, so a label keeps it.
-            string e1000 = char.ConvertFromUtf32(0xE1000);
-            Check("unassigned U+E1000: labels are unchanged", SafeText.Visible("a" + e1000 + "b") == "a" + e1000 + "b");
+            // Letters and symbols assigned after Unicode 8.0, which this runtime reads as unassigned: CJK (U+9FD6, 9FEB,
+            // 9FEF, 9FFC, 2CEB0, 30000), Georgian Mtavruli, Cyrillic Extended-C, Syriac and Malayalam additions, Latin
+            // (U+A7B8), Adlam, Osage, the Reiwa sign, two emoji and the Egyptian mark just past the format controls
+            // (U+13440). A user or folder name with one of them is a real path: never marked. Nor is U+E1000, unassigned
+            // even now, just past the variation selectors: it draws as a box, not as nothing.
+            int[] later = { 0x9FD6, 0x9FEB, 0x9FEF, 0x9FFC, 0x2CEB0, 0x30000, 0x1C90, 0x1C80, 0x0860, 0x0D00, 0xA7B8, 0x1E900,
+                0x104B0, 0x32FF, 0x1F923, 0x1F970, 0x13440, 0xE1000 };
+            int readAsUnassigned = 0;
+            foreach (int cp in later)
+            {
+                string s = char.ConvertFromUtf32(cp);
+                string hex = cp.ToString("X4", CultureInfo.InvariantCulture);
+                int width;
+                UnicodeCategory cat = SafeText.CategoryAt(s, 0, out width);
+                if (cat == UnicodeCategory.OtherNotAssigned) readAsUnassigned++;
+                string text = @"C:\Users\" + s + @"\app.exe";
+                Check("later U+" + hex + " (" + cat + "): not marked in the identity line", SafeText.Marked(text, "?") == text, SafeText.Marked(text, "?"));
+                Check("later U+" + hex + ": kept in labels", SafeText.Visible("a" + s + "b") == "a" + s + "b", SafeText.Visible("a" + s + "b"));
+            }
+            Check("later code points: this runtime reads most as unassigned (the case under test)", readAsUnassigned >= later.Length / 2,
+                readAsUnassigned + " of " + later.Length);
 
             // Assigned characters beside them stay: an Egyptian hieroglyph (U+13000), an Arabic letter (U+08A0), a Kaithi
             // letter (U+1108D) and a plain accented letter.

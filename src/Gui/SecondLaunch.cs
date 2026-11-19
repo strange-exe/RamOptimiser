@@ -9,9 +9,12 @@ namespace RamOptimiser.Gui
     {
         /// <summary>A handler took the request: the running copy is showing its window.</summary>
         Acknowledged,
-        /// <summary>No answer within the wait: the running copy has no handler (it is exiting) or is an older copy.</summary>
+        /// <summary>No answer within the wait: the running copy's handler was removed again (it is exiting).</summary>
         NoAnswer,
-        /// <summary>The request could not be confirmed either way (no acknowledgement event, or the signal failed).</summary>
+        /// <summary>
+        /// The request could not be confirmed either way: no usable acknowledgement event, the running copy has none
+        /// (an older copy), or the signal failed.
+        /// </summary>
         Unconfirmed
     }
 
@@ -30,7 +33,8 @@ namespace RamOptimiser.Gui
 
     /// <summary>
     /// A launch that finds the single-instance lock held. It asks the running copy to show itself and waits (about
-    /// 3 s) for the acknowledgement, which a copy sends only when an activation handler took the request. A copy
+    /// 3 s) for the acknowledgement, which a copy sends when the request will be raised (also while it is still
+    /// starting, before its handler is added: the request is kept for it). A copy
     /// that is exiting (its handler removed while it restores the services Power Clean stopped) does not answer, so
     /// this launch waits (about 60 s) for that copy to release the lock, retrying, and then starts as the first
     /// instance. Nothing here starts a process: the exiting copy may be elevated, and a medium-integrity launch can

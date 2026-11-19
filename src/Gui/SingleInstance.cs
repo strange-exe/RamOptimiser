@@ -11,9 +11,10 @@ namespace RamOptimiser.Gui
     /// <summary>
     /// One instance per user per session. The first instance owns a named mutex and waits on a named event;
     /// a later instance signals that event (SignalFirstInstance) and exits, and the first raises
-    /// ActivationRequested on a background thread (marshal to the UI thread before touching windows). When a
-    /// handler takes the request, the first instance also sets a second named event, the acknowledgement
-    /// (SignalAndWaitForAck); a copy that is exiting has no handler and sends none (SecondLaunch).
+    /// ActivationRequested on a background thread (marshal to the UI thread before touching windows). When the
+    /// request will be raised (a handler takes it now, or none has been added yet and the first one gets it), the
+    /// first instance also sets a second named event, the acknowledgement (SignalAndWaitForAck). A copy whose
+    /// handlers were removed again is exiting and sends none (SecondLaunch).
     ///
     /// Both kernel objects get an explicit security descriptor: the current user as owner, full access for
     /// that user only, and a Medium integrity label. Without the label, objects created by the elevated
@@ -40,6 +41,7 @@ namespace RamOptimiser.Gui
         readonly object handlerGate = new object();
         EventHandler activationRequested;   // guarded by handlerGate
         bool pendingActivation;             // a signal arrived with no handler; guarded by handlerGate
+        bool subscribed;                    // a handler has been added at least once; guarded by handlerGate
 
         /// <summary>
         /// Raised on a background thread when another instance asks this one to show itself. A request that
@@ -53,6 +55,7 @@ namespace RamOptimiser.Gui
                 lock (handlerGate)
                 {
                     activationRequested += value;
+                    if (activationRequested != null) subscribed = true;
                     replay = pendingActivation && activationRequested != null;
                     if (replay) pendingActivation = false;
                 }
@@ -127,7 +130,17 @@ namespace RamOptimiser.Gui
                     isFirst = error != GuiNative.ERROR_ALREADY_EXISTS;
                 }
                 // Last, so the throws above have nothing more to close; optional, so it never throws itself.
-                ack = CreateAck(ref sa, sid, AckName(id));
+                bool ackCreated;
+                SafeWaitHandle answer = CreateAck(ref sa, sid, AckName(id), out ackCreated);
+                // The lock is held but this launch made the acknowledgement event: the holder has none, so it is an
+                // older copy that never answers (or one between its lock and its event, still starting). Asking it
+                // is Unconfirmed then, and the launch exits as it always did instead of waiting for the lock.
+                if (answer != null && ackCreated && !isFirst)
+                {
+                    answer.Dispose();
+                    answer = null;
+                }
+                ack = answer;
             }
             finally { GuiNative.LocalFree(sd); }
 
@@ -158,11 +171,14 @@ namespace RamOptimiser.Gui
         /// <summary>
         /// The acknowledgement event: made like the activation event (same descriptor, opened with the same rights,
         /// trusted only when owned by the user), but optional. A name that fails any of those checks gives null:
-        /// activation then works as before, only unacknowledged, and a later launch exits as it always did.
+        /// activation then works as before, only unacknowledged, and a later launch exits as it always did. It is a
+        /// manual-reset event, so one answer releases every launch waiting at that moment (their signals can merge
+        /// into one wake of the waiter). created is true when this call made the event.
         /// </summary>
-        static SafeWaitHandle CreateAck(ref GuiNative.SECURITY_ATTRIBUTES sa, string sid, string name)
+        static SafeWaitHandle CreateAck(ref GuiNative.SECURITY_ATTRIBUTES sa, string sid, string name, out bool created)
         {
-            SafeWaitHandle handle = GuiNative.CreateEvent(ref sa, false, false, name);
+            SafeWaitHandle handle = GuiNative.CreateEvent(ref sa, true, false, name);
+            created = !handle.IsInvalid && Marshal.GetLastWin32Error() != GuiNative.ERROR_ALREADY_EXISTS;
             if (handle.IsInvalid)
             {
                 handle.Dispose();
@@ -172,6 +188,7 @@ namespace RamOptimiser.Gui
             if (handle.IsInvalid || !IsTrustedOwner(OwnerSidOf(handle), sid))
             {
                 handle.Dispose();
+                created = false;
                 return null;
             }
             return handle;
@@ -229,9 +246,10 @@ namespace RamOptimiser.Gui
 
         /// <summary>
         /// Asks the first instance to show its window and waits up to timeout for its acknowledgement, which it sends
-        /// only when an ActivationRequested handler took the request. NoAnswer: no handler (the copy is exiting) or
-        /// an older copy that never acknowledges. Unconfirmed: this is the first instance, the signal failed, or the
-        /// acknowledgement event is unusable (the request is still sent then, as SignalFirstInstance does).
+        /// only when the request will be raised (a handler, or none added yet). NoAnswer: its handlers were removed
+        /// (the copy is exiting). Unconfirmed: this is the first instance, the signal failed, the acknowledgement
+        /// event is unusable, or the running copy has none (an older copy); the request is still sent then, as
+        /// SignalFirstInstance does.
         /// </summary>
         public ActivationAnswer SignalAndWaitForAck(TimeSpan timeout)
         {
@@ -261,14 +279,18 @@ namespace RamOptimiser.Gui
                     while (WaitHandle.WaitAny(handles) == 1)
                     {
                         EventHandler handler;
+                        bool taken;
                         lock (handlerGate)
                         {
                             handler = activationRequested;
-                            if (handler == null) { pendingActivation = true; continue; }
+                            if (handler == null) pendingActivation = true;
+                            // Taken when a handler gets it now, or none has been added yet (the copy is starting and
+                            // the first handler gets the kept request). Once the handlers are gone again the copy is
+                            // exiting: nothing is sent, and the launch that asked waits for the lock instead.
+                            taken = handler != null || !subscribed;
                         }
-                        // A handler takes the request: tell the launch that asked, so it can exit. Without one (the
-                        // copy is exiting) nothing is sent, and that launch waits for the lock instead.
-                        if (answer != null) GuiNative.SetEvent(answer.SafeWaitHandle);
+                        if (taken && answer != null) GuiNative.SetEvent(answer.SafeWaitHandle);
+                        if (handler == null) continue;
                         try { handler(this, EventArgs.Empty); }
                         catch (Exception ex) { Trace.WriteLine("ActivationRequested handler failed: " + ex); }
                     }
