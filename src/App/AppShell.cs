@@ -938,7 +938,7 @@ namespace RamOptimiser.App
                         Key = key, Name = a.Name, IsService = false, On = startupFlow.ShowsOn(key, a.Enabled),
                         Verdict = AppText.AppVerdict(a), RunsOnce = StartupApps.IsRunOnce(a.Source),
                         VerdictWords = AppText.AppVerdictWords(a),
-                        Label = a.Known != null ? a.Known.Label : a.Name, Detail = AppText.AppDetail(a),
+                        Label = AppText.StartupLabel(a), Detail = AppText.AppDetail(a),
                         Marker = AppText.LookCloser(a),
                         LockText = AppText.AppLock(a, elevated)
                     };

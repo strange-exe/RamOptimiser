@@ -124,7 +124,7 @@ namespace RamOptimiser
                     w.Name("name"); w.String(AreaName(a.Area));
                     w.Name("outcome"); w.String(OutcomeName(a.Outcome));
                     w.Name("ms"); w.Number(Ms(a.Duration));
-                    if (level < 1 && a.Message != null) { w.Name("message"); w.String(Cap(a.Message)); }
+                    if (level < 1 && a.Message != null) { w.Name("message"); w.String(CapLine(a.Message)); }
                     w.EndObject();
                 }
             w.EndArray();
@@ -141,7 +141,7 @@ namespace RamOptimiser
                     w.EndObject();
                 }
             w.EndArray();
-            if (error != null) { w.Name("error"); w.String(Cap(error)); }
+            if (error != null) { w.Name("error"); w.String(CapLine(error)); }
             if (level > 0) { w.Name("truncated"); w.Bool(true); }
             w.EndObject();
             return w.ToString();
@@ -221,6 +221,17 @@ namespace RamOptimiser
         {
             DateTime u = utc.Kind == DateTimeKind.Local ? utc.ToUniversalTime() : utc;
             return u.ToString("yyyy'-'MM'-'dd'T'HH':'mm':'ss'Z'", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
+        /// Free text (an area message, an exception's text) made one clean line, as the app's activity records are
+        /// (SafeText.Line: breaks become spaces, control and format characters go), then cut to MaxTextChars without
+        /// splitting a pair. Line cleans before it counts, so a dropped bidi mark never costs a character that would
+        /// have been kept.
+        /// </summary>
+        static string CapLine(string s)
+        {
+            return SafeText.Line(s, MaxTextChars);
         }
 
         /// <summary>Cuts to MaxTextChars without splitting a surrogate pair.</summary>

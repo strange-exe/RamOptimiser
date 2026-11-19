@@ -233,7 +233,8 @@ namespace RamOptimiser.Tests
                     && False(At(o, "services.0.failed")) && True(At(o, "services.1.failed")) && At(o, "truncated") as string == "(missing)", line);
             }
 
-            Check("log: one record is one line", HasNoBreaks(line) && (string)At(o, "areas.3.message") == "line one\r\nline two", line);
+            // Messages are cleaned to one line (SafeText.Line): each break becomes a space.
+            Check("log: one record is one line", HasNoBreaks(line) && (string)At(o, "areas.3.message") == "line one  line two", line);
             Check("log: the stop overload writes its value", (string)At(Parse(CleanLog.FormatClean(SampleReport(), "watch", "interval",
                 "timed-out", "00000001", When)), "stopped") == "timed-out");
             Check("log: a local time is written as UTC", (string)At(Parse(CleanLog.FormatClean(SampleReport(), "cli", "manual", "a",
@@ -244,7 +245,7 @@ namespace RamOptimiser.Tests
             forged.Results[0].Message = "x\"}\n{\"v\":1,\"type\":\"clean\"" + (char)0x2028;
             string forgedLine = CleanLog.FormatClean(forged, "gui", "manual", "b", When);
             Check("log: a message cannot forge a record", HasNoBreaks(forgedLine) && Parse(forgedLine) != null
-                && (string)At(Parse(forgedLine), "areas.0.message") == forged.Results[0].Message, forgedLine);
+                && (string)At(Parse(forgedLine), "areas.0.message") == "x\"} {\"v\":1,\"type\":\"clean\" ", forgedLine);
 
             CleanReport longMessage = SampleReport();
             longMessage.Results[0].Message = new string('m', 500);

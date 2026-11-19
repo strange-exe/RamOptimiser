@@ -132,33 +132,12 @@ namespace RamOptimiser.App
         /// <summary>
         /// One safe line: CR, LF, tab and the Unicode line and paragraph separators become spaces, other control and
         /// format characters (bidi overrides, zero-width marks) are dropped by category, lone surrogates are dropped,
-        /// and the text is cut at MaxLine without splitting a pair. Null gives "".
+        /// and the text is cut at MaxLine without splitting a pair. Null gives "". The rules are SafeText.Line's
+        /// (src/Core.cs), shared with the clean records CleanLog writes for ramopt.exe as well as the app.
         /// </summary>
         public static string Sanitise(string text)
         {
-            if (text == null) return "";
-            var sb = new StringBuilder(Math.Min(text.Length, MaxLine));
-            for (int i = 0; i < text.Length && sb.Length < MaxLine; i++)
-            {
-                char ch = text[i];
-                if (char.IsHighSurrogate(ch))
-                {
-                    if (i + 1 >= text.Length || !char.IsLowSurrogate(text[i + 1])) continue;
-                    UnicodeCategory pair = CharUnicodeInfo.GetUnicodeCategory(text, i);
-                    i++;
-                    if (pair == UnicodeCategory.Format || pair == UnicodeCategory.Control) continue;
-                    if (sb.Length + 2 > MaxLine) break;
-                    sb.Append(ch).Append(text[i]);
-                    continue;
-                }
-                if (char.IsLowSurrogate(ch)) continue;
-                UnicodeCategory cat = char.GetUnicodeCategory(ch);
-                if (ch == '\r' || ch == '\n' || ch == '\t' || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator)
-                    sb.Append(' ');
-                else if (cat != UnicodeCategory.Control && cat != UnicodeCategory.Format)
-                    sb.Append(ch);
-            }
-            return sb.ToString();
+            return SafeText.Line(text, MaxLine);
         }
 
         /// <summary>"14:32" today, "Yesterday 14:32", or the culture's short date and the time before that.</summary>

@@ -7,8 +7,9 @@ namespace RamOptimiser
 {
     /// <summary>
     /// A small forward-only JSON writer (RFC 8259) for the clean log and --json output. Pure: no I/O, no culture.
-    /// Strings escape the quote, the backslash and every control character, plus U+2028 and U+2029 (line breaks to
-    /// JavaScript and some log viewers), so a written value can never break a JSON Lines record. A lone surrogate
+    /// Strings escape the quote, the backslash, every control character (C0, DEL, C1), every BMP format character
+    /// (bidi, zero-width) and U+2028 and U+2029 (line breaks to JavaScript and some log viewers), so a written value
+    /// can never break a JSON Lines record or act on a terminal (Hidden). A lone surrogate
     /// becomes U+FFFD, which keeps the output valid UTF-8. Numbers use the invariant culture. The writer does not
     /// check that names and values alternate correctly; its callers are this program's own fixed shapes.
     /// </summary>
@@ -81,7 +82,7 @@ namespace RamOptimiser
                 if (c == '\n') { sb.Append(Backslash).Append('n'); continue; }
                 if (c == '\r') { sb.Append(Backslash).Append('r'); continue; }
                 if (c == '\t') { sb.Append(Backslash).Append('t'); continue; }
-                if (c < 0x20 || c == 0x2028 || c == 0x2029) { AppendEscape(sb, c); continue; }
+                if (Hidden(c)) { AppendEscape(sb, c); continue; }
                 if (char.IsHighSurrogate(c))
                 {
                     if (i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) { sb.Append(c).Append(s[i + 1]); i++; }
@@ -92,6 +93,22 @@ namespace RamOptimiser
                 sb.Append(c);
             }
             sb.Append('"');
+        }
+
+        /// <summary>
+        /// A code unit written as a \u escape although RFC 8259 allows most of these raw: every control character (C0,
+        /// DEL and the C1 controls, among them NEL, which some log viewers break lines at, and the 8-bit CSI and OSC a
+        /// terminal may act on), every BMP format character (bidi overrides and isolates, zero-width marks, the BOM)
+        /// and U+2028/U+2029. Values such as process names come from other users, so whatever the console code page or
+        /// viewer, nothing written can move the cursor, reorder the text or start a line. A surrogate is never Hidden:
+        /// a valid pair is written as it is. CharUnicodeInfo, not char.GetUnicodeCategory: on .NET Framework the latter
+        /// reads the soft hyphen U+00AD as DashPunctuation, though Unicode makes it a format character.
+        /// </summary>
+        static bool Hidden(char c)
+        {
+            UnicodeCategory cat = CharUnicodeInfo.GetUnicodeCategory(c);
+            return cat == UnicodeCategory.Control || cat == UnicodeCategory.Format
+                || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator;
         }
 
         static void AppendEscape(StringBuilder sb, int codeUnit)
