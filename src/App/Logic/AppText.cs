@@ -1736,7 +1736,7 @@ namespace RamOptimiser.App
 
     // ---------------------------------------------------------------------- problem notices (R6)
 
-    public enum NoticeKind { CleanFailed, NotHelping }
+    public enum NoticeKind { CleanFailed, NotHelping, UpdateAvailable }
 
     /// <summary>A Windows notification the tray icon shows: plain text with counts and times only, no names or paths.</summary>
     public sealed class Notice
@@ -1791,6 +1791,21 @@ namespace RamOptimiser.App
             };
         }
 
+        public const string UpdateTitle = "Update available";
+
+        /// <summary>
+        /// A newer release (owner decision 2026-11-19), shown with the info icon at most once per version per run
+        /// (UpdateNoticeGate); clicking it opens the download page. Both versions are formatted by the app.
+        /// </summary>
+        public static Notice ForUpdate(string latest, string current)
+        {
+            return new Notice
+            {
+                Kind = NoticeKind.UpdateAvailable, Title = UpdateTitle,
+                Text = AppText.AppName + " " + latest + " is available. You have " + current + ". Click to open the download page."
+            };
+        }
+
         /// <summary>The Recent activity line and cleans.log event for a notice that was shown.</summary>
         public static ActivityEvent ShownEvent(Notice n)
         {
@@ -1800,6 +1815,18 @@ namespace RamOptimiser.App
         static string AreaCount(int n)
         {
             return n.ToString(CultureInfo.InvariantCulture) + (n == 1 ? " area" : " areas");
+        }
+    }
+
+    /// <summary>
+    /// What a click on the tray's balloon does: the update notice opens the download page, every other notice the
+    /// Memory tab. A click belongs to the balloon shown last, so the shell remembers that one's kind. Pure.
+    /// </summary>
+    public static class NoticeClick
+    {
+        public static bool OpensDownloadPage(NoticeKind? lastShown)
+        {
+            return lastShown == NoticeKind.UpdateAvailable;
         }
     }
 
@@ -1862,6 +1889,56 @@ namespace RamOptimiser.App
         public static ActivityEvent ResetEvent()
         {
             return new ActivityEvent { Kind = "settings-reset", Text = "Settings were reset to their defaults." };
+        }
+
+        // ------------------------------------------------------------------ update check (owner decision 2026-11-19)
+
+        public const string UpdateRowTitle = "Check for updates";
+        public const string UpdateRowNote = "Once a day, asks GitHub for the latest version number. Nothing is downloaded or installed.";
+        public const string UpdateOpenLabel = "Open download page";
+        public const string UpdateCopyLabel = "Copy link";
+        public const string UpdateOpenFailed = "The download page could not be opened. Copy the link and open it in your browser.";
+        public const string UpdateLinkCopied = "Link copied.";
+        public const string UpdateCopyFailed = "The link could not be copied. Select it and press Ctrl+C.";
+
+        /// <summary>
+        /// The line under the switch: this version before the first answer and while the check is off, then what the
+        /// last check found. Only versions the app formatted and its own reasons appear; nothing from the answer.
+        /// </summary>
+        public static string UpdateStatusLine(bool enabled, string current, UpdateResult r)
+        {
+            if (!enabled || r == null) return "Version " + current + ".";
+            switch (r.Outcome)
+            {
+                case UpdateOutcome.UpToDate: return "Version " + current + ". Up to date.";
+                case UpdateOutcome.UpdateAvailable: return "Version " + r.Latest.Format() + " is available.";
+                default: return "Couldn't check: " + UpdateFailureReason(r) + ".";
+            }
+        }
+
+        /// <summary>A few words for why a check failed.</summary>
+        public static string UpdateFailureReason(UpdateResult r)
+        {
+            switch (r == null ? UpdateFailure.Network : r.Failure)
+            {
+                case UpdateFailure.NoVersion: return "this build has no version number";
+                case UpdateFailure.TimedOut: return "GitHub did not answer in time";
+                case UpdateFailure.HttpStatus: return "GitHub answered " + r.StatusCode.ToString(CultureInfo.InvariantCulture);
+                case UpdateFailure.TooLarge: return "the answer was too large";
+                case UpdateFailure.BadResponse: return "the answer was not understood";
+                case UpdateFailure.NotFinal: return "the latest release is not final";
+                default: return "no connection to GitHub";
+            }
+        }
+
+        /// <summary>The Recent activity line and cleans.log event for a check's outcome (the shell logs each kind once a run).</summary>
+        public static ActivityEvent UpdateEvent(UpdateResult r)
+        {
+            if (r != null && r.Outcome == UpdateOutcome.UpdateAvailable)
+                return new ActivityEvent { Kind = "update-available", Text = "Version " + r.Latest.Format() + " is available." };
+            if (r != null && r.Outcome == UpdateOutcome.UpToDate)
+                return new ActivityEvent { Kind = "update-checked", Text = "Checked for updates: up to date." };
+            return new ActivityEvent { Kind = "update-failed", Text = "Couldn't check for updates: " + UpdateFailureReason(r) + "." };
         }
     }
 }

@@ -718,6 +718,40 @@
                             AutomationProperties.HelpText="A Windows notification when an automatic clean fails or stops helping. Never for routine cleans."/>
                 </Grid>
               </Border>
+              <!-- Update check (owner decision 2026-11-19), on by default: once a day, the latest version number from GitHub.
+                   The status line under it is read out politely; Open download page shows when there is a newer version,
+                   and the link with Copy link only after the page could not be opened. -->
+              <Border Style="{StaticResource RowDivider}" Padding="16,10">
+                <StackPanel>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                      <TextBlock Text="Check for updates" TextWrapping="Wrap"/>
+                      <TextBlock Style="{StaticResource Small}"
+                                 Text="Once a day, asks GitHub for the latest version number. Nothing is downloaded or installed."/>
+                    </StackPanel>
+                    <CheckBox x:Name="UpdatesCheck" Grid.Column="1" Style="{StaticResource SwitchStyle}" Margin="12,0,0,0"
+                              VerticalAlignment="Center" AutomationProperties.Name="Check for updates"
+                              AutomationProperties.HelpText="Once a day, asks GitHub for the latest version number. Nothing is downloaded or installed."/>
+                  </Grid>
+                  <app:LiveRegion x:Name="UpdateStatusRegion" Margin="0,6,0,0" AutomationProperties.LiveSetting="Polite"
+                                  AutomationProperties.Name="Updates">
+                    <TextBlock x:Name="UpdateStatus" Style="{StaticResource Small}" Foreground="{DynamicResource Text}"/>
+                  </app:LiveRegion>
+                  <WrapPanel Margin="0,2,0,0">
+                    <Button x:Name="UpdateOpen" Style="{StaticResource LinkButton}" Content="Open download page" Margin="0,0,16,0"
+                            Visibility="Collapsed" AutomationProperties.Name="Open download page"/>
+                    <Button x:Name="UpdateCopy" Style="{StaticResource LinkButton}" Content="Copy link"
+                            Visibility="Collapsed" AutomationProperties.Name="Copy link"/>
+                  </WrapPanel>
+                  <TextBox x:Name="UpdateLink" IsReadOnly="True" IsReadOnlyCaretVisible="True" Margin="-3,2,0,0" Padding="0,4"
+                           Height="Auto" TextWrapping="Wrap" FontSize="12" Background="Transparent" BorderBrush="Transparent"
+                           Visibility="Collapsed" AutomationProperties.Name="Download page link"/>
+                </StackPanel>
+              </Border>
               <!-- R7: the global Clean memory shortcut, none by default. The box records a combination: Delete removes it,
                    Esc leaves it as it was, Tab moves on. Errors and the AltGr warning show under the row, read out politely. -->
               <Border Style="{StaticResource RowDivider}" Padding="16,10">

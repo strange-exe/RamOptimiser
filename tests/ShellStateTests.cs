@@ -226,7 +226,7 @@ namespace RamOptimiser.Tests
                 && !text.Contains("NotAService") && merged.PowerServices.Count == 0, text);
 
             Dictionary<string, string> map = SettingsMerge.ToMap(new AppSettings { ThresholdPercent = 77 });
-            Check("merge map: every serialized key", map.Count == 13 && map["thresholdpercent"] == "77" && map.ContainsKey("PowerServices"),
+            Check("merge map: every serialized key", map.Count == 14 && map["thresholdpercent"] == "77" && map.ContainsKey("PowerServices"),
                 map.Count.ToString());
             Check("merge: inputs are not changed", mine.ThresholdPercent == 90 && baseline.ThresholdPercent == AppSettings.DefaultThresholdPercent);
         }

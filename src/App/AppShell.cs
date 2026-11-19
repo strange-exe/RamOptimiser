@@ -194,6 +194,25 @@ namespace RamOptimiser.App
         readonly Dictionary<NoticeKind, DateTime> noticeShownUtc = new Dictionary<NoticeKind, DateTime>();
         /// <summary>The back-off streak the notices last compared with (null before the first status).</summary>
         int? noticeStreak;
+        /// <summary>The kind of the balloon shown last: a click belongs to it (NoticeClick).</summary>
+        NoticeKind? lastNoticeKind;
+
+        // Update check (owner decision 2026-11-19): the latest version number from GitHub, once a day (UpdateSchedule).
+        static readonly TimeSpan UpdateTick = TimeSpan.FromSeconds(30);
+        CheckBox updatesCheck;
+        LiveRegion updateStatusRegion;
+        TextBlock updateStatus;
+        Button updateOpen, updateCopy;
+        TextBox updateLink;
+        DispatcherTimer updateTimer;
+        UpdateSchedule updateSchedule;
+        /// <summary>The last check's result (null before the first), the version last shown in a balloon, and the
+        /// outcome kinds already in Recent activity this run.</summary>
+        UpdateResult updateResult;
+        string updateNotified;
+        readonly HashSet<UpdateOutcome> updateLogged = new HashSet<UpdateOutcome>();
+        /// <summary>The page could not be opened: the row shows the link and Copy link.</summary>
+        bool updateOpenFailed;
 
         // R7: the global Clean memory shortcut. The listener exists only when elevated; the binding always.
         TextBox hotkeyBox;
@@ -288,7 +307,7 @@ namespace RamOptimiser.App
             tray.ResumeRequested += delegate { ResumeAutoClean(); };
             tray.RestartRequested += delegate { RestartElevated(); };
             tray.ExitRequested += delegate { Exit(); };
-            tray.NoticeClicked += delegate { ShowMemoryTab(); };
+            tray.NoticeClicked += delegate { OnNoticeClicked(); };
             CreateFlyout();
             UpdateTray();
 
@@ -338,6 +357,11 @@ namespace RamOptimiser.App
             app.SessionEnding += delegate { Exit(); };
 
             service.Start(SampleInterval);
+            // The update check's clock starts now; the first check is due in 2 minutes (UpdateSchedule).
+            updateSchedule = new UpdateSchedule(DateTime.UtcNow);
+            updateTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = UpdateTick };
+            updateTimer.Tick += delegate { MaybeCheckForUpdates(); };
+            updateTimer.Start();
             if (!options.StartInTray) ShowWindow();
             RefreshStartupState();
             if (settings.PowerClean) RefreshServices();
@@ -619,6 +643,13 @@ namespace RamOptimiser.App
             closeToTrayCheck = F<CheckBox>("CloseToTrayCheck");
             trayPercentCheck = F<CheckBox>("TrayPercentCheck");
             notifyCheck = F<CheckBox>("NotifyCheck");
+            updatesCheck = F<CheckBox>("UpdatesCheck");
+            updateStatusRegion = F<LiveRegion>("UpdateStatusRegion");
+            updateStatus = F<TextBlock>("UpdateStatus");
+            updateOpen = F<Button>("UpdateOpen");
+            updateCopy = F<Button>("UpdateCopy");
+            updateLink = F<TextBox>("UpdateLink");
+            updateLink.Text = UpdateCheck.DownloadPage;
             hotkeyBox = F<TextBox>("HotkeyBox");
             hotkeyRemove = F<Button>("HotkeyRemove");
             hotkeyNote = F<TextBlock>("HotkeyNote");
@@ -780,6 +811,9 @@ namespace RamOptimiser.App
             OnToggle(closeToTrayCheck, on => { settings.CloseToTray = on; SaveAndApply(); });
             OnToggle(trayPercentCheck, on => { settings.ShowTrayPercent = on; SaveAndApply(); });
             OnToggle(notifyCheck, on => { settings.NotifyProblems = on; SaveAndApply(); });
+            OnToggle(updatesCheck, on => { settings.CheckForUpdates = on; SaveAndApply(); });
+            updateOpen.Click += delegate { OpenDownloadPage(); };
+            updateCopy.Click += delegate { CopyDownloadLink(); };
             hotkeyBox.PreviewKeyDown += OnHotkeyBoxKey;
             // Windows takes a registered combination before the box sees it, so the shortcut is let go while the box
             // has focus: pressing it there records it rather than cleaning.
@@ -1893,7 +1927,118 @@ namespace RamOptimiser.App
             if (!NoticeGate.Allow(noticeShownUtc.TryGetValue(n.Kind, out last) ? last : (DateTime?)null, now)) return;
             if (!tray.ShowNotice(n.Title, n.Text)) return;
             noticeShownUtc[n.Kind] = now;
+            lastNoticeKind = n.Kind;
             AddActivity(Notices.ShownEvent(n));
+        }
+
+        /// <summary>A balloon was clicked: the update notice opens the download page, any other the Memory tab.</summary>
+        void OnNoticeClicked()
+        {
+            if (NoticeClick.OpensDownloadPage(lastNoticeKind)) OpenDownloadPage();
+            else ShowMemoryTab();
+        }
+
+        // ------------------------------------------------------------------ update check (owner decision 2026-11-19)
+
+        /// <summary>
+        /// On the update timer: starts a check when UpdateSchedule says one is due (setting on, not exiting, none in
+        /// flight). The request runs on the thread pool; its result comes back here through Post, dropped once exiting.
+        /// </summary>
+        void MaybeCheckForUpdates()
+        {
+            if (exiting || updateSchedule == null) return;
+            if (!updateSchedule.TryStart(settings.CheckForUpdates, exiting, DateTime.UtcNow)) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                UpdateResult r;
+                try { r = UpdateCheck.Check(BuildInfo.Version); }
+                catch (Exception) { r = UpdateResult.Failed(UpdateFailure.Network, 0); }
+                Post(() => OnUpdateChecked(r));
+            });
+        }
+
+        /// <summary>A check's answer: the row, one Recent activity line per kind of outcome a run, one balloon per version.</summary>
+        void OnUpdateChecked(UpdateResult r)
+        {
+            updateSchedule.Finished(r.Outcome == UpdateOutcome.Failed, DateTime.UtcNow);
+            updateResult = r;
+            if (updateLogged.Add(r.Outcome)) AddActivity(AppText.UpdateEvent(r));
+            ShowUpdateRow();
+            if (settings.CheckForUpdates && UpdateNoticeGate.ShouldNotify(r, updateNotified)) ShowUpdateNotice(r);
+        }
+
+        /// <summary>The update balloon, with the info icon; its click opens the download page (OnNoticeClicked).</summary>
+        void ShowUpdateNotice(UpdateResult r)
+        {
+            if (tray == null || exiting) return;
+            Notice n = Notices.ForUpdate(r.Latest.Format(), BuildInfo.Version);
+            if (!tray.ShowNotice(n.Title, n.Text, System.Windows.Forms.ToolTipIcon.Info)) return;
+            updateNotified = r.Latest.Format();
+            lastNoticeKind = NoticeKind.UpdateAvailable;
+            AddActivity(Notices.ShownEvent(n));
+        }
+
+        /// <summary>The Settings row's status line, Open download page while a newer version is known, and the link to
+        /// copy once opening the page failed. Read out only when the window shows and the line changed.</summary>
+        void ShowUpdateRow()
+        {
+            if (updateStatusRegion == null) return;
+            bool available = settings.CheckForUpdates && updateResult != null && updateResult.Outcome == UpdateOutcome.UpdateAvailable;
+            string line = updateOpenFailed ? AppText.UpdateOpenFailed : AppText.UpdateStatusLine(settings.CheckForUpdates, BuildInfo.Version, updateResult);
+            updateStatus.Text = line;
+            updateOpen.Visibility = available || updateOpenFailed ? Visibility.Visible : Visibility.Collapsed;
+            updateCopy.Visibility = updateOpenFailed ? Visibility.Visible : Visibility.Collapsed;
+            updateLink.Visibility = updateOpenFailed ? Visibility.Visible : Visibility.Collapsed;
+            Announce(updateStatusRegion, line, line, WindowShowing);
+        }
+
+        /// <summary>
+        /// Opens the fixed download page. Elevated, Explorer opens it as the signed-in user (ShellOpen), so the browser
+        /// never runs as administrator; if that fails the row shows the link to copy, and the app never starts the
+        /// browser itself. Not elevated, the shell opens the page directly.
+        /// </summary>
+        void OpenDownloadPage()
+        {
+            if (exiting) return;
+            if (UpdateOpen.Route(elevated) == UpdateOpenRoute.ExplorerShell)
+            {
+                ShellOpen.OpenUnelevated(UpdateCheck.DownloadPage, ok => Post(() => { if (!ok) ShowUpdateLink(); }));
+                return;
+            }
+            try
+            {
+                using (System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(UpdateCheck.DownloadPage) { UseShellExecute = true })) { }
+            }
+            catch (Exception) { ShowUpdateLink(); }
+        }
+
+        /// <summary>The page did not open: the window, on Settings, with the update row's link and Copy link in view.</summary>
+        void ShowUpdateLink()
+        {
+            updateOpenFailed = true;
+            ShowUpdateRow();
+            ShowWindow();
+            if (exiting) return;
+            settingsTab.IsSelected = true;
+            dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+            {
+                if (exiting || !updateCopy.IsVisible) return;
+                updateLink.BringIntoView();
+                updateCopy.Focus();
+            }));
+        }
+
+        void CopyDownloadLink()
+        {
+            string line;
+            try
+            {
+                Clipboard.SetText(UpdateCheck.DownloadPage);
+                line = AppText.UpdateLinkCopied;
+            }
+            catch (Exception) { line = AppText.UpdateCopyFailed; } // the clipboard is busy with another app
+            updateStatus.Text = line;
+            Announce(updateStatusRegion, line, line, true);
         }
 
         void SetCleaning(bool on)
@@ -2614,6 +2759,7 @@ namespace RamOptimiser.App
                 settingsAutoSwitch.IsChecked = settings.AutoCleanEnabled;
                 settingsPowerSwitch.IsChecked = settings.PowerClean;
                 notifyCheck.IsChecked = settings.NotifyProblems;
+                updatesCheck.IsChecked = settings.CheckForUpdates;
                 SyncMica();
                 string note = AppText.PowerNote(settings.PowerClean, ChosenServiceCount());
                 powerNote.Text = note ?? "";
@@ -2650,6 +2796,7 @@ namespace RamOptimiser.App
             }
             finally { syncing = false; }
             UpdateStartupUi();
+            ShowUpdateRow();
         }
 
         /// <summary>The line under the areas list, shown while one area is locked on; null hides it.</summary>

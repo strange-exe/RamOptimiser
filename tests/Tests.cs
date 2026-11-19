@@ -180,6 +180,7 @@ namespace RamOptimiser.Tests
             var sortedNames = new List<string>(names);
             sortedNames.Sort(StringComparer.Ordinal);
             Check("discovery: finds the sample suite", suites.Contains(typeof(DiscoverySampleTests)), string.Join(", ", names.ToArray()));
+            Check("discovery: finds the update check suite", suites.Contains(typeof(UpdateCheckTests)), string.Join(", ", names.ToArray()));
             Check("discovery: leaves out the suites Main runs by hand", !suites.Contains(typeof(AppTests))
                 && !suites.Contains(typeof(GuiPlumbingTests)) && !suites.Contains(typeof(TestMain)));
             Check("discovery: runs suites in name order", string.Join(",", names.ToArray()) == string.Join(",", sortedNames.ToArray()));
