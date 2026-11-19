@@ -33,7 +33,7 @@ namespace RamOptimiser.App
             try { instance = new SingleInstance(); }
             catch (SingleInstanceNameTakenException ex)
             {
-                ErrorLog.TryWrite(ErrorLog.DefaultPath, "single-instance name held by another program; running without single-instance", ex);
+                ErrorLog.TryWrite(ErrorLog.DefaultPath, NameHeldLine, ex);
             }
             catch (Exception ex) { ErrorLog.TryWrite(ErrorLog.DefaultPath, "single-instance lock unavailable", ex); }
 
@@ -46,7 +46,7 @@ namespace RamOptimiser.App
                 try { instance = TakeOverFrom(options.HandoffFrom); }
                 catch (SingleInstanceNameTakenException ex)
                 {
-                    ErrorLog.TryWrite(ErrorLog.DefaultPath, "single-instance name held by another program; running without single-instance", ex);
+                    ErrorLog.TryWrite(ErrorLog.DefaultPath, NameHeldLine, ex);
                 }
                 catch (Exception ex) { ErrorLog.TryWrite(ErrorLog.DefaultPath, "single-instance lock unavailable", ex); }
             }
@@ -68,12 +68,21 @@ namespace RamOptimiser.App
                     ErrorLog.TryWrite(ErrorLog.DefaultPath, "waiting for the running copy to close failed; this launch exits", ex);
                     return 0;
                 }
-                if (outcome != SecondLaunchOutcome.BecameFirst)
+                if (outcome == SecondLaunchOutcome.NameTaken)
                 {
-                    if (outcome == SecondLaunchOutcome.StillHeld) ErrorLog.TryWrite(ErrorLog.DefaultPath, SecondLaunch.StillHeldLine, null);
-                    return 0;
+                    // Squatted while waiting: as at the first try, run without single-instance rather than exit.
+                    ErrorLog.TryWrite(ErrorLog.DefaultPath, NameHeldLine, null);
+                    instance = null;
                 }
-                instance = taken;
+                else
+                {
+                    if (outcome != SecondLaunchOutcome.BecameFirst)
+                    {
+                        if (outcome == SecondLaunchOutcome.StillHeld) ErrorLog.TryWrite(ErrorLog.DefaultPath, SecondLaunch.StillHeldLine, null);
+                        return 0;
+                    }
+                    instance = taken;
+                }
             }
 
             lockInstance = instance;
@@ -94,6 +103,8 @@ namespace RamOptimiser.App
             }
             return app.Run();
         }
+
+        const string NameHeldLine = "single-instance name held by another program; running without single-instance";
 
         static readonly TimeSpan HandoffWait = TimeSpan.FromSeconds(10);
 

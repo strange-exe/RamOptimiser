@@ -28,7 +28,12 @@ namespace RamOptimiser.Gui
         /// <summary>The running copy let the lock go within the bound: this launch starts as the first instance.</summary>
         BecameFirst,
         /// <summary>Still held after the bound: log one line and exit 0.</summary>
-        StillHeld
+        StillHeld,
+        /// <summary>
+        /// Another program took the lock's name while this launch waited: run without single-instance, as at the
+        /// first try, so a squatted name cannot stop the app.
+        /// </summary>
+        NameTaken
     }
 
     /// <summary>
@@ -54,7 +59,8 @@ namespace RamOptimiser.Gui
         /// The decision, pure. ask signals the running copy and waits for its answer; an exception there counts as
         /// Unconfirmed (today's behaviour, never a crash). Only NoAnswer leads to the wait: tryAcquire (true when
         /// this launch now holds the lock) is tried at once, then every retry, until elapsed has moved bound past
-        /// the moment the answer came; the last try is at the bound. tryAcquire's exceptions reach the caller.
+        /// the moment the answer came; the last try is at the bound. A SingleInstanceNameTakenException from
+        /// tryAcquire gives NameTaken; its other exceptions reach the caller.
         /// </summary>
         public static SecondLaunchOutcome Decide(Func<ActivationAnswer> ask, Func<bool> tryAcquire, Func<TimeSpan> elapsed,
             Action<TimeSpan> pause, TimeSpan bound, TimeSpan retry)
@@ -73,7 +79,10 @@ namespace RamOptimiser.Gui
             TimeSpan start = elapsed();
             while (true)
             {
-                if (tryAcquire()) return SecondLaunchOutcome.BecameFirst;
+                bool acquired;
+                try { acquired = tryAcquire(); }
+                catch (SingleInstanceNameTakenException) { return SecondLaunchOutcome.NameTaken; }
+                if (acquired) return SecondLaunchOutcome.BecameFirst;
                 TimeSpan left = bound - (elapsed() - start);
                 if (left <= TimeSpan.Zero) return SecondLaunchOutcome.StillHeld;
                 pause(left < retry ? left : retry);
@@ -83,7 +92,8 @@ namespace RamOptimiser.Gui
         /// <summary>
         /// Decide with real objects: asking (not first) is signalled and then disposed before the first retry (its
         /// own handle would keep the lock's name alive); each retry is create(), kept when first and disposed when
-        /// not. taken is the new first instance for BecameFirst, otherwise null. create's exceptions reach the caller.
+        /// not. taken is the new first instance for BecameFirst, otherwise null. create's exceptions other than
+        /// SingleInstanceNameTakenException (NameTaken) reach the caller.
         /// </summary>
         internal static SecondLaunchOutcome Run(SingleInstance asking, Func<SingleInstance> create, TimeSpan ackWait,
             TimeSpan releaseWait, TimeSpan retry, out SingleInstance taken)

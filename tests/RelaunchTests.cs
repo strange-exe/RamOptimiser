@@ -103,15 +103,30 @@ namespace RamOptimiser.Tests
             o = SecondLaunch.Decide(() => ActivationAnswer.NoAnswer, () => false, () => now, d => now += d, odd, Retry);
             Check("decide: the last pause lands on the bound", o == SecondLaunchOutcome.StillHeld && now == odd, now.ToString());
 
-            // The lock's own errors (a squatted name met while retrying) are the caller's to handle.
+            // A name squatted while retrying is not a reason to exit, as at the first try: run without single-instance.
             escaped = null;
+            o = SecondLaunchOutcome.StillHeld;
+            acquires = 0;
             try
             {
-                SecondLaunch.Decide(() => ActivationAnswer.NoAnswer, () => { throw new SingleInstanceNameTakenException(5, "taken"); },
+                o = SecondLaunch.Decide(() => ActivationAnswer.NoAnswer,
+                    () => { acquires++; if (acquires < 3) return false; throw new SingleInstanceNameTakenException(5, "taken"); },
                     () => now, d => now += d, Bound, Retry);
             }
             catch (Exception ex) { escaped = ex; }
-            Check("decide: an acquire error reaches the caller", escaped is SingleInstanceNameTakenException,
+            Check("decide: a name squatted while retrying runs without single-instance",
+                escaped == null && o == SecondLaunchOutcome.NameTaken && acquires == 3,
+                escaped == null ? o + ", " + acquires : escaped.GetType().Name);
+
+            // Any other acquire error is still the caller's to handle.
+            escaped = null;
+            try
+            {
+                SecondLaunch.Decide(() => ActivationAnswer.NoAnswer, () => { throw new UnauthorizedAccessException("lock"); },
+                    () => now, d => now += d, Bound, Retry);
+            }
+            catch (Exception ex) { escaped = ex; }
+            Check("decide: another acquire error reaches the caller", escaped is UnauthorizedAccessException,
                 escaped == null ? "none" : escaped.GetType().Name);
         }
 
@@ -424,6 +439,41 @@ namespace RamOptimiser.Tests
             }
             using (var after = new SingleInstance(heldId))
                 Check("run: no retry instance is left holding the name", after.IsFirstInstance);
+
+            // The exiting holder lets go and another program takes the lock's name with another kind of object before
+            // the retry: the launch runs without single-instance (NameTaken), nothing taken, nothing thrown.
+            string squatId = Unique();
+            var leaving = new SingleInstance(squatId);
+            Exiting(leaving);
+            EventWaitHandle squat = null;
+            var taker = new Thread(() =>
+            {
+                Thread.Sleep(300);
+                leaving.Dispose();
+                squat = new EventWaitHandle(false, EventResetMode.ManualReset, SingleInstance.MutexName(squatId));
+            }) { IsBackground = true };
+            Exception thrown = null;
+            o = SecondLaunchOutcome.StillHeld;
+            taken = null;
+            taker.Start();
+            try
+            {
+                o = SecondLaunch.Run(new SingleInstance(squatId), () => new SingleInstance(squatId),
+                    TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(500), out taken);
+            }
+            catch (Exception ex) { thrown = ex; }
+            taker.Join(2000);
+            try
+            {
+                Check("run: a name squatted while waiting runs without single-instance",
+                    thrown == null && o == SecondLaunchOutcome.NameTaken && taken == null,
+                    thrown == null ? o.ToString() : thrown.GetType().Name);
+            }
+            finally
+            {
+                if (taken != null) taken.Dispose();
+                if (squat != null) squat.Dispose();
+            }
         }
 
         /// <summary>As AppShell.Exit leaves the instance: its handler added at start-up and removed again.</summary>
@@ -453,6 +503,15 @@ namespace RamOptimiser.Tests
             Check("wiring: a launch that finds the lock held goes through SecondLaunch.Run", run >= 0, body);
             Check("wiring: only BecameFirst goes on to start up", body.Contains("if (outcome != SecondLaunchOutcome.BecameFirst)")
                 && body.Contains("return 0;"), body);
+            // A name squatted while waiting: logged, then start-up goes on without single-instance (no exit before it).
+            int squatted = body.IndexOf("if (outcome == SecondLaunchOutcome.NameTaken)", StringComparison.Ordinal);
+            int squatEnd = squatted < 0 ? -1 : body.IndexOf("\n                }", squatted, StringComparison.Ordinal);
+            string squatBranch = squatEnd < 0 ? "" : body.Substring(squatted, squatEnd - squatted);
+            Check("wiring: NameTaken logs and runs without single-instance",
+                squatBranch.Contains("ErrorLog.TryWrite(ErrorLog.DefaultPath, NameHeldLine") && squatBranch.Contains("instance = null;")
+                && !squatBranch.Contains("return"), body);
+            Check("wiring: the first-try squat logs the same line",
+                Count(main, "ErrorLog.TryWrite(ErrorLog.DefaultPath, NameHeldLine") == 3 && Count(main, "\"single-instance name held by another program") == 1, main);
             Check("wiring: StillHeld is logged once through ErrorLog",
                 body.Contains("outcome == SecondLaunchOutcome.StillHeld") && body.Contains("ErrorLog.TryWrite(ErrorLog.DefaultPath, SecondLaunch.StillHeldLine"), body);
             Check("wiring: a failure while waiting exits as before", body.Contains("catch (Exception ex)") && body.IndexOf("return 0;", StringComparison.Ordinal) > run, body);
