@@ -122,9 +122,19 @@ namespace RamOptimiser.App
         static void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
         {
             e.Handled = true;
-            Fatal("unhandled error on the UI thread", e.Exception);
+            FailOnUiThread("unhandled error on the UI thread", e.Exception);
+        }
+
+        /// <summary>
+        /// A fault on the UI thread: log it, tell the user, then Exit, which starts the Power Clean restore. The
+        /// dispatcher handler uses it, and so does TrayController for its WinForms handlers, which WPF's
+        /// DispatcherUnhandledException never sees.
+        /// </summary>
+        internal static void FailOnUiThread(string context, Exception ex)
+        {
+            Fatal(context, ex);
             if (shell != null) shell.Exit();
-            else Application.Current.Shutdown(1);
+            else if (Application.Current != null) Application.Current.Shutdown(1);
         }
 
         static void OnDomainUnhandledException(object sender, UnhandledExceptionEventArgs e)

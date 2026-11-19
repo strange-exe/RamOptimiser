@@ -151,5 +151,25 @@ namespace RamOptimiser.Gui
         {
             return stoppedByApp > 0 || (cleanRunning && cleanStopsServices);
         }
+
+        /// <summary>
+        /// How long the fatal-error restore waits for the service lock. Short: the crash handler blocks the process's
+        /// end while it waits, and a lock that does not come means a clean is stuck on a stop. The journal covers it.
+        /// </summary>
+        public static readonly TimeSpan EmergencyLockWait = TimeSpan.FromSeconds(3);
+
+        /// <summary>The fatal-error restore's whole budget, lock wait included (ServiceTrimmer.TryRestoreBounded).</summary>
+        public static readonly TimeSpan EmergencyBudget = TimeSpan.FromSeconds(15);
+
+        /// <summary>
+        /// Exit's order: tear the UI down, then start the restore, whatever the teardown did. A teardown step that
+        /// throws (Exit run from the UI fault handler, say) must not leave Power Clean's services stopped; its
+        /// exception still goes on to the caller after the restore has started.
+        /// </summary>
+        public static void TeardownThenRestore(Action teardown, Action restore)
+        {
+            try { teardown(); }
+            finally { restore(); }
+        }
     }
 }

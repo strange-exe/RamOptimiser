@@ -1,6 +1,6 @@
 // The window's state machines and small decisions, free of WPF so the tests compile them: the Startup tab's
 // load and apply phases, the Memory tab's view state, the tray menu's words, the threshold's pending save and
-// where a service failure belongs.
+// where a service failure belongs, and where a tray handler's exception goes.
 using System;
 using System.Collections.Generic;
 using RamOptimiser.Gui;
@@ -173,6 +173,30 @@ namespace RamOptimiser.App
             bool was = pending;
             pending = false;
             return was;
+        }
+    }
+
+    /// <summary>
+    /// Runs a handler and hands any exception to onFault instead of letting it escape. TrayController uses it: its
+    /// handlers run inside WinForms window procedures, where an escaping exception goes to WinForms'
+    /// Application.ThreadException dialog rather than WPF's DispatcherUnhandledException, and that dialog's Quit
+    /// ends the process without the Fatal log or the Power Clean restore.
+    /// </summary>
+    public static class FaultRoute
+    {
+        /// <summary>True when body finished; false when it threw and onFault was given the exception.</summary>
+        public static bool Guard(Action body, Action<Exception> onFault)
+        {
+            try
+            {
+                body();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                onFault(ex);
+                return false;
+            }
         }
     }
 
