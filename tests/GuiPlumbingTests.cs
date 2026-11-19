@@ -41,12 +41,12 @@ namespace RamOptimiser.Tests
             {
                 SettingsTests(dir);
                 SafeFolderTests(dir);
-                StoppedStoreTests(dir);
             }
             finally
             {
                 try { Directory.Delete(dir, true); } catch (IOException) { }
             }
+            ExitRestoreTests();
             DecideTests();
             ServiceTests();
             SnapshotTests();
@@ -211,79 +211,11 @@ namespace RamOptimiser.Tests
             }
         }
 
-        // ---------------------------------------------------------------- Power Clean journal file (P3, E10)
+        // ---------------------------------------------------------------- Power Clean exit restore (P3, E10)
+        // The journal itself is tested in MachineKeyTests (it moved from a file to HKLM).
 
-        static void StoppedStoreTests(string dir)
+        static void ExitRestoreTests()
         {
-            string folder = Path.Combine(dir, "journal");
-            string path = Path.Combine(folder, "stopped-services.txt");
-            var store = new StoppedServiceStore(path);
-            Check("journal file: missing reads as empty", StoppedServiceStore.Load(path).Count == 0);
-            Check("journal file: add records", store.Add("Spooler") && store.Add("SysMain") && store.Add("Spooler"));
-            Check("journal file: both names, once each", string.Join(",", StoppedServiceStore.Load(path).ToArray()) == "Spooler,SysMain",
-                File.Exists(path) ? File.ReadAllText(path) : "no file");
-            Check("journal file: a foreign name is not recorded", store.Add("WinDefend") && !File.ReadAllText(path).Contains("WinDefend"));
-            Check("journal file: remove", store.Remove("spooler") && string.Join(",", StoppedServiceStore.Load(path).ToArray()) == "SysMain");
-            Check("journal file: removing the last name deletes the file", store.Remove("SysMain") && !File.Exists(path));
-            Check("journal file: no temp files left", Directory.GetFiles(folder).Length == 0, string.Join(", ", Directory.GetFiles(folder)));
-
-            File.WriteAllText(path, "WinDefend\r\nwuauserv\r\nSpooler\r\n");
-            Check("journal file: planted names are dropped", string.Join(",", StoppedServiceStore.Load(path).ToArray()) == "Spooler");
-            File.WriteAllText(path, "");
-            Check("journal file: empty", StoppedServiceStore.Load(path).Count == 0);
-            File.WriteAllBytes(path, new byte[] { 0xFF, 0xFE, 0, 0x53, 0x70, 0x6F, 0x6F, 0x6C, 0x65, 0x72 });
-            Check("journal file: binary garbage", StoppedServiceStore.Load(path).Count == 0);
-            var big = new StringBuilder();
-            while (big.Length <= StoppedServiceStore.MaxFileBytes) big.Append("Spooler\r\n");
-            File.WriteAllText(path, big.ToString());
-            Check("journal file: oversized is not read", StoppedServiceStore.Load(path).Count == 0);
-            Check("journal file: add over an oversized file starts it again", store.Add("Fax")
-                && string.Join(",", StoppedServiceStore.Load(path).ToArray()) == "Fax");
-            File.Delete(path);
-
-            // A journal another process holds open for writing (sharing everything) passes the link checks but
-            // cannot be read: Add and Remove must not take it for an empty one and write over, or delete, its names.
-            File.WriteAllText(path, "Spooler\r\nSysMain\r\n");
-            using (new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
-            {
-                Check("journal file: add over an unreadable journal fails", !store.Add("Fax"));
-                Check("journal file: remove over an unreadable journal fails", !store.Remove("Spooler"));
-            }
-            Check("journal file: an unreadable journal keeps its names", File.Exists(path)
-                && string.Join(",", StoppedServiceStore.Load(path).ToArray()) == "Spooler,SysMain",
-                File.Exists(path) ? File.ReadAllText(path) : "no file");
-            System.Collections.Generic.List<string> loaded;
-            Check("journal file: TryLoad reads a missing file as empty", StoppedServiceStore.TryLoad(path + ".none", out loaded) && loaded.Count == 0);
-            File.Delete(path);
-
-            // A junction folder and a hard-linked file: the elevated app neither reads nor writes through them.
-            string real = Path.Combine(dir, "journal-real");
-            Directory.CreateDirectory(real);
-            string junction = Path.Combine(dir, "journal-junction");
-            if (Mklink("/J", junction, real))
-            {
-                File.WriteAllText(Path.Combine(real, "stopped-services.txt"), "Spooler\r\n");
-                var through = new StoppedServiceStore(Path.Combine(junction, "stopped-services.txt"));
-                Check("journal file: not read through a junction", through.Read().Count == 0);
-                Check("journal file: add through a junction fails and writes nothing", !through.Add("Fax")
-                    && File.ReadAllText(Path.Combine(real, "stopped-services.txt")) == "Spooler\r\n" && Directory.GetFiles(real).Length == 1);
-                Check("journal file: remove through a junction fails", !through.Remove("Spooler")
-                    && File.Exists(Path.Combine(real, "stopped-services.txt")));
-                Directory.Delete(junction, false); // removes the link only
-            }
-            else Check("test setup: journal junction created", false);
-
-            string victim = Path.Combine(dir, "journal-victim.txt");
-            File.WriteAllText(victim, "Spooler\r\n");
-            string linked = Path.Combine(folder, "linked.txt");
-            if (Mklink("/H", linked, victim))
-            {
-                var hard = new StoppedServiceStore(linked);
-                Check("journal file: a hard-linked file is not read", hard.Read().Count == 0);
-                Check("journal file: a hard-linked file is not written", !hard.Add("Fax") && File.ReadAllText(victim) == "Spooler\r\n");
-            }
-            else Check("test setup: journal hard link created", false);
-
             Check("exit restore: services stopped", PowerCleanRecovery.NeedsExitRestore(2, false, false));
             Check("exit restore: a clean in flight may still stop some", PowerCleanRecovery.NeedsExitRestore(0, true, true));
             Check("exit restore: a clean in flight that cannot stop services is not waited for", !PowerCleanRecovery.NeedsExitRestore(0, true, false));

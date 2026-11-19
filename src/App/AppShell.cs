@@ -391,12 +391,18 @@ namespace RamOptimiser.App
         /// <summary>
         /// Hooks Power Clean up to its journal, then starts again the services an earlier run stopped and never
         /// restored (it crashed, was ended, or Windows signed out first). The names are read here, before auto-clean
-        /// starts; the restore runs off the UI thread and reports in the last-clean line.
+        /// starts; the restore runs off the UI thread and reports in the last-clean line. The journal is this
+        /// account's HKLM key (PowerCleanJournal); the old stopped-services.txt in the data folder is never read,
+        /// because any program of the user could write it. A journal key that fails its checks is logged and
+        /// restores nothing, and Power Clean then stops nothing (each stop is recorded first; Add fails there).
         /// </summary>
         void StartServiceRecovery()
         {
-            var journal = new StoppedServiceStore(StoppedServiceStore.DefaultPath);
-            List<string> leftover = journal.Read();
+            PowerCleanJournal journal = PowerCleanJournal.ForCurrentUser();
+            if (journal == null) return;
+            string problem;
+            List<string> leftover = journal.Read(out problem);
+            if (problem != null) ErrorLog.TryWrite(ErrorLog.DefaultPath, "Power Clean's journal was not used: " + problem, null);
             ServiceTrimmer.Journal = journal;
             if (leftover.Count == 0) return;
             List<string> adopted = ServiceTrimmer.Adopt(leftover);

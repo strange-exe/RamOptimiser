@@ -809,12 +809,14 @@ namespace RamOptimiser
 
     /// <summary>
     /// Services that start with Windows. "Disable" sets a listed safe or caution service to Manual (it can still
-    /// be started on demand) and stops it; the old start type is kept under an administrators-only key in HKLM so
-    /// Re-enable puts it back. ChangeServiceConfig / ChangeServiceConfig2 (learn.microsoft.com/en-us/windows/win32/api/winsvc/).
+    /// be started on demand) and stops it; the old start type is kept in HKLM\SOFTWARE\RamOptimiser\ServiceStartup so
+    /// Re-enable puts it back. AppRegistry opens that key: it is used only while no one but administrators can have
+    /// written it (owner, permissions, no registry link); otherwise it reads as empty and Disable changes nothing.
+    /// ChangeServiceConfig / ChangeServiceConfig2 (learn.microsoft.com/en-us/windows/win32/api/winsvc/).
     /// </summary>
     public static class StartupServices
     {
-        const string JournalPath = @"SOFTWARE\RamOptimiser\ServiceStartup";
+        static readonly string[] JournalKey = { "ServiceStartup" };
 
         public static List<StartupService> Query()
         {
@@ -990,15 +992,16 @@ namespace RamOptimiser
                 int deleted = 0;
                 try
                 {
-                    using (RegistryKey key = Registry.LocalMachine.OpenSubKey(JournalPath, true))
+                    string problem;
+                    using (IMachineKey key = AppRegistry.Open(JournalKey, true, false, out problem))
                     {
                         if (key == null) return 0;
                         var values = new List<KeyValuePair<string, string>>();
-                        foreach (string name in key.GetValueNames())
-                            values.Add(new KeyValuePair<string, string>(name, key.GetValue(name) as string));
+                        foreach (string name in key.ValueNames())
+                            values.Add(new KeyValuePair<string, string>(name, key.GetString(name)));
                         foreach (string name in NamesToForget(values, StartupKnowledge.CanDisableService, ModeForTidy))
                         {
-                            key.DeleteValue(name, false);
+                            key.DeleteValue(name);
                             deleted++;
                         }
                     }
@@ -1053,9 +1056,13 @@ namespace RamOptimiser
             bool journaled = false;
             try
             {
-                // Record first, so a crash after the change still leaves the way back.
-                using (RegistryKey key = Registry.LocalMachine.CreateSubKey(JournalPath))
-                    key.SetValue(name, before == StartMode.AutomaticDelayed ? "auto-delayed" : "auto", RegistryValueKind.String);
+                // Record first, so a crash after the change still leaves the way back. No trusted record, no change.
+                string problem;
+                using (IMachineKey key = AppRegistry.Open(JournalKey, true, true, out problem))
+                {
+                    if (key == null) return new StartupChange { Kind = StartupChangeKind.Failed, Detail = problem };
+                    key.SetString(name, before == StartMode.AutomaticDelayed ? "auto-delayed" : "auto");
+                }
                 journaled = true;
                 SetStartType(name, SERVICE_DEMAND_START);
             }
@@ -1117,24 +1124,29 @@ namespace RamOptimiser
         {
             try
             {
-                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(JournalPath, true))
-                    if (key != null) key.DeleteValue(name, false);
+                string problem;
+                using (IMachineKey key = AppRegistry.Open(JournalKey, true, false, out problem))
+                    if (key != null) key.DeleteValue(name);
             }
             catch (UnauthorizedAccessException) { }
             catch (System.Security.SecurityException) { }
             catch (IOException) { }
         }
 
-        /// <summary>Only well-formed records for listed services count; anything else in the key is ignored.</summary>
+        /// <summary>
+        /// Only well-formed records for listed services count; anything else in the key is ignored. A key that is
+        /// missing or fails AppRegistry's checks reads as empty, so no row claims an off this app cannot prove.
+        /// </summary>
         static Dictionary<string, string> ReadJournal()
         {
             var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            using (RegistryKey key = Registry.LocalMachine.OpenSubKey(JournalPath))
+            string problem;
+            using (IMachineKey key = AppRegistry.Open(JournalKey, false, false, out problem))
             {
                 if (key == null) return map;
-                foreach (string name in key.GetValueNames())
+                foreach (string name in key.ValueNames())
                 {
-                    string v = key.GetValue(name) as string;
+                    string v = key.GetString(name);
                     if ((v == "auto" || v == "auto-delayed") && StartupKnowledge.CanDisableService(name)) map[name] = v;
                 }
             }

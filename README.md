@@ -127,10 +127,18 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
   line is written only while it is on.
   When a clean leaves memory load at or above the threshold (the memory is really in use), the wait doubles
   after each such clean, up to 16 times the setting, and returns to normal once load drops below the threshold.
-- Services Power Clean stops are started again when you quit the app. Each one is first recorded in
-  `stopped-services.txt` in the same folder, so if the app crashes, is ended, or Windows signs out first, the next
-  start as administrator starts them again and says so under **Clean memory**. Only names from Power Clean's own
-  list are read from that file; anything else in it is ignored.
+- Services Power Clean stops are started again when you quit the app. Each one is first recorded in the registry,
+  under `HKLM\SOFTWARE\RamOptimiser\PowerClean\<your SID>`, so if the app crashes, is ended, or Windows signs out
+  first, your next start as administrator starts them again and says so under **Clean memory**. Each account has
+  its own list, so one administrator's start never restarts services another administrator's session stopped.
+  Only administrators can change that key, and only names from Power Clean's own list are read from it.
+  Older versions kept this list in `stopped-services.txt` in the same folder as the settings. That file is no
+  longer read or deleted: any program you run could write it. A leftover one does nothing and can be deleted.
+- The app creates `HKLM\SOFTWARE\RamOptimiser` (used by Power Clean and by the Startup tab's service changes) so
+  that only Administrators and SYSTEM can change it, with read access for Users. Before it reads or writes there,
+  it checks that the key and every key below it are owned by Administrators or SYSTEM, that no one else may change
+  them, and that none is a registry link. If a check fails, that record is not used: Power Clean stops no services
+  and logs why in `error.log`, and turning a service off on the Startup tab fails with the reason shown.
 - Hidden in the tray, the app updates only the tray icon and hands back the memory its window was using.
 - The tray tooltip gets a second line when there is something to know: auto-clean is paused or needs admin, the
   last clean failed or hit its time limit, auto-clean is waiting longer, or what the last clean freed. The tray menu
