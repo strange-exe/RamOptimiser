@@ -960,11 +960,14 @@ namespace RamOptimiser
             return result;
         }
 
+        /// <summary>Flags of the volume open (FlushVolume): a lettered volume, SQOS only so every raw open in src is alike.</summary>
+        internal const uint VolumeOpenFlags = SecurityNative.SqosIdentification;
+
         /// <summary>FlushFileBuffers on the "\\.\C:" volume handle: 0, or the Win32 error.</summary>
         private static int FlushVolume(string letter)
         {
             using (SafeFileHandle h = Native.CreateFile(@"\\.\" + letter, Native.GENERIC_READ | Native.GENERIC_WRITE,
-                Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, IntPtr.Zero, Native.OPEN_EXISTING, 0, IntPtr.Zero))
+                Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, IntPtr.Zero, Native.OPEN_EXISTING, VolumeOpenFlags, IntPtr.Zero))
             {
                 return h.IsInvalid ? Marshal.GetLastWin32Error()
                     : (Native.FlushFileBuffers(h) ? 0 : Marshal.GetLastWin32Error());

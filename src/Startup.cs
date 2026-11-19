@@ -370,14 +370,24 @@ namespace RamOptimiser
             return null;
         }
 
-        static string[] ProtectedRoots()
+        /// <summary>The folders a Keep match must sit in, from the known-folder APIs of this process (ProtectedRootsFrom).</summary>
+        internal static string[] ProtectedRoots()
+        {
+            return ProtectedRootsFrom(f => Environment.GetFolderPath(f));
+        }
+
+        /// <summary>
+        /// The Windows folder and both Program Files folders, as folderPath answers for them; empty answers are left
+        /// out. Known folders only, never an environment variable such as ProgramW6432: whoever starts the process can
+        /// set those to a folder they write. The build is x64-only, so ProgramFiles is already the 64-bit folder. Pure.
+        /// </summary>
+        internal static string[] ProtectedRootsFrom(Func<Environment.SpecialFolder, string> folderPath)
         {
             var roots = new List<string>();
             foreach (string r in new[] {
-                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-                Environment.GetEnvironmentVariable("ProgramW6432") })
+                folderPath(Environment.SpecialFolder.Windows),
+                folderPath(Environment.SpecialFolder.ProgramFiles),
+                folderPath(Environment.SpecialFolder.ProgramFilesX86) })
                 if (!string.IsNullOrEmpty(r)) roots.Add(r);
             return roots.ToArray();
         }
@@ -443,7 +453,7 @@ namespace RamOptimiser
         {
             if (string.IsNullOrEmpty(path) || maxBytes <= 0) return null;
             using (SafeFileHandle h = CreateFileW(path, GenericRead, FileShareRead, IntPtr.Zero, OpenExisting,
-                FileFlagOpenReparsePoint | FileFlagSequentialScan, IntPtr.Zero))
+                ReadOpenFlags, IntPtr.Zero))
             {
                 if (h.IsInvalid) return null;
                 if (GetFileType(h) != FileTypeDisk) return null;
@@ -475,6 +485,12 @@ namespace RamOptimiser
 
         const uint GenericRead = 0x80000000, FileShareRead = 0x1, OpenExisting = 3;
         const uint FileFlagOpenReparsePoint = 0x00200000, FileFlagSequentialScan = 0x08000000, FileTypeDisk = 1;
+
+        /// <summary>
+        /// Flags of the ReadRegularFile open: the file itself, never what a link points to. The Startup folder can be
+        /// redirected by the user, so the open may reach a pipe before GetFileType refuses it: SQOS as every raw open.
+        /// </summary>
+        internal const uint ReadOpenFlags = FileFlagOpenReparsePoint | FileFlagSequentialScan | SecurityNative.SqosIdentification;
 
         [StructLayout(LayoutKind.Sequential)]
         struct FileInfoByHandle

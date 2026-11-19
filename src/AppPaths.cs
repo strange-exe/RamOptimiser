@@ -17,14 +17,30 @@ namespace RamOptimiser
         /// The data folder under a local app data folder, or null when that is empty or not a full path ("C:\..." or
         /// "\\server\share\..."). Windows answers "" for an account with no profile folder (a service account, a
         /// scheduled task with no loaded profile); a relative path would land in the current directory, often
-        /// C:\Windows\System32 for such a process. Pure.
+        /// C:\Windows\System32 for such a process. Device paths ("\\?\...", "\\.\...") and named pipes
+        /// ("\\host\pipe\...") are refused too: the folder can be redirected without elevation, and the writers create
+        /// and query it by path, which no handle check can guard. Pure.
         /// </summary>
         public static string DataFolderFor(string localAppData)
         {
             if (string.IsNullOrEmpty(localAppData)) return null;
             bool drive = localAppData.Length >= 3 && char.IsLetter(localAppData[0]) && localAppData[1] == ':' && localAppData[2] == '\\';
-            bool unc = localAppData.StartsWith(@"\\", StringComparison.Ordinal);
+            bool unc = localAppData.StartsWith(@"\\", StringComparison.Ordinal) && IsShare(localAppData.Substring(2));
             return drive || unc ? Path.Combine(localAppData, FolderName) : null;
+        }
+
+        /// <summary>
+        /// Whether the part after "\\" names a share: a host that is not "?" or "." (the device namespaces) and a first
+        /// component that is not "pipe". Windows reads "/" as "\", skips empty components and drops trailing dots and
+        /// spaces, so this does too before comparing.
+        /// </summary>
+        static bool IsShare(string afterSlashes)
+        {
+            string[] parts = afterSlashes.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0) return false;
+            string host = parts[0].TrimEnd('.', ' ');
+            if (host.Length == 0 || host == "?") return false; // "." trims to ""
+            return parts.Length < 2 || !string.Equals(parts[1].TrimEnd('.', ' '), "pipe", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>The data folder of the account the process runs as, or null when that account has none (DataFolderFor).</summary>

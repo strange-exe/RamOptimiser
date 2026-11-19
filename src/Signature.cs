@@ -135,7 +135,7 @@ namespace RamOptimiser
                 var info = new FileInfo(full);
                 if (!info.Exists || SkipForAttributes(info.Attributes)) return NotChecked;
                 using (SafeFileHandle h = SecurityNative.CreateFileW(full, GenericRead, SecurityNative.FILE_SHARE_READ, IntPtr.Zero,
-                    SecurityNative.OPEN_EXISTING, SecurityNative.FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero))
+                    SecurityNative.OPEN_EXISTING, OpenFlags, IntPtr.Zero))
                 {
                     if (h.IsInvalid || GetFileType(h) != FileTypeDisk) return NotChecked;
                     SecurityNative.BY_HANDLE_FILE_INFORMATION byHandle;
@@ -198,6 +198,9 @@ namespace RamOptimiser
         }
 
         const uint GenericRead = 0x80000000, FileTypeDisk = 1;
+
+        /// <summary>Flags of the Inspect open: the file itself, never what a link points to, SQOS as every raw open.</summary>
+        internal const uint OpenFlags = SecurityNative.FILE_FLAG_OPEN_REPARSE_POINT | SecurityNative.SqosIdentification;
 
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern uint GetFileType(SafeFileHandle file);
