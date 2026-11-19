@@ -2,7 +2,7 @@ import { Check, Copy } from "@phosphor-icons/react";
 import { useState } from "react";
 
 // The full SHA-256, selectable, with a copy button that confirms in words (announced politely).
-export function CopyHash({ hash }: { hash: string }) {
+export function CopyHash({ hash, label = "Copy SHA-256" }: { hash: string; label?: string }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   async function copy() {
     try {
@@ -22,7 +22,7 @@ export function CopyHash({ hash }: { hash: string }) {
         <button
           type="button"
           onClick={copy}
-          aria-label="Copy SHA-256"
+          aria-label={label}
           className="grid size-11 shrink-0 place-items-center rounded-xl border border-hairline-strong text-text transition-[transform,background-color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-surface-2 active:scale-95"
         >
           {state === "copied" ? <Check weight="light" className="size-5 text-ok" /> : <Copy weight="light" className="size-5" />}

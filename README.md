@@ -27,6 +27,59 @@ It helps when a machine is genuinely short of memory (high load, paging) and one
 now, or when a buggy driver or app leaves a bloated standby list. On a healthy machine it makes the
 numbers look better and the next few minutes slightly slower.
 
+## Install
+
+Download `RamOptimiser-<version>-setup.exe` from the
+[latest release](https://github.com/strange-exe/RamOptimiser/releases/latest) and run it. It asks for
+administrator rights and installs the desktop app, `ramopt.exe`, this README and the LICENSE to
+`C:\Program Files\RAM Optimiser`. The folder can't be changed: only administrators can change files there, which
+is what makes **Start with Windows** safe (see below). It adds a Start menu entry, a desktop shortcut if you tick
+the box, and an uninstaller. **Start RAM Optimiser** on the last page starts the app with your normal rights, not
+as administrator.
+
+To update, run a newer setup. It closes the app if it is running, replaces the files in the same folder and keeps
+your settings; start the app again from the last page or the Start menu.
+
+The setup isn't code-signed yet, so SmartScreen may say "Windows protected your PC" and the administrator prompt
+says "Unknown publisher". Compare its SHA-256 with the one on the download page
+(`Get-FileHash .\RamOptimiser-<version>-setup.exe`), then choose **More info** and **Run anyway**.
+
+**Portable zip.** `RamOptimiser-<version>-win-x64.zip` holds the same two exes, the README and the LICENSE, with
+nothing to install: extract it anywhere to try the app. Before you turn on Start with Windows from a portable copy,
+move the exes to a folder only administrators can change (see
+[Before you turn on Start with Windows](#before-you-turn-on-start-with-windows)).
+
+### Update check
+
+The app asks GitHub for the latest release's version number about 2 minutes after it starts and then once a day
+while it runs (6 hours after a check that failed). That is one HTTPS request to
+`api.github.com/repos/strange-exe/RamOptimiser/releases/latest`: GitHub sees your IP address and the User-Agent
+`RamOptimiser/<version>`, and nothing else is sent (no account, cookie or ID). Only the version number is read from
+the answer. Nothing is downloaded or installed.
+
+When a newer version is out, a tray notification says so (once per version while the app runs); clicking it opens
+the download page. Settings shows the same with an **Open download page** link. When the app runs as administrator
+it asks Explorer to open the page, so your browser never runs as administrator; if that fails, Settings shows the
+link to copy instead.
+
+To turn it off, switch off **Check for updates** in Settings (`CheckForUpdates=false` in `settings.ini`).
+
+### Uninstall
+
+Settings > Apps > Installed apps > RAM Optimiser > Uninstall. If the app is running, the uninstaller asks you to
+close it first (right-click the tray icon, then **Exit**). It removes:
+
+- the program files and shortcuts;
+- the Start with Windows tasks that start this copy: tasks named `RamOptimiser` or `RamOptimiser-<SID>` in the Task
+  Scheduler root folder whose one action runs exactly `C:\Program Files\RAM Optimiser\RamOptimiser.exe`. A task
+  that starts another copy (a portable one, say) is left alone;
+- `HKLM\SOFTWARE\RamOptimiser`. That key is where Power Clean records the services it stopped and the Startup tab
+  records the services it turned off. Quitting the app starts Power Clean's services again, but services you turned
+  off in the Startup tab stay off: turn back on any you want before you uninstall, because afterwards nothing
+  remembers them.
+
+Your settings and logs in `%LOCALAPPDATA%\RamOptimiser` are kept. Delete that folder yourself if you don't want them.
+
 ## Use
 
 Build (needs only the C# compiler that ships with Windows, .NET Framework 4.8):
@@ -170,8 +223,9 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
 
 The logon task starts `RamOptimiser.exe` **as administrator, without a prompt**, from the path it was
 registered with. Anyone who can replace that file, or add a DLL next to it, gets their code run as
-administrator at your next sign-in. So first copy the two exes to a folder only administrators can change,
-such as `C:\Program Files\RamOptimiser\`, and enable the option from that copy. Don't enable it from a
+administrator at your next sign-in. The setup installs to `C:\Program Files\RAM Optimiser`, which is such a
+folder. With the portable zip or your own build, first copy the two exes to a folder only administrators can
+change, such as `C:\Program Files\RamOptimiser\`, and enable the option from that copy. Don't enable it from a
 build folder like `bin\` inside your user profile or a downloads folder.
 
 The task is registered through the Task Scheduler API with a fixed definition: it runs only at your sign-in
@@ -288,13 +342,19 @@ terminal. The same escaping applies to `--json` output. The file is kept under
 
 ## Website
 
-`site/` is the download page (Vite, React, Tailwind, motion), a static build with the zip served from the same host.
+`site/` is the download page (Vite, React, Tailwind, motion), a static build with the downloads served from the
+same host (or, with `-Repo owner/name`, from that repo's GitHub Release).
 
 ```powershell
-.\build.ps1 -Test                                  # build the app into bin\
-powershell -File site\scripts\package.ps1          # zip bin\ into site\public\download, write the SHA-256
+.\build.ps1 -Test                                  # build the app into bin\ (and bin\version.txt)
+powershell -File site\scripts\package.ps1          # zip and setup into site\public\download, write the SHA-256s
 cd site; npm ci --ignore-scripts; npm run build    # static site in site\dist
 ```
+
+`package.ps1` builds the setup from `installer\RamOptimiser.iss` with Inno Setup 7 (`-Iscc path\to\ISCC.exe`, or
+found in its usual install folders) and writes it to `release.json` as the `setup` object, which the download button
+then offers, with the zip as the portable option. Without Inno Setup it warns, makes the zip only, and the site
+offers the zip. It never runs the exes or the setup.
 
 `npm run contrast` checks the colour pairs the site uses. Host `site\dist` anywhere static; the page's CSP is in
 `index.html` (add `frame-ancestors 'self'` as a response header, since a meta tag can't set it).
@@ -306,6 +366,7 @@ cd site; npm ci --ignore-scripts; npm run build    # static site in site\dist
 - `src/Cli.cs` argument parsing and output
 - `src/Gui/` non-visual app logic: settings, auto-clean service, elevation, start-up task, single instance, tray icon
 - `src/App/` the WPF app (XAML in `src/App/Xaml`, loaded at runtime); `tools/IconGen.cs` makes the app icon at build time
+- `installer/RamOptimiser.iss` the Inno Setup 7 script for the setup (built by `site/scripts/package.ps1`)
 - `tests/` dependency-free test runner (parsing, policy, struct layouts, settings, task XML, app text, live snapshot)
 - `design.md` the chosen visual theme, tokens and contrast results
 

@@ -4,12 +4,12 @@ import { CardSpotlight } from "./components/ui/card-spotlight";
 import { Spotlight } from "./components/ui/spotlight";
 import { StickySteps, type Step } from "./components/ui/sticky-steps";
 import { CopyHash } from "./components/CopyHash";
-import { DownloadButton } from "./components/DownloadButton";
+import { DownloadButton, PortableZipLink } from "./components/DownloadButton";
 import { HeroDemo } from "./components/HeroDemo";
 import { MemoryBar, MemoryLegend, loadPercent, type Mem } from "./components/MemoryMap";
 import { Reveal } from "./components/Reveal";
+import { primary, release } from "./lib/release";
 import { formatBytes } from "./lib/utils";
-import release from "./release.json";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -96,9 +96,12 @@ function Hero() {
               <ArrowDown aria-hidden="true" weight="light" className="size-4" />
             </a>
           </motion.div>
-          <motion.p {...enter(0.4)} className="mt-6 font-mono text-[13px] text-muted">
-            Windows 10 and 11, 64-bit. {formatBytes(release.size)} zip. Built {release.built}.
-          </motion.p>
+          <motion.div {...enter(0.4)} className="mt-6 flex flex-wrap items-baseline gap-x-4 gap-y-2">
+            <p className="font-mono text-[13px] text-muted">
+              Windows 10 and 11, 64-bit. {formatBytes(primary.size)} {release.setup ? "installer" : "zip"}. Built {release.built}.
+            </p>
+            <PortableZipLink />
+          </motion.div>
         </div>
         <motion.div {...(reduce ? {} : { initial: { opacity: 0, y: 40, scale: 0.98 }, animate: { opacity: 1, y: 0, scale: 1 }, transition: { duration: 1.1, delay: 0.2, ease } })}>
           <HeroDemo />
@@ -316,16 +319,20 @@ function Download() {
             Download RamOptimiser
           </h2>
           <p className="mt-5 max-w-[40ch] text-lg leading-relaxed text-muted">
-            One zip with the desktop app, the command line and the README. No installer, nothing to sign up for.
+            {release.setup
+              ? "One installer with the desktop app, the command line and the README. It goes into Program Files with a Start menu entry and an uninstaller. Nothing to unzip, nothing to sign up for."
+              : "One zip with the desktop app, the command line and the README. No installer, nothing to sign up for."}
           </p>
-          <div className="mt-9">
+          <div className="mt-9 flex flex-col items-start gap-4">
             <DownloadButton />
+            <PortableZipLink />
           </div>
           <dl className="mt-10 space-y-3 text-sm">
             {[
               ["Needs", "Windows 10 or 11, 64-bit, with .NET Framework 4.8 (built into Windows 10 May 2019 Update and later)"],
               ["To clean", "administrator rights; without them it shows status only"],
-              ["File", `${release.file}, ${formatBytes(release.size)}`],
+              ["File", `${primary.file}, ${formatBytes(primary.size)}`],
+              ...(release.setup ? [["Portable", `${release.file}, ${formatBytes(release.size)}`]] : []),
             ].map(([k, v]) => (
               <div key={k} className="grid grid-cols-[6rem_minmax(0,1fr)] gap-4 border-t border-hairline pt-3">
                 <dt className="text-muted">{k}</dt>
@@ -339,23 +346,40 @@ function Download() {
             <div className="rounded-[20px] border border-hairline/80 bg-surface p-7 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
               <h3 className="text-lg font-medium text-text">Check the file before you run it</h3>
               <p className="mt-2 text-base leading-relaxed text-muted">
-                The app isn't code-signed yet, so Windows SmartScreen may warn the first time. Compare the hash below with
-                the one PowerShell prints, then choose More info and Run anyway.
+                The app isn't code-signed yet, so Windows SmartScreen may warn the first time
+                {release.setup ? " and the installer's admin prompt says Unknown publisher" : ""}. Compare the hash below
+                with the one PowerShell prints, then choose More info and Run anyway.
               </p>
-              <h4 className="mt-6 text-sm font-medium text-muted">SHA-256</h4>
+              <h4 className="mt-6 text-sm font-medium text-muted">SHA-256{release.setup ? " of the installer" : ""}</h4>
               <div className="mt-2">
-                <CopyHash hash={release.sha256} />
+                <CopyHash hash={primary.sha256} />
               </div>
               <pre className="mt-2 overflow-x-auto rounded-xl border border-hairline bg-canvas p-4 font-mono text-[13px] text-text">
-                <code>Get-FileHash .\{release.file}</code>
+                <code>Get-FileHash .\{primary.file}</code>
               </pre>
+              {release.setup && (
+                <>
+                  <h4 className="mt-6 text-sm font-medium text-muted">SHA-256 of the portable zip</h4>
+                  <div className="mt-2">
+                    <CopyHash hash={release.sha256} label="Copy the portable zip's SHA-256" />
+                  </div>
+                </>
+              )}
               <div className="mt-6 flex gap-3 rounded-xl border border-hairline bg-surface-2 p-4">
                 <ShieldCheck aria-hidden="true" weight="light" className="mt-0.5 size-5 shrink-0 text-text" />
-                <p className="text-sm leading-relaxed text-muted">
-                  <span className="text-text">Before you turn on Start with Windows,</span> copy the two exes to a folder only
-                  administrators can change, such as C:\Program Files\RamOptimiser. The start-up task runs the app as
-                  administrator, so it shouldn't run from Downloads.
-                </p>
+                {release.setup ? (
+                  <p className="text-sm leading-relaxed text-muted">
+                    <span className="text-text">The installer puts the app in C:\Program Files\RAM Optimiser,</span> which only
+                    administrators can change, so Start with Windows is safe to turn on. With the portable zip, copy the two exes
+                    to such a folder first: the start-up task runs the app as administrator, so it shouldn't run from Downloads.
+                  </p>
+                ) : (
+                  <p className="text-sm leading-relaxed text-muted">
+                    <span className="text-text">Before you turn on Start with Windows,</span> copy the two exes to a folder only
+                    administrators can change, such as C:\Program Files\RamOptimiser. The start-up task runs the app as
+                    administrator, so it shouldn't run from Downloads.
+                  </p>
+                )}
               </div>
             </div>
           </div>
