@@ -351,17 +351,24 @@ namespace RamOptimiser.App
             // A prompt still up when the user exits: its result arrives later and is ignored.
             elevationState = ElevationFlow.Next(elevationState, ElevationEvent.ExitRequested).State;
             exiting = true;
-            SystemEvents.PowerModeChanged -= OnPowerModeChanged;
-            SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
-            SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged;
-            StopHotkey();
-            if (service != null) service.Dispose();
-            CloseFlyout();
-            if (tray != null) tray.Dispose();
-            if (instance != null) { instance.ActivationRequested -= OnActivationRequested; instance.Dispose(); instance = null; }
-            if (window != null) window.Close();
-            RestoreServicesOnExit(service, elevated);
-            app.Shutdown();
+            // The restore starts even when a teardown step throws (Exit may run from the UI fault handler, where a
+            // second Exit returns at once), and the app still shuts down; exiting keeps both to one start.
+            try
+            {
+                PowerCleanRecovery.TeardownThenRestore(() =>
+                {
+                    SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+                    SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+                    SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged;
+                    StopHotkey();
+                    if (service != null) service.Dispose();
+                    CloseFlyout();
+                    if (tray != null) tray.Dispose();
+                    if (instance != null) { instance.ActivationRequested -= OnActivationRequested; instance.Dispose(); instance = null; }
+                    if (window != null) window.Close();
+                }, () => RestoreServicesOnExit(service, elevated));
+            }
+            finally { app.Shutdown(); }
         }
 
         /// <summary>
@@ -433,7 +440,13 @@ namespace RamOptimiser.App
             if (!good) dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => resultPanel.Announce()));
         }
 
-        /// <summary>Last-resort cleanup from the fatal-error path; never throws.</summary>
+        /// <summary>
+        /// Last-resort cleanup from the fatal-error path; never throws. The process ends right after, so Exit's
+        /// restore thread cannot be used: services this run stopped are started here, synchronously and bounded
+        /// (PowerCleanRecovery.EmergencyLockWait, EmergencyBudget). If the service lock does not come, it gives up
+        /// and the journal lets the next elevated start finish. The restore runs after auto-clean is disposed (no
+        /// new clean) and before the single-instance lock goes, so a new copy does not restore the same services.
+        /// </summary>
         public void EmergencyCleanup()
         {
             // SystemEvents is static: a handler left attached would outlive the shell.
@@ -442,6 +455,8 @@ namespace RamOptimiser.App
             try { if (service != null) service.Dispose(); } catch (Exception) { }
             try { CloseFlyout(); } catch (Exception) { }
             try { if (tray != null) tray.Dispose(); } catch (Exception) { }
+            try { ServiceTrimmer.TryRestoreBounded(PowerCleanRecovery.EmergencyLockWait, PowerCleanRecovery.EmergencyBudget); }
+            catch (Exception) { }
             try { if (instance != null) instance.Dispose(); } catch (Exception) { }
         }
 

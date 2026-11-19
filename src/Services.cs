@@ -594,16 +594,53 @@ namespace RamOptimiser
             lock (Operation) return RestoreLocked(StoppedThisSession().FindAll(wanted.Contains));
         }
 
+        /// <summary>
+        /// The fatal-error path's restore: synchronous, and bounded, because the process ends as soon as the crash
+        /// handler returns. Waits at most lockWait for the service lock (a Power Clean stuck on a stop may hold it)
+        /// and gives up quietly if it does not come; the journal still names the services, so the next elevated start
+        /// finishes the job. budget (lock wait included) caps the whole restore: no service is started once it is
+        /// spent, and each service's waits are cut to what is left. Returns null when the lock was not taken.
+        /// </summary>
+        public static List<ServiceAction> TryRestoreBounded(TimeSpan lockWait, TimeSpan budget)
+        {
+            if (StoppedThisSession().Count == 0) return new List<ServiceAction>();
+            Stopwatch clock = Stopwatch.StartNew();
+            return TryLocked(Operation, lockWait, () => RestoreLocked(StoppedThisSession(), () => budget - clock.Elapsed));
+        }
+
+        /// <summary>Runs body under gate when the lock comes within wait; otherwise runs nothing and returns null.</summary>
+        internal static List<ServiceAction> TryLocked(object gate, TimeSpan wait, Func<List<ServiceAction>> body)
+        {
+            if (!Monitor.TryEnter(gate, wait)) return null;
+            try { return body(); }
+            finally { Monitor.Exit(gate); }
+        }
+
         static List<ServiceAction> RestoreLocked(List<string> names)
+        {
+            return RestoreLocked(names, null);
+        }
+
+        /// <param name="timeLeft">Null for no overall limit (StopTimeout per wait); otherwise the time left, which
+        /// stops the loop before a service is opened once it is spent and cuts each wait to it. Services not reached
+        /// stay on the stopped list and in the journal.</param>
+        internal static List<ServiceAction> RestoreLocked(List<string> names, Func<TimeSpan> timeLeft)
         {
             var done = new List<ServiceAction>();
             foreach (string name in names)
             {
+                TimeSpan timeout = StopTimeout;
+                if (timeLeft != null)
+                {
+                    TimeSpan left = timeLeft();
+                    if (left <= TimeSpan.Zero) break;
+                    if (left < timeout) timeout = left;
+                }
                 ServiceRule rule = ServiceCatalog.Find(name);
                 var a = new ServiceAction { Name = name, Label = rule != null ? rule.Label : name };
                 try
                 {
-                    using (var sc = new ServiceController(name)) RestoreOne(new ServiceControl(sc), a, StopTimeout);
+                    using (var sc = new ServiceController(name)) RestoreOne(new ServiceControl(sc), a, timeout);
                     if (a.Started) Forget(name);
                 }
                 catch (InvalidOperationException ex)

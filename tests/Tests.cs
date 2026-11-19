@@ -25,8 +25,30 @@ namespace RamOptimiser.Tests
             catch (Exception ex) { Check(name, false, "threw " + ex.GetType().Name); }
         }
 
+        /// <summary>Main's exit code when it refuses to run with an elevated token.</summary>
+        internal const int ExitElevated = 3;
+        /// <summary>Set to 1 to run the suite elevated anyway (a deliberate choice, never the default).</summary>
+        internal const string AllowElevatedVariable = "RAMOPT_TESTS_ALLOW_ELEVATED";
+
+        /// <summary>
+        /// The suites write and delete files by path in %TEMP% folders that any same-user process can redirect, so
+        /// an elevated run would turn a medium-integrity swap into an administrator's write or delete (audit run-4
+        /// record 21). No test needs admin rights, so an elevated run is refused unless the override is exactly "1".
+        /// </summary>
+        internal static bool RefuseElevated(bool elevated, string allowValue)
+        {
+            return elevated && allowValue != "1";
+        }
+
         public static int Main()
         {
+            if (RefuseElevated(Gui.Elevation.IsElevated(), Environment.GetEnvironmentVariable(AllowElevatedVariable)))
+            {
+                Console.WriteLine("Refusing to run elevated: the tests use %TEMP% by path and must run from a non-elevated shell"
+                    + " (set " + AllowElevatedVariable + "=1 to override).");
+                return ExitElevated;
+            }
+
             // Like both exes, restrict the DLL search before anything else, so the whole suite runs under it.
             bool dllSearchRestricted = Native.RestrictDllSearchToSystem32();
             var searchAttrs = typeof(Native).Assembly.GetCustomAttributes(typeof(DefaultDllImportSearchPathsAttribute), false);

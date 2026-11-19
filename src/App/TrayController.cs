@@ -98,9 +98,20 @@ namespace RamOptimiser.App
             cleanItem.ShowShortcutKeys = !string.IsNullOrEmpty(keys);
         }
 
+        /// <summary>
+        /// Runs a handler with its faults routed to AppMain's fatal path (Fatal log, then Exit and its service
+        /// restore). These handlers run inside WinForms window procedures (NotifyIcon, ContextMenuStrip), so an
+        /// exception escaping here would go to WinForms' Application.ThreadException dialog, not WPF's
+        /// DispatcherUnhandledException, and that dialog's Quit ends the process with neither. Catching here was
+        /// chosen over Application.SetUnhandledExceptionMode(ThrowException): that would rethrow through WPF's own
+        /// message loop, where no WPF handler is guaranteed to see it, so reaching Fatal and the restore would
+        /// depend on the unhandled-exception path instead of one call we control.
+        /// </summary>
         void Raise(EventHandler h)
         {
-            if (h != null && !disposed) h(this, EventArgs.Empty);
+            if (h == null || disposed) return;
+            FaultRoute.Guard(() => h(this, EventArgs.Empty),
+                ex => AppMain.FailOnUiThread("unhandled error in a tray menu or icon handler", ex));
         }
 
         static int SmallIconSize()

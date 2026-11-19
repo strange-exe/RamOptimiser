@@ -35,6 +35,10 @@ Build (needs only the C# compiler that ships with Windows, .NET Framework 4.8):
 .\build.ps1 -Test
 ```
 
+Run the tests from a normal (non-administrator) terminal. They write and delete files in folders under `%TEMP%`,
+which other programs you run can tamper with, so the test runner refuses to run as administrator and exits with
+code 3. No test needs administrator rights. To run them elevated anyway, set `RAMOPT_TESTS_ALLOW_ELEVATED=1` first.
+
 ### Desktop app: `bin\RamOptimiser.exe`
 
 A window and a tray icon. The tray icon shows the current memory load. Click it for a small panel with the load,
