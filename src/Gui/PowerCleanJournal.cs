@@ -218,6 +218,34 @@ namespace RamOptimiser.Gui
         }
 
         /// <summary>
+        /// Exit's restore, then the single-instance lock (release). With a restore needed, start runs it on its own
+        /// thread and the lock goes only when that thread is done, as in EmergencyCleanup: a copy started meanwhile
+        /// signals this one and exits instead of adopting the same journal and starting the same services. With none
+        /// needed the lock goes at once. release runs exactly once: also when needed or start throws (that exception
+        /// goes on to the caller) and when the restore throws (dropped: the journal lets the next start finish).
+        /// </summary>
+        public static void RestoreThenRelease(Func<bool> needed, Action restore, Action release, Action<System.Threading.ThreadStart> start)
+        {
+            bool handedOver = false;
+            try
+            {
+                if (!needed()) return;
+                start(() =>
+                {
+                    try { restore(); }
+                    catch (Exception) { }
+                    finally
+                    {
+                        try { release(); }
+                        catch (Exception) { }
+                    }
+                });
+                handedOver = true;
+            }
+            finally { if (!handedOver) release(); }
+        }
+
+        /// <summary>
         /// Exit's teardown steps, in order, each on its own (as EmergencyCleanup does): a step that throws does not
         /// skip the later ones, so a failing hotkey or tray dispose still lets auto-clean's timer stop. Once every
         /// step has run, the first exception is rethrown with its own stack trace (TeardownThenRestore passes it on).

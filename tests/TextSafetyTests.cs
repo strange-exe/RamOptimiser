@@ -37,7 +37,56 @@ namespace RamOptimiser.Tests
             StartupWiringTests();
             CleanLogTextTests();
             SoftHyphenAndSpaces();
+            DefaultIgnorables();
             return failed;
+        }
+
+        // ---------------------------------------------------------------- fix-up: invisible characters outside Cf/Cc
+
+        /// <summary>
+        /// Every Default_Ignorable_Code_Point range (Unicode 18.0 DerivedCoreProperties.txt) draws nothing, whatever its
+        /// category: the combining grapheme joiner and variation selectors are Mn, the Hangul fillers Lo, and the
+        /// reserved ones Cn. U+2800 (braille blank) draws as a space. A crafted 'Program Files' with any of them must
+        /// not read like the real one.
+        /// </summary>
+        static void DefaultIgnorables()
+        {
+            int[] hidden = { 0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180D, 0x180E, 0x180F, 0x2065, 0x3164,
+                0xFE00, 0xFE0F, 0xFFA0, 0xFFF0, 0xFFF8, 0x1BCA0, 0x1D173, 0xE0000, 0xE0002, 0xE0080, 0xE0100, 0xE01EF, 0xE01F0, 0xE0FFF };
+            foreach (int cp in hidden)
+            {
+                string s = char.ConvertFromUtf32(cp);
+                string hex = cp.ToString("X4", CultureInfo.InvariantCulture);
+                string m = SafeText.Marked(@"C:\Prog" + s + @"ram Files\x.exe", "?");
+                Check("ignorable U+" + hex + ": marked once in the identity line", m == @"C:\Prog?ram Files\x.exe", m);
+                string v = SafeText.Visible("a" + s + "b");
+                Check("ignorable U+" + hex + ": dropped from labels", v == "ab", v);
+            }
+
+            string blank = ((char)0x2800).ToString();
+            string mb = SafeText.Marked(@"C:\Program" + blank + @"Files\x.exe", "?");
+            Check("braille blank: marked in the identity line", mb == @"C:\Program?Files\x.exe", mb);
+            string vb = SafeText.Visible("a" + blank + "b");
+            Check("braille blank: a label shows an ASCII space", vb == "a b", vb);
+
+            // Visible characters next to those ranges stay as they are: an accent, a Hangul syllable, an emoji, braille
+            // with dots, and code points just outside the ignorable ranges.
+            int[] shown = { 0x0301, 0x1161, 0x17B6, 0x180A, 0x2801, 0x3165, 0xAC00, 0xFE10, 0xFFA1, 0x1F600, 0xE1000 };
+            foreach (int cp in shown)
+            {
+                string s = char.ConvertFromUtf32(cp);
+                string hex = cp.ToString("X4", CultureInfo.InvariantCulture);
+                string text = "a" + s + "b";
+                Check("visible U+" + hex + ": not marked", SafeText.Marked(text, "?") == text, SafeText.Marked(text, "?"));
+                Check("visible U+" + hex + ": kept in labels", SafeText.Visible(text) == text, SafeText.Visible(text));
+            }
+
+            KnownItem discord = StartupKnowledge.FindApp("Discord.exe");
+            var k = new StartupApp { Source = StartupSource.UserRun, Name = "Discord", Known = discord,
+                ExePath = @"C:\Prog" + (char)0x034F + @"ram Files\Discord\Discord.exe" };
+            string d = AppText.AppDetail(k, Win);
+            Check("startup detail: a grapheme joiner in the path does not read as Program Files",
+                !d.Contains(@"Runs C:\Program Files\Discord\Discord.exe") && d.Contains(@"Runs C:\Prog?ram Files\Discord\Discord.exe"), d);
         }
 
         // ---------------------------------------------------------------- final review: soft hyphen, look-alike spaces

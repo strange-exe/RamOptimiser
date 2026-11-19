@@ -356,7 +356,9 @@ namespace RamOptimiser.App
             // The restore starts even when a teardown step throws (Exit may run from the UI fault handler, where a
             // second Exit returns at once), and the app still shuts down; exiting keeps both to one start. Each step
             // runs on its own, so one that throws does not skip the rest (auto-clean's timer above all); the first
-            // fault still goes on to the caller.
+            // fault still goes on to the caller. The single-instance lock is not a step: it goes after the restore.
+            SingleInstance held = instance;
+            Action release = () => { if (held != null) held.Dispose(); };
             try
             {
                 PowerCleanRecovery.TeardownThenRestore(() => PowerCleanRecovery.RunSteps(
@@ -367,9 +369,9 @@ namespace RamOptimiser.App
                     () => { if (service != null) service.Dispose(); },
                     () => CloseFlyout(),
                     () => { if (tray != null) tray.Dispose(); },
-                    () => { if (instance != null) { instance.ActivationRequested -= OnActivationRequested; instance.Dispose(); instance = null; } },
+                    () => { if (instance != null) { instance.ActivationRequested -= OnActivationRequested; instance = null; } },
                     () => { if (window != null) window.Close(); }),
-                    () => RestoreServicesOnExit(service, elevated));
+                    () => RestoreServicesOnExit(service, elevated, release));
             }
             finally { app.Shutdown(); }
         }
@@ -380,22 +382,26 @@ namespace RamOptimiser.App
         /// A Power Clean still in flight is waited for first (bounded), so a stop it makes after Exit is restored too;
         /// if the thread is cut short anyway, the journal lets the next elevated start finish the job. A memory-only
         /// clean, or any clean without administrator rights, stops no services and does not hold the exit up.
+        /// release (the single-instance lock) runs once the restore is done, or at once when none is needed
+        /// (PowerCleanRecovery.RestoreThenRelease): a copy started while services are still being restored hands
+        /// over to this one and exits, rather than restoring the same services from the journal at the same time.
         /// </summary>
-        static void RestoreServicesOnExit(AutoCleanService cleaner, bool elevated)
+        static void RestoreServicesOnExit(AutoCleanService cleaner, bool elevated, Action release)
         {
-            bool cleaning = cleaner != null && cleaner.IsCleaning;
-            bool stopsServices = elevated && cleaner != null && cleaner.CleanMayStopServices;
-            if (!PowerCleanRecovery.NeedsExitRestore(ServiceTrimmer.StoppedThisSession().Count, cleaning, stopsServices)) return;
-            var t = new Thread(() =>
-            {
-                try
+            PowerCleanRecovery.RestoreThenRelease(
+                () =>
+                {
+                    bool cleaning = cleaner != null && cleaner.IsCleaning;
+                    bool stopsServices = elevated && cleaner != null && cleaner.CleanMayStopServices;
+                    return PowerCleanRecovery.NeedsExitRestore(ServiceTrimmer.StoppedThisSession().Count, cleaning, stopsServices);
+                },
+                () =>
                 {
                     if (cleaner != null) cleaner.WaitUntilIdle(PowerCleanRecovery.ExitCleanWait);
                     ServiceTrimmer.Restore();
-                }
-                catch (Exception) { }
-            }) { IsBackground = false, Name = "restore-services" };
-            t.Start();
+                },
+                release,
+                body => new Thread(body) { IsBackground = false, Name = "restore-services" }.Start());
         }
 
         /// <summary>

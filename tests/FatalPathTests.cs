@@ -79,6 +79,53 @@ namespace RamOptimiser.Tests
 
             BoundedRestoreWiring();
             EmergencyDeadline();
+            NoTimeLeft();
+        }
+
+        /// <summary>
+        /// The deadline runs out in the middle of one service. A service still stopping that uses up the last of the
+        /// budget is not sent a start (Start cannot be bounded); a start that uses up the rest is followed by one status
+        /// read, never a wait.
+        /// </summary>
+        static void NoTimeLeft()
+        {
+            // The stop wait is cut to StopTimeout, and the budget is exactly that: nothing is left after it.
+            TimeSpan budget = ServiceTrimmer.StopTimeout;
+            var clock = new FakeClock();
+            var waits = new List<TimeSpan>();
+            SlowService stopping = null;
+            List<ServiceAction> done = ServiceTrimmer.RestoreLocked(new List<string> { "RamOptimiserTestA" }, () => budget - clock.Now,
+                n => stopping = new SlowService(clock, waits));
+            string trace = done.Count == 0 ? "no action" : done[0].Outcome + ": " + done[0].Message + "; starts " + stopping.Starts
+                + "; waits " + waits.Count;
+            Check("no time left: a service that has just stopped is not sent a start",
+                done.Count == 1 && stopping.Starts == 0 && waits.Count == 1, trace);
+            Check("no time left: it is recorded as not started because the time ran out",
+                done.Count == 1 && done[0].Outcome == ServiceOutcome.StartTimedOut
+                && done[0].Message == "not started: the time for the restore ran out", trace);
+
+            // A stopped service whose start takes the whole budget: one status read decides, no wait of zero.
+            foreach (bool atOnce in new[] { true, false })
+            {
+                budget = TimeSpan.FromSeconds(5);
+                clock = new FakeClock();
+                waits = new List<TimeSpan>();
+                SlowService slow = null;
+                done = ServiceTrimmer.RestoreLocked(new List<string> { "RamOptimiserTestB" }, () => budget - clock.Now, n =>
+                {
+                    slow = new SlowService(clock, waits) { StartCost = budget, StartsAtOnce = atOnce };
+                    slow.Status = System.ServiceProcess.ServiceControllerStatus.Stopped;
+                    return slow;
+                });
+                trace = done.Count == 0 ? "no action" : done[0].Outcome + ": " + done[0].Message + "; starts " + slow.Starts
+                    + "; waits " + waits.Count;
+                Check("no time left after start (running " + atOnce + "): sent one start, no wait",
+                    done.Count == 1 && slow.Starts == 1 && waits.Count == 0, trace);
+                Check("no time left after start (running " + atOnce + "): the status read decides",
+                    done.Count == 1 && (atOnce ? done[0].Outcome == ServiceOutcome.Started
+                        : done[0].Outcome == ServiceOutcome.StartTimedOut && done[0].Message == "still starting when the time for the restore ran out"),
+                    trace);
+            }
         }
 
         /// <summary>A fake clock the fake services below spend: each wait costs the whole time it is given.</summary>
@@ -102,7 +149,16 @@ namespace RamOptimiser.Tests
                 Status = System.ServiceProcess.ServiceControllerStatus.StopPending;
             }
 
-            public void Start() { clock.Now += StartCost; Status = System.ServiceProcess.ServiceControllerStatus.StartPending; }
+            public int Starts;
+            /// <summary>Start leaves it Running at once instead of StartPending.</summary>
+            public bool StartsAtOnce;
+
+            public void Start()
+            {
+                Starts++;
+                clock.Now += StartCost;
+                Status = StartsAtOnce ? System.ServiceProcess.ServiceControllerStatus.Running : System.ServiceProcess.ServiceControllerStatus.StartPending;
+            }
             public void Continue() { }
 
             public void WaitForStatus(System.ServiceProcess.ServiceControllerStatus want, TimeSpan timeout)
@@ -273,7 +329,61 @@ namespace RamOptimiser.Tests
             PowerCleanRecovery.RunSteps(() => order += "a,", () => order += "b,");
             Check("exit teardown: steps that work run once each, in order", order == "a,b,", order);
 
+            ExitLockOrder();
             ShellWiring();
+        }
+
+        /// <summary>
+        /// The single-instance lock outlives Exit's restore thread, as in EmergencyCleanup: a copy started while services
+        /// are still being restored must not adopt the same journal and start them too. With nothing to restore the
+        /// lock goes at once; whatever fails, it is released exactly once.
+        /// </summary>
+        static void ExitLockOrder()
+        {
+            string order = "";
+            int starts = 0;
+            PowerCleanRecovery.RestoreThenRelease(() => false, () => order += "restore,", () => order += "release,", t => starts++);
+            Check("exit lock: nothing to restore, released at once and no thread", order == "release," && starts == 0, order);
+
+            order = "";
+            System.Threading.ThreadStart body = null;
+            PowerCleanRecovery.RestoreThenRelease(() => true, () => order += "restore,", () => order += "release,", t => body = t);
+            Check("exit lock: kept while the restore thread has not run", order == "" && body != null, order);
+            if (body != null) body();
+            Check("exit lock: released after the restore finished", order == "restore,release,", order);
+
+            order = "";
+            body = null;
+            PowerCleanRecovery.RestoreThenRelease(() => true, () => { order += "restore,"; throw new InvalidOperationException("restore failed"); },
+                () => order += "release,", t => body = t);
+            Exception escaped = null;
+            try { if (body != null) body(); }
+            catch (Exception ex) { escaped = ex; }
+            Check("exit lock: a failing restore still releases, and nothing escapes the thread",
+                order == "restore,release," && escaped == null, order + (escaped == null ? "" : "; " + escaped.Message));
+
+            order = "";
+            escaped = null;
+            var noThread = new OutOfMemoryException("no thread");
+            try
+            {
+                PowerCleanRecovery.RestoreThenRelease(() => true, () => order += "restore,", () => order += "release,",
+                    t => { throw noThread; });
+            }
+            catch (Exception ex) { escaped = ex; }
+            Check("exit lock: a thread that cannot start releases once and reports",
+                order == "release," && ReferenceEquals(escaped, noThread), order);
+
+            order = "";
+            escaped = null;
+            var badRead = new InvalidOperationException("stopped list unreadable");
+            try
+            {
+                PowerCleanRecovery.RestoreThenRelease(() => { throw badRead; }, () => order += "restore,", () => order += "release,",
+                    t => order += "start,");
+            }
+            catch (Exception ex) { escaped = ex; }
+            Check("exit lock: a failing decision releases once and reports", order == "release," && ReferenceEquals(escaped, badRead), order);
         }
 
         // ---------------------------------------------------------------- wiring of the fatal and exit paths
@@ -311,6 +421,14 @@ namespace RamOptimiser.Tests
             int restore = exit.IndexOf("RestoreServicesOnExit(", StringComparison.Ordinal);
             Check("wiring: Exit tears down through TeardownThenRestore, step by step, then restores",
                 teardown >= 0 && steps > teardown && dispose > steps && restore > dispose, exit);
+            // The lock is not a teardown step: RestoreServicesOnExit hands it to RestoreThenRelease, which lets it go
+            // only after the restore thread has finished.
+            string onExit = Body(shell, "static void RestoreServicesOnExit(");
+            Check("wiring: Exit does not dispose the single-instance lock before the restore",
+                exit.IndexOf("instance.Dispose()", StringComparison.Ordinal) < 0
+                && exit.IndexOf("RestoreServicesOnExit(service, elevated, ", StringComparison.Ordinal) > dispose, exit);
+            Check("wiring: RestoreServicesOnExit releases the lock through RestoreThenRelease",
+                onExit.Contains("PowerCleanRecovery.RestoreThenRelease(") && onExit.Contains("release"), onExit);
 
             string emergency = Body(shell, "public void EmergencyCleanup()");
             int bounded = emergency.IndexOf("ServiceTrimmer.TryRestoreBounded(PowerCleanRecovery.EmergencyLockWait, PowerCleanRecovery.EmergencyBudget)",

@@ -1223,9 +1223,11 @@ namespace RamOptimiser
         /// <summary>
         /// raw without control characters (terminal escape sequences start with one), format characters (bidi
         /// overrides, zero-width marks, the soft hyphen, and the supplementary ones such as tag characters), line and
-        /// paragraph separators and unpaired surrogates. Spaces other than U+0020 (no-break, figure, narrow no-break,
-        /// ideographic and the rest of SpaceSeparator) become an ASCII space, so a label shows one kind of space.
-        /// Walks code points, so a surrogate pair is judged as one character. Null gives "". Pure.
+        /// paragraph separators, unpaired surrogates, and every other code point Unicode makes Default_Ignorable
+        /// (drawn as nothing whatever its category: the combining grapheme joiner, variation selectors, Hangul fillers
+        /// and reserved ones such as U+2065). Spaces other than U+0020 (no-break, figure, narrow no-break, ideographic,
+        /// the rest of SpaceSeparator, and the braille blank U+2800) become an ASCII space, so a label shows one kind
+        /// of space. Walks code points, so a surrogate pair is judged as one character. Null gives "". Pure.
         /// </summary>
         public static string Visible(string raw)
         {
@@ -1236,8 +1238,9 @@ namespace RamOptimiser
             {
                 int width;
                 UnicodeCategory cat = CategoryAt(raw, i, out width);
-                if (LookAlikeSpace(raw[i], cat)) sb.Append(' ');
-                else if (!Hidden(cat)) sb.Append(raw, i, width);
+                int cp = CodePointAt(raw, i, width);
+                if (LookAlikeSpace(cp, cat)) sb.Append(' ');
+                else if (!Hidden(cat) && !Ignorable(cp)) sb.Append(raw, i, width);
                 i += width;
             }
             return sb.ToString();
@@ -1259,7 +1262,8 @@ namespace RamOptimiser
             {
                 int width;
                 UnicodeCategory cat = CategoryAt(raw, i, out width);
-                if (Hidden(cat) || LookAlikeSpace(raw[i], cat)) sb.Append(mark);
+                int cp = CodePointAt(raw, i, width);
+                if (Hidden(cat) || Ignorable(cp) || LookAlikeSpace(cp, cat)) sb.Append(mark);
                 else sb.Append(raw, i, width);
                 i += width;
             }
@@ -1324,10 +1328,39 @@ namespace RamOptimiser
                 || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator;
         }
 
-        /// <summary>A space that is not U+0020 (every SpaceSeparator is in the BMP, so one unit is enough).</summary>
-        static bool LookAlikeSpace(char c, UnicodeCategory cat)
+        /// <summary>A space that is not U+0020, or the braille blank U+2800 (a symbol that draws as a space).</summary>
+        static bool LookAlikeSpace(int cp, UnicodeCategory cat)
         {
-            return cat == UnicodeCategory.SpaceSeparator && c != ' ';
+            return (cat == UnicodeCategory.SpaceSeparator && cp != ' ') || cp == 0x2800;
+        }
+
+        /// <summary>The code point at i, width units long (as CategoryAt read it); an unpaired surrogate is its unit.</summary>
+        static int CodePointAt(string s, int i, int width)
+        {
+            return width == 2 ? char.ConvertToUtf32(s[i], s[i + 1]) : s[i];
+        }
+
+        /// <summary>
+        /// Unicode's Default_Ignorable_Code_Point ranges (DerivedCoreProperties.txt, Unicode 18.0), checked by code
+        /// point because many are not Cf: U+034F and the variation selectors are Mn, the Hangul fillers Lo, and the
+        /// reserved ones (U+2065, U+FFF0..FFF8, most of U+E0000..E0FFF) Cn, so a future character there stays hidden
+        /// too. Pairs of first and last code point, in order.
+        /// </summary>
+        static readonly int[] IgnorableRanges =
+        {
+            0x00AD, 0x00AD, 0x034F, 0x034F, 0x061C, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180F,
+            0x200B, 0x200F, 0x202A, 0x202E, 0x2060, 0x206F, 0x3164, 0x3164, 0xFE00, 0xFE0F, 0xFEFF, 0xFEFF,
+            0xFFA0, 0xFFA0, 0xFFF0, 0xFFF8, 0x1BCA0, 0x1BCA3, 0x1D173, 0x1D17A, 0xE0000, 0xE0FFF
+        };
+
+        static bool Ignorable(int cp)
+        {
+            for (int k = 0; k < IgnorableRanges.Length; k += 2)
+            {
+                if (cp < IgnorableRanges[k]) return false;
+                if (cp <= IgnorableRanges[k + 1]) return true;
+            }
+            return false;
         }
     }
 
