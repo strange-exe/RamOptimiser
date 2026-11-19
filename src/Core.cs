@@ -1251,7 +1251,9 @@ namespace RamOptimiser
         /// counts as one). For text that is an identity check, such as the Startup tab's 'Runs &lt;path&gt;' line:
         /// dropping hidden characters there would let a crafted path read exactly like a protected one, and a no-break
         /// space in "Program Files" reads like the real one, while a visible mark ('?' cannot be in a Windows path)
-        /// shows that it is not. Only U+0020 is kept as a space. Null gives "". Pure.
+        /// shows that it is not. Only U+0020 is kept as a space. Code points the runtime reads as unassigned are marked
+        /// too: .NET Framework 4.8's category table predates format characters such as U+13430-1343F, U+0890-0891,
+        /// U+08E2 and U+110CD, so they would otherwise pass as visible. Null gives "". Pure.
         /// </summary>
         public static string Marked(string raw, string mark)
         {
@@ -1263,7 +1265,7 @@ namespace RamOptimiser
                 int width;
                 UnicodeCategory cat = CategoryAt(raw, i, out width);
                 int cp = CodePointAt(raw, i, width);
-                if (Hidden(cat) || Ignorable(cp) || LookAlikeSpace(cp, cat)) sb.Append(mark);
+                if (Hidden(cat) || Ignorable(cp) || LookAlikeSpace(cp, cat) || cat == UnicodeCategory.OtherNotAssigned) sb.Append(mark);
                 else sb.Append(raw, i, width);
                 i += width;
             }

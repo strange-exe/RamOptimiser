@@ -38,7 +38,53 @@ namespace RamOptimiser.Tests
             CleanLogTextTests();
             SoftHyphenAndSpaces();
             DefaultIgnorables();
+            Unassigned();
             return failed;
+        }
+
+        // ---------------------------------------------------------------- unassigned code points in the identity line
+
+        /// <summary>
+        /// .NET Framework 4.8's category table predates format characters added since (the Egyptian hieroglyph format
+        /// controls U+13430-1343F, the Arabic pound and piastre marks above U+0890-0891, U+08E2, the Kaithi number sign
+        /// U+110CD), so it reads them as unassigned (Cn), not Cf. The identity line marks every code point it reads as
+        /// unassigned; labels (Visible) are unchanged. U+E1000 is unassigned too, just past the variation selectors.
+        /// </summary>
+        static void Unassigned()
+        {
+            int[] unassigned = { 0x13430, 0x13438, 0x13439, 0x1343F, 0x0890, 0x0891, 0x08E2, 0x110CD, 0xE1000 };
+            foreach (int cp in unassigned)
+            {
+                string s = char.ConvertFromUtf32(cp);
+                string hex = cp.ToString("X4", CultureInfo.InvariantCulture);
+                int width;
+                UnicodeCategory cat = SafeText.CategoryAt(s, 0, out width);
+                string m = SafeText.Marked(@"C:\Prog" + s + @"ram Files\x.exe", "?");
+                Check("unassigned U+" + hex + " (" + cat + "): marked once in the identity line", m == @"C:\Prog?ram Files\x.exe", m);
+            }
+            // Visible stays as it is: E1000 is not Default_Ignorable and not hidden by category, so a label keeps it.
+            string e1000 = char.ConvertFromUtf32(0xE1000);
+            Check("unassigned U+E1000: labels are unchanged", SafeText.Visible("a" + e1000 + "b") == "a" + e1000 + "b");
+
+            // Assigned characters beside them stay: an Egyptian hieroglyph (U+13000), an Arabic letter (U+08A0), a Kaithi
+            // letter (U+1108D) and a plain accented letter.
+            foreach (int cp in new[] { 0x13000, 0x1342E, 0x08A0, 0x1108D, 0x00E9 })
+            {
+                string s = char.ConvertFromUtf32(cp);
+                string hex = cp.ToString("X4", CultureInfo.InvariantCulture);
+                int width;
+                UnicodeCategory cat = SafeText.CategoryAt(s, 0, out width);
+                string text = @"C:\Prog" + s + @"ram Files\x.exe";
+                Check("assigned U+" + hex + " (" + cat + "): not marked", cat != UnicodeCategory.OtherNotAssigned && SafeText.Marked(text, "?") == text,
+                    SafeText.Marked(text, "?"));
+            }
+
+            KnownItem discord = StartupKnowledge.FindApp("Discord.exe");
+            var k = new StartupApp { Source = StartupSource.UserRun, Name = "Discord", Known = discord,
+                ExePath = @"C:\Prog" + char.ConvertFromUtf32(0x13430) + @"ram Files\Discord\Discord.exe" };
+            string d = AppText.AppDetail(k, Win);
+            Check("startup detail: an unassigned format character in the path does not read as Program Files",
+                !d.Contains(@"Runs C:\Program Files\Discord\Discord.exe") && d.Contains(@"Runs C:\Prog?ram Files\Discord\Discord.exe"), d);
         }
 
         // ---------------------------------------------------------------- fix-up: invisible characters outside Cf/Cc
@@ -71,7 +117,7 @@ namespace RamOptimiser.Tests
 
             // Visible characters next to those ranges stay as they are: an accent, a Hangul syllable, an emoji, braille
             // with dots, and code points just outside the ignorable ranges.
-            int[] shown = { 0x0301, 0x1161, 0x17B6, 0x180A, 0x2801, 0x3165, 0xAC00, 0xFE10, 0xFFA1, 0x1F600, 0xE1000 };
+            int[] shown = { 0x0301, 0x1161, 0x17B6, 0x180A, 0x2801, 0x3165, 0xAC00, 0xFE10, 0xFFA1, 0x1F600 };
             foreach (int cp in shown)
             {
                 string s = char.ConvertFromUtf32(cp);

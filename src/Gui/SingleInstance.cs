@@ -11,7 +11,9 @@ namespace RamOptimiser.Gui
     /// <summary>
     /// One instance per user per session. The first instance owns a named mutex and waits on a named event;
     /// a later instance signals that event (SignalFirstInstance) and exits, and the first raises
-    /// ActivationRequested on a background thread (marshal to the UI thread before touching windows).
+    /// ActivationRequested on a background thread (marshal to the UI thread before touching windows). When a
+    /// handler takes the request, the first instance also sets a second named event, the acknowledgement
+    /// (SignalAndWaitForAck); a copy that is exiting has no handler and sends none (SecondLaunch).
     ///
     /// Both kernel objects get an explicit security descriptor: the current user as owner, full access for
     /// that user only, and a Medium integrity label. Without the label, objects created by the elevated
@@ -30,6 +32,7 @@ namespace RamOptimiser.Gui
 
         readonly SafeWaitHandle mutex;
         readonly SafeWaitHandle activate;
+        readonly SafeWaitHandle ack;        // null when the acknowledgement name is unusable (CreateAck)
         readonly ManualResetEvent stop = new ManualResetEvent(false);
         readonly Thread waiter;
         readonly bool isFirst;
@@ -123,6 +126,8 @@ namespace RamOptimiser.Gui
                     }
                     isFirst = error != GuiNative.ERROR_ALREADY_EXISTS;
                 }
+                // Last, so the throws above have nothing more to close; optional, so it never throws itself.
+                ack = CreateAck(ref sa, sid, AckName(id));
             }
             finally { GuiNative.LocalFree(sd); }
 
@@ -150,6 +155,28 @@ namespace RamOptimiser.Gui
             return create();
         }
 
+        /// <summary>
+        /// The acknowledgement event: made like the activation event (same descriptor, opened with the same rights,
+        /// trusted only when owned by the user), but optional. A name that fails any of those checks gives null:
+        /// activation then works as before, only unacknowledged, and a later launch exits as it always did.
+        /// </summary>
+        static SafeWaitHandle CreateAck(ref GuiNative.SECURITY_ATTRIBUTES sa, string sid, string name)
+        {
+            SafeWaitHandle handle = GuiNative.CreateEvent(ref sa, false, false, name);
+            if (handle.IsInvalid)
+            {
+                handle.Dispose();
+                handle = GuiNative.OpenEvent(SecurityNative.SYNCHRONIZE | GuiNative.EVENT_MODIFY_STATE
+                    | SecurityNative.READ_CONTROL, false, name);
+            }
+            if (handle.IsInvalid || !IsTrustedOwner(OwnerSidOf(handle), sid))
+            {
+                handle.Dispose();
+                return null;
+            }
+            return handle;
+        }
+
         static SingleInstanceNameTakenException Taken(int error, string why)
         {
             return new SingleInstanceNameTakenException(error,
@@ -166,6 +193,7 @@ namespace RamOptimiser.Gui
 
         public static string MutexName(string id) { return NamePrefix + id; }
         public static string EventName(string id) { return NamePrefix + id + "-activate"; }
+        public static string AckName(string id) { return NamePrefix + id + "-ack"; }
 
         public static string CurrentUserSid()
         {
@@ -199,6 +227,27 @@ namespace RamOptimiser.Gui
             return GuiNative.SetEvent(activate);
         }
 
+        /// <summary>
+        /// Asks the first instance to show its window and waits up to timeout for its acknowledgement, which it sends
+        /// only when an ActivationRequested handler took the request. NoAnswer: no handler (the copy is exiting) or
+        /// an older copy that never acknowledges. Unconfirmed: this is the first instance, the signal failed, or the
+        /// acknowledgement event is unusable (the request is still sent then, as SignalFirstInstance does).
+        /// </summary>
+        public ActivationAnswer SignalAndWaitForAck(TimeSpan timeout)
+        {
+            if (isFirst || Volatile.Read(ref disposed) != 0) return ActivationAnswer.Unconfirmed;
+            if (ack == null)
+            {
+                SignalFirstInstance();
+                return ActivationAnswer.Unconfirmed;
+            }
+            // An answer left set for a launch that stopped waiting is not an answer to this one.
+            GuiNative.ResetEvent(ack);
+            if (!GuiNative.SetEvent(activate)) return ActivationAnswer.Unconfirmed;
+            using (var answered = new HandleWaitHandle(ack))
+                return answered.WaitOne(timeout) ? ActivationAnswer.Acknowledged : ActivationAnswer.NoAnswer;
+        }
+
         void WaitLoop()
         {
             // An exception on this thread would end the process (WaitAny throws UnauthorizedAccessException on
@@ -206,6 +255,7 @@ namespace RamOptimiser.Gui
             try
             {
                 using (var activateWait = new HandleWaitHandle(activate))
+                using (HandleWaitHandle answer = ack == null ? null : new HandleWaitHandle(ack))
                 {
                     var handles = new WaitHandle[] { stop, activateWait };
                     while (WaitHandle.WaitAny(handles) == 1)
@@ -216,6 +266,9 @@ namespace RamOptimiser.Gui
                             handler = activationRequested;
                             if (handler == null) { pendingActivation = true; continue; }
                         }
+                        // A handler takes the request: tell the launch that asked, so it can exit. Without one (the
+                        // copy is exiting) nothing is sent, and that launch waits for the lock instead.
+                        if (answer != null) GuiNative.SetEvent(answer.SafeWaitHandle);
                         try { handler(this, EventArgs.Empty); }
                         catch (Exception ex) { Trace.WriteLine("ActivationRequested handler failed: " + ex); }
                     }
@@ -236,6 +289,7 @@ namespace RamOptimiser.Gui
             bool waiterGone = waiter == null || (waiter != Thread.CurrentThread && waiter.Join(2000));
             mutex.Dispose();
             activate.Dispose();
+            if (ack != null) ack.Dispose();
             if (waiterGone) stop.Dispose();
         }
 

@@ -54,9 +54,25 @@ namespace RamOptimiser.App
             {
                 // Let the running copy bring its window to the front (this launch holds the foreground right).
                 AppNative.AllowSetForegroundWindow(AppNative.ASFW_ANY);
-                instance.SignalFirstInstance();
-                instance.Dispose();
-                return 0;
+                // A copy that is exiting (restoring the services Power Clean stopped) keeps the lock but no longer
+                // answers: wait for it, bounded, and start as the first instance once it lets go. Nothing is relaunched.
+                SecondLaunchOutcome outcome;
+                SingleInstance taken;
+                try
+                {
+                    outcome = SecondLaunch.Run(instance, () => new SingleInstance(), SecondLaunch.AckWait, SecondLaunch.ReleaseWait, SecondLaunch.RetryEvery, out taken);
+                }
+                catch (Exception ex)
+                {
+                    ErrorLog.TryWrite(ErrorLog.DefaultPath, "waiting for the running copy to close failed; this launch exits", ex);
+                    return 0;
+                }
+                if (outcome != SecondLaunchOutcome.BecameFirst)
+                {
+                    if (outcome == SecondLaunchOutcome.StillHeld) ErrorLog.TryWrite(ErrorLog.DefaultPath, SecondLaunch.StillHeldLine, null);
+                    return 0;
+                }
+                instance = taken;
             }
 
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };

@@ -122,6 +122,9 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
     notifications off). Start with Windows is left as it is, and services Power Clean stopped stay stopped until you
     restore them or quit.
 - `RamOptimiser.exe --tray` starts hidden in the tray. Launching it again brings the open window to the front.
+  If the open copy is closing (still starting again the services Power Clean stopped), the new launch waits up to a
+  minute for it to finish and then opens on its own; if it is still closing after that, the launch gives up and notes
+  it in `error.log`.
 - Settings are stored in `%LOCALAPPDATA%\RamOptimiser\settings.ini`. Crashes are logged to `error.log` in the same folder.
   The app refuses to use that folder if it is a link (junction or symbolic link), if `settings.ini` is a link
   or has a second hard link, or if the folder is owned by anyone other than you, Administrators or SYSTEM.

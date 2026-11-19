@@ -429,6 +429,16 @@ namespace RamOptimiser.Tests
                 && exit.IndexOf("RestoreServicesOnExit(service, elevated, ", StringComparison.Ordinal) > dispose, exit);
             Check("wiring: RestoreServicesOnExit releases the lock through RestoreThenRelease",
                 onExit.Contains("PowerCleanRecovery.RestoreThenRelease(") && onExit.Contains("release"), onExit);
+            // The release must dispose the instance captured before teardown: the teardown step sets the field to null,
+            // so a release that reads the field would dispose nothing and leave the lock to process exit.
+            int held = exit.IndexOf("SingleInstance held = instance;", StringComparison.Ordinal);
+            int relAt = exit.IndexOf("Action release = ", StringComparison.Ordinal);
+            int relEnd = relAt < 0 ? -1 : exit.IndexOf("};", relAt, StringComparison.Ordinal);
+            string release = relEnd < 0 ? "" : exit.Substring(relAt, relEnd + 2 - relAt);
+            Check("wiring: the lock release disposes the instance held before teardown, not the field",
+                held >= 0 && relAt > held && teardown > relAt && release.Contains("held.Dispose()")
+                && release.Replace("Action release = ", "").IndexOf("instance", StringComparison.Ordinal) < 0
+                && exit.IndexOf("held =", held + "SingleInstance held = instance;".Length, StringComparison.Ordinal) < 0, release);
 
             string emergency = Body(shell, "public void EmergencyCleanup()");
             int bounded = emergency.IndexOf("ServiceTrimmer.TryRestoreBounded(PowerCleanRecovery.EmergencyLockWait, PowerCleanRecovery.EmergencyBudget)",

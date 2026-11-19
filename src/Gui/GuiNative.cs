@@ -36,6 +36,10 @@ namespace RamOptimiser.Gui
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool SetEvent(SafeWaitHandle handle);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ResetEvent(SafeWaitHandle handle);
+
         [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string sddl, uint revision,

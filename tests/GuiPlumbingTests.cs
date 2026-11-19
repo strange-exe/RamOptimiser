@@ -1170,7 +1170,7 @@ namespace RamOptimiser.Tests
         }
 
         /// <summary>Creates a named event with the given DACL, as a squatting process would.</summary>
-        static SafeWaitHandle CreateEventWithSddl(string name, string sddl)
+        internal static SafeWaitHandle CreateEventWithSddl(string name, string sddl)
         {
             IntPtr sd;
             if (!GuiNative.ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, GuiNative.SDDL_REVISION_1, out sd, IntPtr.Zero))
