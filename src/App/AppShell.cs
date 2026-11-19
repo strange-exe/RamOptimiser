@@ -346,6 +346,9 @@ namespace RamOptimiser.App
         /// <summary>Releases everything that outlives the process if left behind: the tray icon above all.</summary>
         public void Exit()
         {
+            // First of all: the activation handler goes only at teardown step 8, and a launch answered before then
+            // would exit while this copy closes. From here on a launch gets no answer and waits for the lock instead.
+            if (instance != null) instance.BeginClosing();
             if (exiting) return;
             // Before anything is torn down: a threshold set in the last 400 ms is saved, not dropped.
             try { FlushThreshold(); }
@@ -464,6 +467,8 @@ namespace RamOptimiser.App
         /// </summary>
         public void EmergencyCleanup()
         {
+            // First: a dying copy answers no launch (one may ask while the bounded restore below runs).
+            try { if (instance != null) instance.BeginClosing(); } catch (Exception) { }
             // SystemEvents is static: a handler left attached would outlive the shell.
             try { SystemEvents.PowerModeChanged -= OnPowerModeChanged; } catch (Exception) { }
             try { StopHotkey(); } catch (Exception) { }

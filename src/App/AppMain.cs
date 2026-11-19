@@ -18,6 +18,7 @@ namespace RamOptimiser.App
     public static class AppMain
     {
         static AppShell shell;
+        static SingleInstance lockInstance;   // the lock this copy runs with, once it goes on to start up
         static int fatalShown;
 
         [STAThread]
@@ -75,6 +76,7 @@ namespace RamOptimiser.App
                 instance = taken;
             }
 
+            lockInstance = instance;
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             app.DispatcherUnhandledException += OnDispatcherUnhandledException;
             try
@@ -165,9 +167,15 @@ namespace RamOptimiser.App
             if (shell != null) shell.EmergencyCleanup();
         }
 
-        /// <summary>Logs, then tells the user in plain words. Shown once, however many errors follow.</summary>
+        /// <summary>
+        /// Stops answering launches, logs, then tells the user in plain words. Shown once, however many errors follow.
+        /// Every fatal path (FailOnUiThread, OnDomainUnhandledException, a failed start-up) comes through here.
+        /// </summary>
         static void Fatal(string context, Exception ex)
         {
+            // The handler is still subscribed while the box is up (or none was ever added, when start-up failed), so
+            // a launch would be answered by a copy about to close and exit with it. It waits for the lock instead.
+            StopAnswering();
             bool logged = ErrorLog.TryWrite(ErrorLog.DefaultPath, context, ex);
             if (Interlocked.Exchange(ref fatalShown, 1) != 0) return;
             string text = "RAM Optimiser ran into a problem and has to close.\n\n"
@@ -175,6 +183,13 @@ namespace RamOptimiser.App
                 + (logged ? "Details were saved to " + ErrorLog.DefaultPath : "The details could not be saved to a log file.");
             try { MessageBox.Show(text, AppText.AppName, MessageBoxButton.OK, MessageBoxImage.Error); }
             catch (Exception) { }
+        }
+
+        /// <summary>Marks this copy's lock as closing (SingleInstance.BeginClosing); nothing when it has none.</summary>
+        static void StopAnswering()
+        {
+            SingleInstance running = lockInstance;
+            if (running != null) running.BeginClosing();
         }
     }
 }

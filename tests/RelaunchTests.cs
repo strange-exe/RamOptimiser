@@ -177,13 +177,15 @@ namespace RamOptimiser.Tests
             }
 
             // Launches asking at the same moment: each gets the answer, even when their signals merge into one wake
-            // of the waiter. The first request's handler holds the waiter until both later launches have signalled.
+            // of the waiter. The first request's handler holds the waiter until both later launches have sent their
+            // requests (counted through the Signalled hook), so the two signals always merge into one wake.
             string busyId = Unique();
             using (var gate = new ManualResetEvent(false))
+            using (var bothSent = new CountdownEvent(2))
             using (var first = new SingleInstance(busyId))
             {
                 int calls = 0;
-                first.ActivationRequested += (s, e) => { if (Interlocked.Increment(ref calls) == 1) gate.WaitOne(5000); };
+                first.ActivationRequested += (s, e) => { if (Interlocked.Increment(ref calls) == 1) gate.WaitOne(10000); };
                 using (var opener = new SingleInstance(busyId))
                     Check("ack together: the first request is answered", opener.SignalAndWaitForAck(TimeSpan.FromSeconds(3)) == ActivationAnswer.Acknowledged);
                 var answers = new ActivationAnswer[2];
@@ -194,16 +196,22 @@ namespace RamOptimiser.Tests
                     askers[n] = new Thread(() =>
                     {
                         using (var asker = new SingleInstance(busyId))
+                        {
+                            asker.Signalled = () => bothSent.Signal();
                             answers[slot] = asker.SignalAndWaitForAck(TimeSpan.FromSeconds(3));
+                        }
                     }) { IsBackground = true };
                     askers[n].Start();
                 }
-                Thread.Sleep(400);
+                bool sent = bothSent.Wait(10000);
                 gate.Set();
                 foreach (Thread t in askers) t.Join(10000);
+                Check("ack together: both requests were sent while the waiter was held", sent && Volatile.Read(ref calls) >= 1);
                 Check("ack together: every launch is answered", answers[0] == ActivationAnswer.Acknowledged && answers[1] == ActivationAnswer.Acknowledged,
                     answers[0] + " / " + answers[1]);
             }
+
+            ClosingObjectTests();
 
             // An older running copy (lock and activation event, no acknowledgement event): it never answers, so the
             // launch does not wait for it. The request is still sent, and the answer is Unconfirmed: exit as before.
@@ -258,6 +266,83 @@ namespace RamOptimiser.Tests
                 }
                 finally { if (first != null) first.Dispose(); }
             }
+        }
+
+        // ---------------------------------------------------------------- a copy that began closing, real objects
+
+        static void ClosingObjectTests()
+        {
+            // Exit has begun (BeginClosing is its first step) but the handler is still subscribed, as it is until
+            // teardown step 8: no answer, so the launch waits for the lock, and the request is not raised either.
+            string closingId = Unique();
+            using (var first = new SingleInstance(closingId))
+            {
+                int raised = 0;
+                first.ActivationRequested += (s, e) => Interlocked.Increment(ref raised);
+                first.BeginClosing();
+                first.BeginClosing();
+                using (var second = new SingleInstance(closingId))
+                {
+                    var watch = Stopwatch.StartNew();
+                    ActivationAnswer a = second.SignalAndWaitForAck(TimeSpan.FromMilliseconds(500));
+                    Check("closing: a closing copy with its handler still subscribed does not answer",
+                        a == ActivationAnswer.NoAnswer && watch.ElapsedMilliseconds >= 450, a + " after " + watch.ElapsedMilliseconds + " ms");
+                }
+                Thread.Sleep(300);
+                Check("closing: its handler is not raised", Volatile.Read(ref raised) == 0, raised + " call(s)");
+            }
+
+            // A copy dying before any handler was added (start-up failed, the error box is up): no answer, and
+            // nothing is kept for a handler added later.
+            string earlyId = Unique();
+            using (var first = new SingleInstance(earlyId))
+            {
+                first.BeginClosing();
+                using (var second = new SingleInstance(earlyId))
+                {
+                    var watch = Stopwatch.StartNew();
+                    ActivationAnswer a = second.SignalAndWaitForAck(TimeSpan.FromMilliseconds(500));
+                    Check("closing: a copy closing before any handler does not answer",
+                        a == ActivationAnswer.NoAnswer && watch.ElapsedMilliseconds >= 450, a + " after " + watch.ElapsedMilliseconds + " ms");
+                }
+                int raised = 0;
+                first.ActivationRequested += (s, e) => Interlocked.Increment(ref raised);
+                Thread.Sleep(300);
+                Check("closing: no kept request is raised later", Volatile.Read(ref raised) == 0, raised + " call(s)");
+            }
+
+            // The replay of a kept request reaches the first handler but sends no answer: nobody is waiting for one,
+            // and a stray answer could reach a later launch just before this copy starts closing.
+            string replayId = Unique();
+            using (var raised = new ManualResetEvent(false))
+            using (var first = new SingleInstance(replayId))
+            {
+                using (var second = new SingleInstance(replayId))
+                    Check("replay: the request before any handler is answered",
+                        second.SignalAndWaitForAck(TimeSpan.FromSeconds(2)) == ActivationAnswer.Acknowledged);
+                using (EventWaitHandle answer = EventWaitHandle.OpenExisting(SingleInstance.AckName(replayId)))
+                {
+                    answer.Reset();
+                    first.ActivationRequested += (s, e) => raised.Set();
+                    Check("replay: the kept request reaches the first handler", raised.WaitOne(5000));
+                    Check("replay: the replay sends no answer", !answer.WaitOne(0));
+                }
+                using (var later = new SingleInstance(replayId))
+                    Check("replay: a later launch is still answered",
+                        later.SignalAndWaitForAck(TimeSpan.FromSeconds(3)) == ActivationAnswer.Acknowledged);
+            }
+
+            // After Dispose (Exit's release ran first, a fatal path follows): still safe, and repeatable.
+            var gone = new SingleInstance(Unique());
+            gone.Dispose();
+            Exception escaped = null;
+            try
+            {
+                gone.BeginClosing();
+                gone.BeginClosing();
+            }
+            catch (Exception ex) { escaped = ex; }
+            Check("closing: BeginClosing after Dispose is safe", escaped == null, escaped == null ? null : escaped.GetType().Name);
         }
 
         /// <summary>A named mutex with the given security descriptor, as an older copy of the app made its lock.</summary>
@@ -377,6 +462,69 @@ namespace RamOptimiser.Tests
             int handed = body.IndexOf("instance = taken;", StringComparison.Ordinal);
             Check("wiring: BecameFirst hands the taken lock to the shell", became >= 0 && handed > became
                 && body.IndexOf("instance = taken;", handed + 1, StringComparison.Ordinal) < 0, body);
+
+            ClosingWiring();
+        }
+
+        /// <summary>The body of the method whose declaration starts with signature (up to its closing brace at that indent).</summary>
+        static string Body(string source, string signature)
+        {
+            int at = source.IndexOf(signature, StringComparison.Ordinal);
+            if (at < 0) return "";
+            int end = source.IndexOf("\n        }", at, StringComparison.Ordinal);
+            return end < 0 ? source.Substring(at) : source.Substring(at, end - at);
+        }
+
+        static int Count(string text, string part)
+        {
+            return string.IsNullOrEmpty(part) ? 0 : (text.Length - text.Replace(part, "").Length) / part.Length;
+        }
+
+        /// <summary>
+        /// Every way out of a running copy stops answering before anything else: Exit before exiting = true (its handler
+        /// goes only at teardown step 8), EmergencyCleanup first, and Fatal before its log line and error box.
+        /// </summary>
+        static void ClosingWiring()
+        {
+            string shell = Source("App", "AppShell.cs");
+            string exit = Body(shell, "public void Exit()");
+            int closing = exit.IndexOf("instance.BeginClosing();", StringComparison.Ordinal);
+            int flush = exit.IndexOf("FlushThreshold()", StringComparison.Ordinal);
+            int exiting = exit.IndexOf("exiting = true;", StringComparison.Ordinal);
+            Check("closing wiring: Exit begins closing first, before exiting = true", closing >= 0 && flush > closing && exiting > closing, exit);
+
+            string emergency = Body(shell, "public void EmergencyCleanup()");
+            int eClosing = emergency.IndexOf("instance.BeginClosing();", StringComparison.Ordinal);
+            bool firstStep = eClosing >= 0;
+            foreach (string step in new[] { "PowerModeChanged", "StopHotkey()", "service.Dispose()", "CloseFlyout()", "tray.Dispose()",
+                "TryRestoreBounded(", "instance.Dispose()" })
+            {
+                int at = emergency.IndexOf(step, StringComparison.Ordinal);
+                if (at < 0 || at < eClosing) firstStep = false;
+            }
+            Check("closing wiring: EmergencyCleanup begins closing before any other step", firstStep, emergency);
+
+            string main = Source("App", "AppMain.cs");
+            string fatal = Body(main, "static void Fatal(string context, Exception ex)");
+            int stop = fatal.IndexOf("StopAnswering();", StringComparison.Ordinal);
+            int log = fatal.IndexOf("ErrorLog.TryWrite(", StringComparison.Ordinal);
+            int box = fatal.IndexOf("MessageBox.Show(", StringComparison.Ordinal);
+            Check("closing wiring: Fatal stops answering before it logs or shows its box", stop >= 0 && log > stop && box > stop, fatal);
+            string stopBody = Body(main, "static void StopAnswering()");
+            Check("closing wiring: StopAnswering begins closing on the lock this copy runs with",
+                stopBody.Contains("lockInstance") && stopBody.Contains(".BeginClosing()"), stopBody);
+            // Each fatal path reaches the box only through Fatal: the box is shown nowhere else.
+            string ui = Body(main, "internal static void FailOnUiThread(");
+            string domain = Body(main, "static void OnDomainUnhandledException(");
+            string mainBody = Body(main, "public static int Main(");
+            Check("closing wiring: every fatal path goes through Fatal, the only error box", Count(main, "MessageBox.Show(") == 1
+                && ui.Contains("Fatal(context, ex);") && domain.Contains("Fatal(\"unhandled error\"")
+                && mainBody.Contains("Fatal(\"start-up failed\", ex);"), main);
+            int taken = mainBody.IndexOf("instance = taken;", StringComparison.Ordinal);
+            int kept = mainBody.IndexOf("lockInstance = instance;", StringComparison.Ordinal);
+            int made = mainBody.IndexOf("new AppShell(app, instance, options)", StringComparison.Ordinal);
+            Check("closing wiring: the lock this copy runs with is kept before the shell starts",
+                taken >= 0 && kept > taken && made > kept && Count(main, "lockInstance =") == 1, mainBody);
         }
     }
 }

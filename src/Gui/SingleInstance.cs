@@ -13,8 +13,8 @@ namespace RamOptimiser.Gui
     /// a later instance signals that event (SignalFirstInstance) and exits, and the first raises
     /// ActivationRequested on a background thread (marshal to the UI thread before touching windows). When the
     /// request will be raised (a handler takes it now, or none has been added yet and the first one gets it), the
-    /// first instance also sets a second named event, the acknowledgement (SignalAndWaitForAck). A copy whose
-    /// handlers were removed again is exiting and sends none (SecondLaunch).
+    /// first instance also sets a second named event, the acknowledgement (SignalAndWaitForAck). A copy that has
+    /// begun closing (BeginClosing) or whose handlers were removed again is exiting and sends none (SecondLaunch).
     ///
     /// Both kernel objects get an explicit security descriptor: the current user as owner, full access for
     /// that user only, and a Medium integrity label. Without the label, objects created by the elevated
@@ -35,6 +35,9 @@ namespace RamOptimiser.Gui
         readonly SafeWaitHandle activate;
         readonly SafeWaitHandle ack;        // null when the acknowledgement name is unusable (CreateAck)
         readonly ManualResetEvent stop = new ManualResetEvent(false);
+        // Our own wake for a kept request (Resignal). Unnamed, so the waiter tells it apart from a launch's request:
+        // a replay is raised but never answered.
+        readonly AutoResetEvent replay = new AutoResetEvent(false);
         readonly Thread waiter;
         readonly bool isFirst;
         int disposed;
@@ -42,6 +45,7 @@ namespace RamOptimiser.Gui
         EventHandler activationRequested;   // guarded by handlerGate
         bool pendingActivation;             // a signal arrived with no handler; guarded by handlerGate
         bool subscribed;                    // a handler has been added at least once; guarded by handlerGate
+        bool closing;                       // BeginClosing ran: no answer, no handler call; guarded by handlerGate
 
         /// <summary>
         /// Raised on a background thread when another instance asks this one to show itself. A request that
@@ -64,11 +68,15 @@ namespace RamOptimiser.Gui
             remove { lock (handlerGate) activationRequested -= value; }
         }
 
-        /// <summary>Sets our own activation event again, so the waiter thread raises the kept request.</summary>
+        /// <summary>
+        /// Wakes the waiter thread to raise the kept request. Through the private replay event, not the named
+        /// activation event: the launch that asked was answered when its request arrived, and an answer sent now
+        /// could reach a later launch just before this copy starts closing.
+        /// </summary>
         void Resignal()
         {
             if (Volatile.Read(ref disposed) != 0) return;
-            try { GuiNative.SetEvent(activate); }
+            try { replay.Set(); }
             catch (ObjectDisposedException) { } // Dispose won the race: nobody is left to activate
         }
 
@@ -208,6 +216,20 @@ namespace RamOptimiser.Gui
 
         public bool IsFirstInstance { get { return isFirst; } }
 
+        /// <summary>Test hook: runs after SignalAndWaitForAck has sent its request, before it waits for the answer.</summary>
+        internal Action Signalled { get; set; }
+
+        /// <summary>
+        /// The first step of every way out (Exit, the fatal error box, the emergency cleanup): from now on a request
+        /// is neither answered nor raised, whatever the handlers, so a launch waits for the lock and starts once this
+        /// copy lets go, instead of handing its request to a copy that is going away. Idempotent, safe after
+        /// Dispose, never throws.
+        /// </summary>
+        public void BeginClosing()
+        {
+            lock (handlerGate) closing = true;
+        }
+
         public static string MutexName(string id) { return NamePrefix + id; }
         public static string EventName(string id) { return NamePrefix + id + "-activate"; }
         public static string AckName(string id) { return NamePrefix + id + "-ack"; }
@@ -246,8 +268,8 @@ namespace RamOptimiser.Gui
 
         /// <summary>
         /// Asks the first instance to show its window and waits up to timeout for its acknowledgement, which it sends
-        /// only when the request will be raised (a handler, or none added yet). NoAnswer: its handlers were removed
-        /// (the copy is exiting). Unconfirmed: this is the first instance, the signal failed, the acknowledgement
+        /// only when the request will be raised (a handler, or none added yet). NoAnswer: the copy is exiting (it
+        /// has begun closing, or its handlers were removed). Unconfirmed: this is the first instance, the signal failed, the acknowledgement
         /// event is unusable, or the running copy has none (an older copy); the request is still sent then, as
         /// SignalFirstInstance does.
         /// </summary>
@@ -262,6 +284,8 @@ namespace RamOptimiser.Gui
             // An answer left set for a launch that stopped waiting is not an answer to this one.
             GuiNative.ResetEvent(ack);
             if (!GuiNative.SetEvent(activate)) return ActivationAnswer.Unconfirmed;
+            Action signalled = Signalled;
+            if (signalled != null) signalled();
             using (var answered = new HandleWaitHandle(ack))
                 return answered.WaitOne(timeout) ? ActivationAnswer.Acknowledged : ActivationAnswer.NoAnswer;
         }
@@ -275,19 +299,25 @@ namespace RamOptimiser.Gui
                 using (var activateWait = new HandleWaitHandle(activate))
                 using (HandleWaitHandle answer = ack == null ? null : new HandleWaitHandle(ack))
                 {
-                    var handles = new WaitHandle[] { stop, activateWait };
-                    while (WaitHandle.WaitAny(handles) == 1)
+                    var handles = new WaitHandle[] { stop, activateWait, replay };
+                    int woke;
+                    while ((woke = WaitHandle.WaitAny(handles)) != 0)
                     {
+                        // A launch's request (1) or our own replay of a kept one (2). A request raises the handler
+                        // anyway, so a replay queued behind it would only raise it twice.
+                        bool asked = woke == 1;
+                        if (asked) replay.Reset();
                         EventHandler handler;
                         bool taken;
                         lock (handlerGate)
                         {
-                            handler = activationRequested;
-                            if (handler == null) pendingActivation = true;
+                            handler = closing ? null : activationRequested;
+                            if (handler == null && !closing) pendingActivation = true;
                             // Taken when a handler gets it now, or none has been added yet (the copy is starting and
-                            // the first handler gets the kept request). Once the handlers are gone again the copy is
-                            // exiting: nothing is sent, and the launch that asked waits for the lock instead.
-                            taken = handler != null || !subscribed;
+                            // the first handler gets the kept request). Once the handlers are gone again, or the copy
+                            // has begun closing, nothing is sent, and the launch that asked waits for the lock instead.
+                            // A replay is never answered: its launch had its answer when the request arrived.
+                            taken = asked && !closing && (handler != null || !subscribed);
                         }
                         if (taken && answer != null) GuiNative.SetEvent(answer.SafeWaitHandle);
                         if (handler == null) continue;
@@ -312,7 +342,11 @@ namespace RamOptimiser.Gui
             mutex.Dispose();
             activate.Dispose();
             if (ack != null) ack.Dispose();
-            if (waiterGone) stop.Dispose();
+            if (waiterGone)
+            {
+                stop.Dispose();
+                replay.Dispose();
+            }
         }
 
         /// <summary>Lets WaitHandle.WaitAny wait on a handle created by P/Invoke, without owning it.</summary>
