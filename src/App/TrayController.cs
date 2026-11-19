@@ -13,7 +13,8 @@ namespace RamOptimiser.App
     /// in the taskbar's text colour) or the static app icon. The icon is redrawn only when the percent, the
     /// taskbar colour or the size changes, and every replaced icon is disposed. Shows a balloon only when the user
     /// turned on problem notices in Settings (owner decision 2026-11-17: opt-in, off by default; AppShell decides when,
-    /// through Notices and NoticeGate); clicking it opens the window on the Memory tab.
+    /// through Notices and NoticeGate); clicking it opens the window on the Memory tab. The update notice (owner decision
+    /// 2026-11-19) comes with the info icon, and clicking it opens the download page (AppShell routes by NoticeClick).
     /// Lives on the UI thread: WPF's dispatcher pumps the messages NotifyIcon needs.
     /// Menu: Open, Clean memory, the last clean's result (hidden before the first clean; enabled, so keyboard and
     /// Narrator users reach it, and it opens the Memory tab), Auto-clean (ticked when on, "(paused until 15:41)" while
@@ -34,7 +35,7 @@ namespace RamOptimiser.App
         bool disposed;
 
         public event EventHandler OpenRequested, CleanRequested, StatusClicked, AutoCleanToggled, PauseRequested, ResumeRequested, RestartRequested, ExitRequested;
-        /// <summary>The user clicked a problem notice.</summary>
+        /// <summary>The user clicked a notice (a problem notice or the update notice).</summary>
         public event EventHandler NoticeClicked;
         /// <summary>A left click on the icon: AppShell opens or closes the flyout (7A). The right click keeps the menu.</summary>
         public event EventHandler FlyoutRequested;
@@ -81,10 +82,16 @@ namespace RamOptimiser.App
         /// </summary>
         public bool ShowNotice(string title, string text)
         {
+            return ShowNotice(title, text, ToolTipIcon.Warning);
+        }
+
+        /// <summary>As ShowNotice, with the icon given: Info for the update notice, which is news, not a problem.</summary>
+        public bool ShowNotice(string title, string text, ToolTipIcon tipIcon)
+        {
             if (disposed || string.IsNullOrEmpty(text)) return false;
             try
             {
-                icon.ShowBalloonTip(10000, title ?? "", text, ToolTipIcon.Warning);
+                icon.ShowBalloonTip(10000, title ?? "", text, tipIcon);
                 return true;
             }
             catch (Exception) { return false; }

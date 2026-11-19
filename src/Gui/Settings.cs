@@ -44,6 +44,11 @@ namespace RamOptimiser.Gui
         /// </summary>
         public bool NotifyProblems { get; set; }
         /// <summary>
+        /// Once a day, ask GitHub for the latest version number (owner decision 2026-11-19: on by default, its own row
+        /// in Settings). Only the version is read; nothing is downloaded or installed.
+        /// </summary>
+        public bool CheckForUpdates { get; set; }
+        /// <summary>
         /// The global Clean memory shortcut (R7) in its canonical form ("Ctrl+Shift+M"), or "" for none, the default.
         /// Only what RamOptimiser.App.HotkeyGesture accepts survives Normalized and Parse: two modifiers, no Windows key.
         /// </summary>
@@ -74,6 +79,7 @@ namespace RamOptimiser.Gui
             PowerClean = false;
             PowerServices = ServiceCatalog.SuggestedNames();
             NotifyProblems = false;
+            CheckForUpdates = true;
             CleanHotkey = "";
             UseMica = false;
         }
@@ -256,6 +262,7 @@ namespace RamOptimiser.Gui
             Line(sb, "PowerClean", Bool(s.PowerClean));
             Line(sb, "PowerServices", string.Join(",", s.PowerServices.ToArray()));
             Line(sb, "NotifyProblems", Bool(s.NotifyProblems));
+            Line(sb, "CheckForUpdates", Bool(s.CheckForUpdates));
             Line(sb, "CleanHotkey", s.CleanHotkey);
             if (s.AutoCleanPausedUntilUtc.HasValue)
                 Line(sb, "AutoCleanPausedUntil", s.AutoCleanPausedUntilUtc.Value.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture));
@@ -308,6 +315,7 @@ namespace RamOptimiser.Gui
                 // Names outside the catalog are dropped here: the file is user-writable, the clean is elevated.
                 case "powerservices": s.PowerServices = ServiceCatalog.Filter(value.Split(',')); break;
                 case "notifyproblems": if (TryBool(value, out b)) s.NotifyProblems = b; break;
+                case "checkforupdates": if (TryBool(value, out b)) s.CheckForUpdates = b; break;
                 // Only the strict shortcut whitelist (two modifiers, no Windows key, no F12): the elevated app registers it
                 // system-wide, and this file is user-writable. Anything else loads as no shortcut.
                 case "cleanhotkey": s.CleanHotkey = AppSettings.NormalizeHotkey(value); break;
