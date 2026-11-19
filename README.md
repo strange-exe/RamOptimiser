@@ -62,7 +62,9 @@ the download page. Settings shows the same with an **Open download page** link. 
 it asks Explorer to open the page, so your browser never runs as administrator; if that fails, Settings shows the
 link to copy instead.
 
-To turn it off, switch off **Check for updates** in Settings (`CheckForUpdates=false` in `settings.ini`).
+To turn it off, switch off **Check for updates** in Settings; that takes effect at once. Setting
+`CheckForUpdates=false` in `settings.ini` by hand works too, but a running copy reads the file only when its window
+is opened or the app starts, so open the window (or restart the app) after editing it.
 
 ### Uninstall
 

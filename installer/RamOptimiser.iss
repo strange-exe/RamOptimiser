@@ -96,16 +96,17 @@ end;
 // The app's single-instance mutex is Local\RamOptimiser-<user SID>, and Inno Setup has no constant for a SID, so
 // this lists one name per account with a profile on this PC. Restart Manager closes the app during setup, but not
 // during uninstall, which is why InitializeUninstall checks these names. Only key names made of S, digits and
-// dashes are used (ProfileList also holds .bak keys), so no name can hold a comma.
-function AppMutexes: String;
+// dashes are used (ProfileList also holds .bak keys).
+function AppMutexes: TArrayOfString;
 var
   Sids: TArrayOfString;
-  I, J: Integer;
+  I, J, N: Integer;
   Ok: Boolean;
 begin
-  Result := '';
+  SetArrayLength(Result, 0);
   if not RegGetSubkeyNames(HKLM64, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList', Sids) then
     Exit;
+  N := 0;
   for I := 0 to GetArrayLength(Sids) - 1 do
   begin
     Ok := (Length(Sids[I]) > 4) and (Copy(Sids[I], 1, 4) = 'S-1-');
@@ -114,9 +115,47 @@ begin
         Ok := False;
     if Ok then
     begin
-      if Result <> '' then
-        Result := Result + ',';
-      Result := Result + 'Local\RamOptimiser-' + Sids[I];
+      SetArrayLength(Result, N + 1);
+      Result[N] := 'Local\RamOptimiser-' + Sids[I];
+      N := N + 1;
+    end;
+  end;
+end;
+
+const
+  SYNCHRONIZE = $00100000;
+  ERROR_ACCESS_DENIED = 5;
+
+function OpenMutex(dwDesiredAccess: Cardinal; bInheritHandle: Integer; lpName: String): THandle;
+  external 'OpenMutexW@kernel32.dll stdcall';
+function CloseHandle(hObject: THandle): Integer;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+// Inno's CheckForMutexes reads every OpenMutex failure as "not running". The app's mutex lets in only its own
+// user and SYSTEM, so an administrator who approved this uninstall for a standard user would not see that user's
+// copy. Access denied therefore counts as running. Local\ names are per session: a copy in another signed-in
+// session is not seen either way.
+function AppRunning: Boolean;
+var
+  Names: TArrayOfString;
+  I: Integer;
+  H: THandle;
+begin
+  Result := False;
+  Names := AppMutexes;
+  for I := 0 to GetArrayLength(Names) - 1 do
+  begin
+    H := OpenMutex(SYNCHRONIZE, 0, Names[I]);
+    if H <> 0 then
+    begin
+      CloseHandle(H);
+      Result := True;
+      Exit;
+    end;
+    if DLLGetLastError = ERROR_ACCESS_DENIED then
+    begin
+      Result := True;
+      Exit;
     end;
   end;
 end;
@@ -124,7 +163,7 @@ end;
 function InitializeUninstall: Boolean;
 begin
   Result := True;
-  while CheckForMutexes(AppMutexes) do
+  while AppRunning do
     if SuppressibleMsgBox('RAM Optimiser is running. Close it (right-click its tray icon, then Exit) and click OK, or click Cancel to stop.',
       mbError, MB_OKCANCEL, IDCANCEL) <> IDOK then
     begin

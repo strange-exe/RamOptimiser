@@ -25,6 +25,7 @@ namespace RamOptimiser.App
         public static int Main(string[] args)
         {
             RamOptimiser.Native.RestrictDllSearchToSystem32();
+            ComSecurity.Apply(); // before WPF or anything else marshals: COM security is set once per process
             AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
             LaunchOptions options = LaunchOptions.Parse(args);
 

@@ -1824,9 +1824,16 @@ namespace RamOptimiser.App
     /// </summary>
     public static class NoticeClick
     {
-        public static bool OpensDownloadPage(NoticeKind? lastShown)
+        /// <summary>
+        /// A balloon click names no balloon, and earlier ones wait in the notification center, so the page opens only
+        /// when every notice shown since the last click was the update notice; any mix opens the Memory tab.
+        /// </summary>
+        public static bool OpensDownloadPage(ICollection<NoticeKind> shownSinceClick)
         {
-            return lastShown == NoticeKind.UpdateAvailable;
+            if (shownSinceClick == null || shownSinceClick.Count == 0) return false;
+            foreach (NoticeKind k in shownSinceClick)
+                if (k != NoticeKind.UpdateAvailable) return false;
+            return true;
         }
     }
 

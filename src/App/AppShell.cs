@@ -194,8 +194,8 @@ namespace RamOptimiser.App
         readonly Dictionary<NoticeKind, DateTime> noticeShownUtc = new Dictionary<NoticeKind, DateTime>();
         /// <summary>The back-off streak the notices last compared with (null before the first status).</summary>
         int? noticeStreak;
-        /// <summary>The kind of the balloon shown last: a click belongs to it (NoticeClick).</summary>
-        NoticeKind? lastNoticeKind;
+        /// <summary>The kinds of balloon shown since the last click: a click may belong to any of them (NoticeClick).</summary>
+        readonly List<NoticeKind> noticesSinceClick = new List<NoticeKind>();
 
         // Update check (owner decision 2026-11-19): the latest version number from GitHub, once a day (UpdateSchedule).
         static readonly TimeSpan UpdateTick = TimeSpan.FromSeconds(30);
@@ -393,6 +393,7 @@ namespace RamOptimiser.App
                     () => { SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged; },
                     () => { SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged; },
                     () => StopHotkey(),
+                    () => { if (updateTimer != null) updateTimer.Stop(); },
                     () => { if (service != null) service.Dispose(); },
                     () => CloseFlyout(),
                     () => { if (tray != null) tray.Dispose(); },
@@ -495,6 +496,8 @@ namespace RamOptimiser.App
             try { if (instance != null) instance.BeginClosing(); } catch (Exception) { }
             // SystemEvents is static: a handler left attached would outlive the shell.
             try { SystemEvents.PowerModeChanged -= OnPowerModeChanged; } catch (Exception) { }
+            // Timers go before the error box, whose message loop would otherwise run their work on a failed shell.
+            try { if (updateTimer != null) updateTimer.Stop(); } catch (Exception) { }
             try { StopHotkey(); } catch (Exception) { }
             try { if (service != null) service.Dispose(); } catch (Exception) { }
             try { CloseFlyout(); } catch (Exception) { }
@@ -811,7 +814,7 @@ namespace RamOptimiser.App
             OnToggle(closeToTrayCheck, on => { settings.CloseToTray = on; SaveAndApply(); });
             OnToggle(trayPercentCheck, on => { settings.ShowTrayPercent = on; SaveAndApply(); });
             OnToggle(notifyCheck, on => { settings.NotifyProblems = on; SaveAndApply(); });
-            OnToggle(updatesCheck, on => { settings.CheckForUpdates = on; SaveAndApply(); });
+            OnToggle(updatesCheck, on => { settings.CheckForUpdates = on; if (!on) ClearUpdateOpenFailed(); SaveAndApply(); });
             updateOpen.Click += delegate { OpenDownloadPage(); };
             updateCopy.Click += delegate { CopyDownloadLink(); };
             hotkeyBox.PreviewKeyDown += OnHotkeyBoxKey;
@@ -1927,14 +1930,19 @@ namespace RamOptimiser.App
             if (!NoticeGate.Allow(noticeShownUtc.TryGetValue(n.Kind, out last) ? last : (DateTime?)null, now)) return;
             if (!tray.ShowNotice(n.Title, n.Text)) return;
             noticeShownUtc[n.Kind] = now;
-            lastNoticeKind = n.Kind;
+            noticesSinceClick.Add(n.Kind);
             AddActivity(Notices.ShownEvent(n));
         }
 
-        /// <summary>A balloon was clicked: the update notice opens the download page, any other the Memory tab.</summary>
+        /// <summary>
+        /// A balloon was clicked: the download page opens when only update notices were shown since the last click,
+        /// otherwise the Memory tab (the click does not say which balloon, and older ones wait in the notification center).
+        /// </summary>
         void OnNoticeClicked()
         {
-            if (NoticeClick.OpensDownloadPage(lastNoticeKind)) OpenDownloadPage();
+            bool page = NoticeClick.OpensDownloadPage(noticesSinceClick);
+            noticesSinceClick.Clear();
+            if (page) OpenDownloadPage();
             else ShowMemoryTab();
         }
 
@@ -1962,6 +1970,7 @@ namespace RamOptimiser.App
         {
             updateSchedule.Finished(r.Outcome == UpdateOutcome.Failed, DateTime.UtcNow);
             updateResult = r;
+            updateOpenFailed = false; // a new answer replaces an old failed open; the next click tries again
             if (updateLogged.Add(r.Outcome)) AddActivity(AppText.UpdateEvent(r));
             ShowUpdateRow();
             if (settings.CheckForUpdates && UpdateNoticeGate.ShouldNotify(r, updateNotified)) ShowUpdateNotice(r);
@@ -1974,7 +1983,7 @@ namespace RamOptimiser.App
             Notice n = Notices.ForUpdate(r.Latest.Format(), BuildInfo.Version);
             if (!tray.ShowNotice(n.Title, n.Text, System.Windows.Forms.ToolTipIcon.Info)) return;
             updateNotified = r.Latest.Format();
-            lastNoticeKind = NoticeKind.UpdateAvailable;
+            noticesSinceClick.Add(NoticeKind.UpdateAvailable);
             AddActivity(Notices.ShownEvent(n));
         }
 
@@ -2000,6 +2009,7 @@ namespace RamOptimiser.App
         void OpenDownloadPage()
         {
             if (exiting) return;
+            ClearUpdateOpenFailed(); // a new attempt: only its own failure shows the link again
             if (UpdateOpen.Route(elevated) == UpdateOpenRoute.ExplorerShell)
             {
                 ShellOpen.OpenUnelevated(UpdateCheck.DownloadPage, ok => Post(() => { if (!ok) ShowUpdateLink(); }));
@@ -2028,6 +2038,14 @@ namespace RamOptimiser.App
             }));
         }
 
+        /// <summary>The row goes back to its status line (after a new attempt, a new answer, or the check turned off).</summary>
+        void ClearUpdateOpenFailed()
+        {
+            if (!updateOpenFailed) return;
+            updateOpenFailed = false;
+            ShowUpdateRow();
+        }
+
         void CopyDownloadLink()
         {
             string line;
@@ -2038,6 +2056,8 @@ namespace RamOptimiser.App
             }
             catch (Exception) { line = AppText.UpdateCopyFailed; } // the clipboard is busy with another app
             updateStatus.Text = line;
+            // Each press is read out, even when its line matches the last one (a second copy, or busy twice).
+            announced.Remove(updateStatusRegion);
             Announce(updateStatusRegion, line, line, true);
         }
 

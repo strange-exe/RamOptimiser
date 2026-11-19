@@ -269,9 +269,21 @@ namespace RamOptimiser.Tests
 
             string init = Routine(text, "function InitializeUninstall:");
             string names = Routine(text, "function AppMutexes:");
+            string running = Routine(text, "function AppRunning:");
             Check("uninstall: asks to close the app while any account's copy runs (its mutex prefix)",
-                init.Contains("CheckForMutexes(AppMutexes)") && names.Contains("'" + SingleInstance.NamePrefix + "'"),
+                init.Contains("while AppRunning do") && names.Contains("'" + SingleInstance.NamePrefix + "'"),
                 init.Length + " chars");
+            // Review 2026-11-19: Inno's CheckForMutexes reads any OpenMutex failure as "not running", and the app's
+            // mutex DACL denies an administrator who is not its user (over-the-shoulder UAC). Access denied counts.
+            Check("uninstall: no CheckForMutexes, whose access-denied reads as not running", !text.Contains("CheckForMutexes("), "");
+            Check("uninstall: opens each name for SYNCHRONIZE only and closes what it opens",
+                running.Contains("OpenMutex(SYNCHRONIZE, 0, Names[I])") && running.Contains("CloseHandle(H)")
+                && text.Contains("SYNCHRONIZE = $00100000;") && text.Contains("external 'OpenMutexW@kernel32.dll stdcall'")
+                && text.Contains("external 'CloseHandle@kernel32.dll stdcall'"), running.Length + " chars");
+            Check("uninstall: a name this account may not open counts as running",
+                running.Contains("DLLGetLastError = ERROR_ACCESS_DENIED") && text.Contains("ERROR_ACCESS_DENIED = 5;"), running.Length + " chars");
+            Check("uninstall: the names come back as an array (no comma list)", names.Contains("TArrayOfString")
+                && running.Contains("AppMutexes") && !names.Contains("+ ','"), names.Length + " chars");
             Check("uninstall: mutex names only from well-formed SIDs in the profile list", names.Contains("ProfileList")
                 && names.Contains("'S-1-'") && names.Contains("Ok := False"), names.Length + " chars");
             Check("uninstall: a silent uninstall stops rather than waits", init.Contains("SuppressibleMsgBox(") && init.Contains("IDCANCEL"), "");

@@ -251,9 +251,14 @@ namespace RamOptimiser.Tests
             Notice n = Notices.ForUpdate("2026.12.01", "2026.11.19");
             Check("notice: update kind, title and text", n != null && n.Kind == NoticeKind.UpdateAvailable && n.Title == "Update available"
                 && n.Text == "RAM Optimiser 2026.12.01 is available. You have 2026.11.19. Click to open the download page.", n == null ? "null" : n.Text);
-            Check("click: the update notice opens the page", NoticeClick.OpensDownloadPage(NoticeKind.UpdateAvailable));
-            Check("click: other notices show the Memory tab", !NoticeClick.OpensDownloadPage(NoticeKind.CleanFailed)
-                && !NoticeClick.OpensDownloadPage(NoticeKind.NotHelping) && !NoticeClick.OpensDownloadPage(null));
+            Check("click: the update notice opens the page", NoticeClick.OpensDownloadPage(new[] { NoticeKind.UpdateAvailable }));
+            Check("click: other notices show the Memory tab", !NoticeClick.OpensDownloadPage(new[] { NoticeKind.CleanFailed })
+                && !NoticeClick.OpensDownloadPage(new[] { NoticeKind.NotHelping }) && !NoticeClick.OpensDownloadPage(new NoticeKind[0])
+                && !NoticeClick.OpensDownloadPage(null));
+            // Review 2026-11-19: a click names no balloon. With an update notice and a problem notice both shown since
+            // the last click, either may be the one clicked in the notification center, so the page never opens then.
+            Check("click: update then problem notice opens no page", !NoticeClick.OpensDownloadPage(new[] { NoticeKind.UpdateAvailable, NoticeKind.CleanFailed }));
+            Check("click: problem then update notice opens no page", !NoticeClick.OpensDownloadPage(new[] { NoticeKind.CleanFailed, NoticeKind.UpdateAvailable }));
         }
 
         // ---------------------------------------------------------------- wording
@@ -698,14 +703,44 @@ namespace RamOptimiser.Tests
                 done.Contains("updateSchedule.Finished(") && done.Contains("updateLogged.Add(") && done.Contains("UpdateNoticeGate.ShouldNotify(r, updateNotified)"), done);
             string notice = Body(shell, "void ShowUpdateNotice(UpdateResult r)");
             Check("wiring: the update notice uses the info icon and remembers its kind", notice.Contains("ToolTipIcon.Info")
-                && notice.Contains("lastNoticeKind = NoticeKind.UpdateAvailable;") && notice.Contains("updateNotified = "), notice);
-            Check("wiring: other notices remember their kind", Body(shell, "void ShowNotice(Notice n)").Contains("lastNoticeKind = n.Kind;"));
+                && notice.Contains("noticesSinceClick.Add(NoticeKind.UpdateAvailable);") && notice.Contains("updateNotified = "), notice);
+            Check("wiring: other notices remember their kind", Body(shell, "void ShowNotice(Notice n)").Contains("noticesSinceClick.Add(n.Kind);"));
+            Check("wiring: no single last-notice field is left", !shell.Contains("lastNoticeKind"));
             Check("wiring: a notice click is routed", shell.Contains("tray.NoticeClicked += delegate { OnNoticeClicked(); };")
                 && !shell.Contains("tray.NoticeClicked += delegate { ShowMemoryTab(); };"));
             string click = Body(shell, "void OnNoticeClicked()");
-            Check("wiring: the route picks the page or the Memory tab", click.Contains("NoticeClick.OpensDownloadPage(lastNoticeKind)")
-                && click.Contains("OpenDownloadPage();") && click.Contains("ShowMemoryTab();"), click);
+            int decide = click.IndexOf("NoticeClick.OpensDownloadPage(noticesSinceClick)", StringComparison.Ordinal);
+            int clear = click.IndexOf("noticesSinceClick.Clear();", StringComparison.Ordinal);
+            Check("wiring: the route decides from every notice since the last click, then forgets them",
+                decide >= 0 && clear > decide && click.Contains("OpenDownloadPage();") && click.Contains("ShowMemoryTab();"), click);
             Check("wiring: the switch saves the setting", shell.Contains("OnToggle(updatesCheck, on => { settings.CheckForUpdates = on;"));
+
+            // Review 2026-11-19: a failed open must not pin the row to the failure message for the rest of the run.
+            string clearFailed = Body(shell, "void ClearUpdateOpenFailed()");
+            Check("wiring: clearing the failure resets the flag and redraws the row", clearFailed.Contains("updateOpenFailed = false;")
+                && clearFailed.Contains("ShowUpdateRow();"), clearFailed);
+            string attempt = Body(shell, "void OpenDownloadPage()");
+            int cleared = attempt.IndexOf("ClearUpdateOpenFailed();", StringComparison.Ordinal);
+            Check("wiring: each open attempt starts from a clear row", cleared >= 0 && cleared < attempt.IndexOf("UpdateOpen.Route(", StringComparison.Ordinal), attempt);
+            int resetAt = done.IndexOf("updateOpenFailed = false;", StringComparison.Ordinal);
+            Check("wiring: a new check result clears the failure before the row is drawn",
+                resetAt >= 0 && resetAt < done.IndexOf("ShowUpdateRow();", StringComparison.Ordinal), done);
+            Check("wiring: turning the check off clears the failure",
+                shell.Contains("OnToggle(updatesCheck, on => { settings.CheckForUpdates = on; if (!on) ClearUpdateOpenFailed(); SaveAndApply(); });"));
+            Check("wiring: only ShowUpdateLink sets the failure", Count(shell, "updateOpenFailed = true;") == 1
+                && Body(shell, "void ShowUpdateLink()").Contains("updateOpenFailed = true;"));
+
+            // Review 2026-11-19: every Copy link press is read out, even when the line matches the last one.
+            string copy = Body(shell, "void CopyDownloadLink()");
+            int forget = copy.IndexOf("announced.Remove(updateStatusRegion);", StringComparison.Ordinal);
+            Check("wiring: Copy link forgets the last announcement before announcing", forget >= 0
+                && forget < copy.IndexOf("Announce(updateStatusRegion,", StringComparison.Ordinal), copy);
+
+            // Review 2026-11-19: the update timer stops on both shutdown paths, not only through the exiting guard.
+            Check("wiring: EmergencyCleanup stops the update timer",
+                Body(shell, "public void EmergencyCleanup()").Contains("if (updateTimer != null) updateTimer.Stop();"));
+            Check("wiring: Exit's teardown stops the update timer",
+                Body(shell, "public void Exit()").Contains("() => { if (updateTimer != null) updateTimer.Stop(); },"));
 
             string tray = Source("App", "TrayController.cs");
             Check("tray: ShowNotice takes the icon", tray.Contains("public bool ShowNotice(string title, string text, ToolTipIcon tipIcon)")

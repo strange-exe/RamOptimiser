@@ -354,7 +354,7 @@ function Download() {
               <div className="mt-2">
                 <CopyHash hash={primary.sha256} />
               </div>
-              <pre className="mt-2 overflow-x-auto rounded-xl border border-hairline bg-canvas p-4 font-mono text-[13px] text-text">
+              <pre className="mt-2 whitespace-pre-wrap break-all rounded-xl border border-hairline bg-canvas p-4 font-mono text-[13px] text-text">
                 <code>Get-FileHash .\{primary.file}</code>
               </pre>
               {release.setup && (
