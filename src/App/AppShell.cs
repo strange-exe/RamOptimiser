@@ -354,21 +354,22 @@ namespace RamOptimiser.App
             elevationState = ElevationFlow.Next(elevationState, ElevationEvent.ExitRequested).State;
             exiting = true;
             // The restore starts even when a teardown step throws (Exit may run from the UI fault handler, where a
-            // second Exit returns at once), and the app still shuts down; exiting keeps both to one start.
+            // second Exit returns at once), and the app still shuts down; exiting keeps both to one start. Each step
+            // runs on its own, so one that throws does not skip the rest (auto-clean's timer above all); the first
+            // fault still goes on to the caller.
             try
             {
-                PowerCleanRecovery.TeardownThenRestore(() =>
-                {
-                    SystemEvents.PowerModeChanged -= OnPowerModeChanged;
-                    SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
-                    SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged;
-                    StopHotkey();
-                    if (service != null) service.Dispose();
-                    CloseFlyout();
-                    if (tray != null) tray.Dispose();
-                    if (instance != null) { instance.ActivationRequested -= OnActivationRequested; instance.Dispose(); instance = null; }
-                    if (window != null) window.Close();
-                }, () => RestoreServicesOnExit(service, elevated));
+                PowerCleanRecovery.TeardownThenRestore(() => PowerCleanRecovery.RunSteps(
+                    () => { SystemEvents.PowerModeChanged -= OnPowerModeChanged; },
+                    () => { SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged; },
+                    () => { SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged; },
+                    () => StopHotkey(),
+                    () => { if (service != null) service.Dispose(); },
+                    () => CloseFlyout(),
+                    () => { if (tray != null) tray.Dispose(); },
+                    () => { if (instance != null) { instance.ActivationRequested -= OnActivationRequested; instance.Dispose(); instance = null; } },
+                    () => { if (window != null) window.Close(); }),
+                    () => RestoreServicesOnExit(service, elevated));
             }
             finally { app.Shutdown(); }
         }

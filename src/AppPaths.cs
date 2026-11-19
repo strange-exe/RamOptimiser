@@ -19,7 +19,7 @@ namespace RamOptimiser
         /// "\\server\share\..."). Windows answers "" for an account with no profile folder (a service account, a
         /// scheduled task with no loaded profile); a relative path would land in the current directory, often
         /// C:\Windows\System32 for such a process. Device paths ("\\?\...", "\\.\...") and named pipes
-        /// ("\\host\pipe\...") are refused too: the folder can be redirected without elevation, and the writers create
+        /// ("\\host\pipe\...", "\\host\IPC$\...") are refused too: the folder can be redirected without elevation, and the writers create
         /// and query it by path, which no handle check can guard. Pure.
         /// </summary>
         public static string DataFolderFor(string localAppData)
@@ -32,8 +32,8 @@ namespace RamOptimiser
 
         /// <summary>
         /// Whether the part after "\\" names a share: a host that is not "?" or "." (the device namespaces) and a first
-        /// component that is not "pipe". Windows reads "/" as "\", skips empty components and drops trailing dots and
-        /// spaces, so this does too before comparing.
+        /// component that is not "pipe" or "IPC$" (both reach the host's named pipes). Windows reads "/" as "\", skips
+        /// empty components and drops trailing dots and spaces, so this does too before comparing.
         /// </summary>
         static bool IsShare(string afterSlashes)
         {
@@ -41,7 +41,10 @@ namespace RamOptimiser
             if (parts.Length == 0) return false;
             string host = parts[0].TrimEnd('.', ' ');
             if (host.Length == 0 || host == "?") return false; // "." trims to ""
-            return parts.Length < 2 || !string.Equals(parts[1].TrimEnd('.', ' '), "pipe", StringComparison.OrdinalIgnoreCase);
+            if (parts.Length < 2) return true;
+            string share = parts[1].TrimEnd('.', ' ');
+            return !string.Equals(share, "pipe", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(share, "IPC$", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>The data folder of the account the process runs as, or null when that account has none (DataFolderFor).</summary>

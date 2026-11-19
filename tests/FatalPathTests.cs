@@ -78,6 +78,75 @@ namespace RamOptimiser.Tests
             Check("bounded restore: no names, no actions", done.Count == 0);
 
             BoundedRestoreWiring();
+            EmergencyDeadline();
+        }
+
+        /// <summary>A fake clock the fake services below spend: each wait costs the whole time it is given.</summary>
+        sealed class FakeClock { public TimeSpan Now; }
+
+        /// <summary>
+        /// A service still stopping that stops only at the very end of its wait, takes StartCost to start, and then
+        /// never reaches Running: every wait it is given is spent in full, so the waits add up as slowly as they can.
+        /// </summary>
+        sealed class SlowService : ServiceTrimmer.IServiceControl
+        {
+            readonly FakeClock clock;
+            readonly List<TimeSpan> waits;
+            public TimeSpan StartCost;
+            public System.ServiceProcess.ServiceControllerStatus Status { get; set; }
+
+            public SlowService(FakeClock clock, List<TimeSpan> waits)
+            {
+                this.clock = clock;
+                this.waits = waits;
+                Status = System.ServiceProcess.ServiceControllerStatus.StopPending;
+            }
+
+            public void Start() { clock.Now += StartCost; Status = System.ServiceProcess.ServiceControllerStatus.StartPending; }
+            public void Continue() { }
+
+            public void WaitForStatus(System.ServiceProcess.ServiceControllerStatus want, TimeSpan timeout)
+            {
+                waits.Add(timeout);
+                if (timeout > TimeSpan.Zero) clock.Now += timeout;
+                if (want == System.ServiceProcess.ServiceControllerStatus.Stopped && Status == System.ServiceProcess.ServiceControllerStatus.StopPending)
+                {
+                    Status = want;
+                    return;
+                }
+                if (Status != want) throw new System.ServiceProcess.TimeoutException("timed out");
+            }
+        }
+
+        /// <summary>
+        /// The emergency restore's waits all come out of one deadline, re-read before each wait: a service that is
+        /// still stopping and then never starts cannot take StopTimeout twice, and Start's own time counts too.
+        /// </summary>
+        static void EmergencyDeadline()
+        {
+            foreach (TimeSpan startCost in new[] { TimeSpan.Zero, TimeSpan.FromSeconds(3) })
+            {
+                TimeSpan budget = PowerCleanRecovery.EmergencyBudget;
+                var clock = new FakeClock();
+                var waits = new List<TimeSpan>();
+                var opened = new List<string>();
+                var names = new List<string> { "RamOptimiserTestA", "RamOptimiserTestB", "RamOptimiserTestC" };
+                List<ServiceAction> done = ServiceTrimmer.RestoreLocked(names, () => budget - clock.Now, n =>
+                {
+                    opened.Add(n);
+                    return new SlowService(clock, waits) { StartCost = startCost };
+                });
+                TimeSpan asked = TimeSpan.Zero;
+                foreach (TimeSpan w in waits) asked += w;
+                string trace = "start " + startCost.TotalSeconds + " s: waits " + string.Join(",", waits.ConvertAll(w => w.TotalSeconds.ToString()).ToArray())
+                    + "; spent " + clock.Now.TotalSeconds + " s; opened " + opened.Count;
+                Check("emergency deadline: the time spent stays within the budget (start " + startCost.TotalSeconds + " s)",
+                    clock.Now <= budget, trace);
+                Check("emergency deadline: no wait is longer than the time left (start " + startCost.TotalSeconds + " s)",
+                    asked + TimeSpan.FromTicks(startCost.Ticks * opened.Count) <= budget && waits.TrueForAll(w => w >= TimeSpan.Zero), trace);
+                Check("emergency deadline: services not reached stay recorded (start " + startCost.TotalSeconds + " s)",
+                    opened.Count == 1 && done.Count == 1 && done[0].Failed && !done[0].Started, trace);
+            }
         }
 
         /// <summary>
@@ -179,6 +248,76 @@ namespace RamOptimiser.Tests
             string order = "";
             PowerCleanRecovery.TeardownThenRestore(() => order += "teardown,", () => { order += "restore,"; restores++; });
             Check("exit restore: after a clean teardown, once, last", restores == 1 && order == "teardown,restore,", order);
+
+            // Each teardown step runs on its own: one that throws early (the hotkey, say) no longer skips the later
+            // ones (auto-clean's timer above all); the first fault still reaches the caller once all have run.
+            order = "";
+            restores = 0;
+            escaped = null;
+            var first = new InvalidOperationException("hotkey failed");
+            try
+            {
+                PowerCleanRecovery.TeardownThenRestore(() => PowerCleanRecovery.RunSteps(
+                    () => order += "a,",
+                    () => { order += "b,"; throw first; },
+                    () => order += "service,",
+                    () => { order += "c,"; throw new InvalidOperationException("tray failed"); },
+                    () => order += "window,"),
+                    () => { order += "restore,"; restores++; });
+            }
+            catch (Exception ex) { escaped = ex; }
+            Check("exit teardown: a throwing step does not skip the later ones", order == "a,b,service,c,window,restore,", order);
+            Check("exit teardown: the first fault reaches the caller, after the restore started",
+                ReferenceEquals(escaped, first) && restores == 1, escaped == null ? "nothing escaped" : escaped.Message);
+            order = "";
+            PowerCleanRecovery.RunSteps(() => order += "a,", () => order += "b,");
+            Check("exit teardown: steps that work run once each, in order", order == "a,b,", order);
+
+            ShellWiring();
+        }
+
+        // ---------------------------------------------------------------- wiring of the fatal and exit paths
+
+        static string Source(params string[] parts)
+        {
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, Path.Combine("..", "src"));
+            foreach (string part in parts) path = Path.Combine(path, part);
+            path = Path.GetFullPath(path);
+            return File.Exists(path) ? File.ReadAllText(path) : "";
+        }
+
+        /// <summary>The body of the method whose declaration starts with signature (up to its closing brace at that indent).</summary>
+        static string Body(string source, string signature)
+        {
+            int at = source.IndexOf(signature, StringComparison.Ordinal);
+            if (at < 0) return "";
+            int end = source.IndexOf("\n        }", at, StringComparison.Ordinal);
+            return end < 0 ? source.Substring(at) : source.Substring(at, end - at);
+        }
+
+        static void ShellWiring()
+        {
+            string raise = Body(Source("App", "TrayController.cs"), "void Raise(EventHandler h)");
+            int guard = raise.IndexOf("FaultRoute.Guard(", StringComparison.Ordinal), call = raise.IndexOf("h(this, EventArgs.Empty)", StringComparison.Ordinal);
+            int calls = raise.Length - raise.Replace("h(this, EventArgs.Empty)", "").Length;
+            Check("wiring: TrayController.Raise runs the handler only inside FaultRoute.Guard", guard >= 0 && call > guard
+                && calls == "h(this, EventArgs.Empty)".Length && raise.Contains("AppMain.FailOnUiThread("), raise);
+
+            string shell = Source("App", "AppShell.cs");
+            string exit = Body(shell, "public void Exit()");
+            int teardown = exit.IndexOf("PowerCleanRecovery.TeardownThenRestore(", StringComparison.Ordinal);
+            int steps = exit.IndexOf("PowerCleanRecovery.RunSteps(", StringComparison.Ordinal);
+            int dispose = exit.IndexOf("service.Dispose()", StringComparison.Ordinal);
+            int restore = exit.IndexOf("RestoreServicesOnExit(", StringComparison.Ordinal);
+            Check("wiring: Exit tears down through TeardownThenRestore, step by step, then restores",
+                teardown >= 0 && steps > teardown && dispose > steps && restore > dispose, exit);
+
+            string emergency = Body(shell, "public void EmergencyCleanup()");
+            int bounded = emergency.IndexOf("ServiceTrimmer.TryRestoreBounded(PowerCleanRecovery.EmergencyLockWait, PowerCleanRecovery.EmergencyBudget)",
+                StringComparison.Ordinal);
+            int svc = emergency.IndexOf("service.Dispose()", StringComparison.Ordinal), inst = emergency.IndexOf("instance.Dispose()", StringComparison.Ordinal);
+            Check("wiring: EmergencyCleanup restores bounded, after auto-clean stops and before the instance lock goes",
+                bounded >= 0 && svc >= 0 && svc < bounded && inst > bounded, emergency);
         }
 
         // ---------------------------------------------------------------- hardening 14: tray faults

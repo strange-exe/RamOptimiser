@@ -85,7 +85,14 @@ namespace RamOptimiser
                 if (Hidden(c)) { AppendEscape(sb, c); continue; }
                 if (char.IsHighSurrogate(c))
                 {
-                    if (i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) { sb.Append(c).Append(s[i + 1]); i++; }
+                    if (i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+                    {
+                        // A supplementary format character (the tag characters U+E0001 and U+E0020-U+E007F) is
+                        // escaped as its two surrogates, which JSON readers join back into the one character.
+                        if (CharUnicodeInfo.GetUnicodeCategory(s, i) == UnicodeCategory.Format) { AppendEscape(sb, c); AppendEscape(sb, s[i + 1]); }
+                        else sb.Append(c).Append(s[i + 1]);
+                        i++;
+                    }
                     else AppendEscape(sb, Replacement);
                     continue;
                 }
@@ -101,7 +108,8 @@ namespace RamOptimiser
         /// terminal may act on), every BMP format character (bidi overrides and isolates, zero-width marks, the BOM)
         /// and U+2028/U+2029. Values such as process names come from other users, so whatever the console code page or
         /// viewer, nothing written can move the cursor, reorder the text or start a line. A surrogate is never Hidden:
-        /// a valid pair is written as it is. CharUnicodeInfo, not char.GetUnicodeCategory: on .NET Framework the latter
+        /// AppendQuoted judges a valid pair by its code point, writing it as it is unless it is a format character
+        /// (then as two escapes, one per surrogate). CharUnicodeInfo, not char.GetUnicodeCategory: on .NET Framework the latter
         /// reads the soft hyphen U+00AD as DashPunctuation, though Unicode makes it a format character.
         /// </summary>
         static bool Hidden(char c)

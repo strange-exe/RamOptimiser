@@ -71,8 +71,10 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
     **Open Startup settings** goes to Settings, Apps, Startup, where Windows turns them on or off. RunOnce entries
     (a program set to run once at the next sign-in) are listed read-only and never removed.
   - Any program can choose its own entry name and path, so names are shown with control, bidi, zero-width and
-    line-separator characters removed (long names are cut to 64 characters). In the "Runs" path each such
-    character is shown as `?` instead, so a path padded with hidden characters never reads like a real one. Only
+    line-separator characters removed and look-alike spaces (no-break and the like) shown as plain spaces (long
+    names are cut to 64 characters). In the "Runs" path each such character, and each space other than a plain
+    one, is shown as `?` instead, so a path padded with hidden characters or a no-break space never reads like a
+    real one. Only
     what is shown changes: switches still act on the entry's real name.
   - Each app's details say who signed its program, from its Authenticode signature checked on this PC with no
     network access, and whether that matches the company the file names. An unsigned program, a signature that
@@ -124,7 +126,7 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
   The app refuses to use that folder if it is a link (junction or symbolic link), if `settings.ini` is a link
   or has a second hard link, or if the folder is owned by anyone other than you, Administrators or SYSTEM.
   When Windows reports `%LOCALAPPDATA%` as a device path (`\\?\...`, `\\.\...`) or a named pipe
-  (`\\server\pipe\...`), the app treats it like an account with no local app data folder and writes no clean log;
+  (`\\server\pipe\...`, `\\server\IPC$\...`), the app treats it like an account with no local app data folder and writes no clean log;
   a normal drive or network share is fine. With no such folder, `settings.ini` and `error.log` go to a
   `RamOptimiser` folder inside the folder the app was started from (for an app started as administrator, often
   `C:\Windows\System32`).
@@ -146,7 +148,7 @@ Three tabs (Ctrl+1, Ctrl+2, Ctrl+3; hover a tab to see its shortcut):
   it checks each key it opens on the way to that record (`RamOptimiser`, then `PowerClean\<your SID>` or
   `ServiceStartup`): each must be owned by Administrators or SYSTEM, no one else may change it, and none may be a
   registry link. Other keys under `RamOptimiser` are not looked at. If a check fails, that record is not used: Power
-  Clean stops no services and logs why in `error.log`; the Startup tab shows no service as turned off by the app
+  Clean stops no services and logs why in `error.log` (the first refusal in each run); the Startup tab shows no service as turned off by the app
   (so none can be turned back on there), logs why in `error.log`, and turning a service off fails with the reason
   shown.
 - Hidden in the tray, the app updates only the tray icon and hands back the memory its window was using.
@@ -263,8 +265,9 @@ flush), 3 not elevated, 4 `watch` stopped after 5 errors in a row, 5 another cle
 
 Fields are only ever added; a breaking change bumps `v`. Area messages and error text are made one line first (line
 breaks become spaces; control, bidi and zero-width characters are removed). All text is cut to 200 characters, and
-any control, bidi, zero-width or line-separator character left in a value is written as a `\u` escape, so a value
-can't start a new line or act on a terminal. The same escaping applies to `--json` output. The file is kept under
+any control, bidi, zero-width or line-separator character left in a value is written as a `\u` escape (a tag character,
+which lies outside the 16-bit range, as two: one per surrogate), so a value can't start a new line or act on a
+terminal. The same escaping applies to `--json` output. The file is kept under
 256 KB, with one older copy in `cleans.log.old`, and is written only after the same folder checks as `settings.ini`.
 
 ## How it works

@@ -27,8 +27,20 @@ namespace RamOptimiser.Gui
         readonly string[] path;
         readonly object gate = new object();
 
-        public PowerCleanJournal(IMachineRegistry registry, string userSid)
+        readonly OnceLog refusals;
+
+        /// <summary>
+        /// The process's refusal log: the first record Add refuses goes to error.log with its reason, later ones do
+        /// not (Power Clean tries again at every clean, and one line says what is wrong).
+        /// </summary>
+        internal static readonly OnceLog ProcessRefusals = new OnceLog(
+            line => RamOptimiser.App.ErrorLog.TryWrite(RamOptimiser.App.ErrorLog.DefaultPath, line, null));
+
+        public PowerCleanJournal(IMachineRegistry registry, string userSid) : this(registry, userSid, null) { }
+
+        internal PowerCleanJournal(IMachineRegistry registry, string userSid, OnceLog refusals)
         {
+            this.refusals = refusals;
             if (registry == null) throw new ArgumentNullException("registry");
             if (userSid == null) throw new ArgumentNullException("userSid");
             // The SID becomes a key name: only a well-formed SID, in its canonical text, so it cannot name another key.
@@ -42,8 +54,11 @@ namespace RamOptimiser.Gui
         {
             string sid;
             using (WindowsIdentity id = WindowsIdentity.GetCurrent()) sid = id.User == null ? null : id.User.Value;
-            return sid == null ? null : new PowerCleanJournal(AppRegistry.Machine, sid);
+            return sid == null ? null : new PowerCleanJournal(AppRegistry.Machine, sid, ProcessRefusals);
         }
+
+        /// <summary>Where a refused record is logged; null for none.</summary>
+        internal OnceLog RefusalLog { get { return refusals; } }
 
         /// <summary>HKLM\SOFTWARE\RamOptimiser\PowerClean\&lt;SID&gt;.</summary>
         public string KeyPath { get { return @"HKLM\SOFTWARE\" + AppRegistry.RootName + @"\" + string.Join(@"\", path); } }
@@ -73,13 +88,15 @@ namespace RamOptimiser.Gui
 
         /// <summary>
         /// Records a stopped service. False when the record could not be made (not elevated, a refused key, a full
-        /// journal, a registry error); the caller then leaves the service running. A name outside the catalog is
-        /// never written and returns true, as before.
+        /// journal, a registry error); the caller then leaves the service running. The reason goes to RefusalLog
+        /// (error.log for ForCurrentUser, first refusal of the process only). A name outside the catalog is never
+        /// written and returns true, as before.
         /// </summary>
         public bool Add(string name)
         {
             string n = name == null ? null : name.Trim();
             if (StoppedServiceJournal.Keep(new[] { n }).Count == 0) return true;
+            string refused = null;
             lock (gate)
             {
                 try
@@ -87,17 +104,24 @@ namespace RamOptimiser.Gui
                     string problem;
                     using (IMachineKey key = AppRegistry.Open(registry, path, true, true, out problem))
                     {
-                        if (key == null) return false;
-                        if (Names(key).Exists(x => string.Equals(x, n, StringComparison.OrdinalIgnoreCase))) return true;
+                        if (key == null) refused = problem ?? KeyPath + " could not be opened";
+                        else if (Names(key).Exists(x => string.Equals(x, n, StringComparison.OrdinalIgnoreCase))) return true;
                         // Read looks at the first MaxNames values only: a record past them could be lost.
-                        if (key.ValueNames().Length >= StoppedServiceJournal.MaxNames) return false;
-                        key.SetString(n, DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture));
-                        return true;
+                        else if (key.ValueNames().Length >= StoppedServiceJournal.MaxNames)
+                            refused = KeyPath + " is full (" + StoppedServiceJournal.MaxNames + " values)";
+                        else
+                        {
+                            key.SetString(n, DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture));
+                            return true;
+                        }
                     }
                 }
-                catch (UnauthorizedAccessException) { return false; }
-                catch (IOException) { return false; }
+                catch (UnauthorizedAccessException ex) { refused = KeyPath + " could not be written: " + ex.Message.TrimEnd('.'); }
+                catch (IOException ex) { refused = KeyPath + " could not be written: " + ex.Message.TrimEnd('.'); }
             }
+            // Logged outside the lock: error.log is a file write, and the journal's lock guards only the key.
+            if (refusals != null) refusals.Write("Power Clean left " + n + " running: its journal took no record. " + refused);
+            return false;
         }
 
         /// <summary>Forgets a service once it runs again; the subkey goes with its last value. False when it could not be removed.</summary>
@@ -134,6 +158,24 @@ namespace RamOptimiser.Gui
         }
     }
 
+    /// <summary>Writes its first line only; later ones are dropped. Thread-safe.</summary>
+    internal sealed class OnceLog
+    {
+        readonly Action<string> write;
+        int written;
+
+        public OnceLog(Action<string> write) { this.write = write; }
+
+        /// <summary>True when this call wrote the line (the first call); false for every later one.</summary>
+        public bool Write(string line)
+        {
+            if (System.Threading.Interlocked.Exchange(ref written, 1) != 0) return false;
+            try { write(line); }
+            catch (Exception) { }
+            return true;
+        }
+    }
+
     /// <summary>Exit's restore decision, free of WPF.</summary>
     public static class PowerCleanRecovery
     {
@@ -158,7 +200,10 @@ namespace RamOptimiser.Gui
         /// </summary>
         public static readonly TimeSpan EmergencyLockWait = TimeSpan.FromSeconds(3);
 
-        /// <summary>The fatal-error restore's whole budget, lock wait included (ServiceTrimmer.TryRestoreBounded).</summary>
+        /// <summary>
+        /// The fatal-error restore's deadline, lock wait included (ServiceTrimmer.TryRestoreBounded): every wait comes
+        /// out of it, but a service start already under way is not cut short, so it is not a hard cap.
+        /// </summary>
         public static readonly TimeSpan EmergencyBudget = TimeSpan.FromSeconds(15);
 
         /// <summary>
@@ -170,6 +215,25 @@ namespace RamOptimiser.Gui
         {
             try { teardown(); }
             finally { restore(); }
+        }
+
+        /// <summary>
+        /// Exit's teardown steps, in order, each on its own (as EmergencyCleanup does): a step that throws does not
+        /// skip the later ones, so a failing hotkey or tray dispose still lets auto-clean's timer stop. Once every
+        /// step has run, the first exception is rethrown with its own stack trace (TeardownThenRestore passes it on).
+        /// </summary>
+        public static void RunSteps(params Action[] steps)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo first = null;
+            foreach (Action step in steps)
+            {
+                try { step(); }
+                catch (Exception ex)
+                {
+                    if (first == null) first = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex);
+                }
+            }
+            if (first != null) first.Throw();
         }
     }
 }

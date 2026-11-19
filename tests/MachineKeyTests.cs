@@ -369,6 +369,42 @@ namespace RamOptimiser.Tests
             Check("journal: a registry error is Remove false", !j.Remove("Spooler"));
             Check("journal: every handle is closed", reg.OpenHandles == 0, reg.OpenHandles.ToString());
 
+            // A refused record is logged with its reason, once per process (the README's "logs why in error.log").
+            var lines = new List<string>();
+            var once = new OnceLog(lines.Add);
+            j = new PowerCleanJournal(new FakeRegistry { DenyCreate = true }, SomeUser, once);
+            bool firstAdd = j.Add("Spooler"), secondAdd = j.Add("SysMain");
+            var j2 = new PowerCleanJournal(new FakeRegistry { DenyCreate = true }, SomeUser, once);
+            bool thirdAdd = j2.Add("Spooler");
+            string logged = lines.Count == 0 ? "nothing logged" : string.Join(" | ", lines.ToArray());
+            Check("journal: the first refusal is logged, with the service and why", lines.Count >= 1 && !firstAdd
+                && lines[0].Contains("Spooler") && lines[0].Contains("Access is denied"), logged);
+            Check("journal: later refusals in the process are not logged again", lines.Count == 1 && !secondAdd && !thirdAdd, logged);
+
+            var full = new List<string>();
+            reg = new FakeRegistry();
+            key = reg.Add("RamOptimiser", "PowerClean", SomeUser);
+            for (int i = 0; i < StoppedServiceJournal.MaxNames; i++) key.SetValue("CDPUserSvc_" + (0x2000 + i).ToString("x"), "x");
+            j = new PowerCleanJournal(reg, SomeUser, new OnceLog(full.Add));
+            Check("journal: a full journal's refusal says it is full", !j.Add("Spooler") && full.Count == 1 && full[0].Contains("full"),
+                full.Count == 0 ? "nothing logged" : full[0]);
+
+            var unsafeLines = new List<string>();
+            reg = new FakeRegistry();
+            key = reg.Add("RamOptimiser", "PowerClean", SomeUser);
+            key.Sddl = "O:" + SomeUser + "G:SYD:(A;CI;KA;;;BA)(A;CI;KA;;;" + SomeUser + ")";
+            j = new PowerCleanJournal(reg, SomeUser, new OnceLog(unsafeLines.Add));
+            Check("journal: a refused key's refusal gives the key's problem", !j.Add("SysMain") && unsafeLines.Count == 1
+                && unsafeLines[0].Contains(@"PowerClean\" + SomeUser), unsafeLines.Count == 0 ? "nothing logged" : unsafeLines[0]);
+
+            var none = new List<string>();
+            j = new PowerCleanJournal(new FakeRegistry(), SomeUser, new OnceLog(none.Add));
+            Check("journal: records that are made log nothing", j.Add("Spooler") && j.Add("WinDefend") && j.Remove("Spooler") && none.Count == 0,
+                none.Count == 0 ? null : none[0]);
+            Check("journal: the current user's journal logs to the process's error log, a bare one nowhere",
+                PowerCleanJournal.ForCurrentUser().RefusalLog == PowerCleanJournal.ProcessRefusals && PowerCleanJournal.ProcessRefusals != null
+                && new PowerCleanJournal(new FakeRegistry(), SomeUser).RefusalLog == null);
+
             Check("journal: a malformed SID is refused", Catch(() => new PowerCleanJournal(new FakeRegistry(), @"S-1-5-21\..\x")) is ArgumentException);
             Check("journal: the SID is used in its canonical form", new PowerCleanJournal(new FakeRegistry(), "s-1-5-18").KeyPath.EndsWith(@"\S-1-5-18", StringComparison.Ordinal));
             PowerCleanJournal mine = PowerCleanJournal.ForCurrentUser();

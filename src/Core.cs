@@ -1222,9 +1222,10 @@ namespace RamOptimiser
 
         /// <summary>
         /// raw without control characters (terminal escape sequences start with one), format characters (bidi
-        /// overrides, zero-width marks, and the supplementary ones such as tag characters), line and paragraph
-        /// separators and unpaired surrogates. Walks code points, so a surrogate pair is judged as one character.
-        /// Null gives "". Pure.
+        /// overrides, zero-width marks, the soft hyphen, and the supplementary ones such as tag characters), line and
+        /// paragraph separators and unpaired surrogates. Spaces other than U+0020 (no-break, figure, narrow no-break,
+        /// ideographic and the rest of SpaceSeparator) become an ASCII space, so a label shows one kind of space.
+        /// Walks code points, so a surrogate pair is judged as one character. Null gives "". Pure.
         /// </summary>
         public static string Visible(string raw)
         {
@@ -1235,17 +1236,19 @@ namespace RamOptimiser
             {
                 int width;
                 UnicodeCategory cat = CategoryAt(raw, i, out width);
-                if (!Hidden(cat)) sb.Append(raw, i, width);
+                if (LookAlikeSpace(raw[i], cat)) sb.Append(' ');
+                else if (!Hidden(cat)) sb.Append(raw, i, width);
                 i += width;
             }
             return sb.ToString();
         }
 
         /// <summary>
-        /// raw with each character Visible would drop replaced by mark (a surrogate pair counts as one). For text
-        /// that is an identity check, such as the Startup tab's 'Runs &lt;path&gt;' line: dropping hidden characters
-        /// there would let a crafted path read exactly like a protected one, while a visible mark ('?' cannot be in
-        /// a Windows path) shows that it is not. Null gives "". Pure.
+        /// raw with each character Visible would drop or turn into an ASCII space replaced by mark (a surrogate pair
+        /// counts as one). For text that is an identity check, such as the Startup tab's 'Runs &lt;path&gt;' line:
+        /// dropping hidden characters there would let a crafted path read exactly like a protected one, and a no-break
+        /// space in "Program Files" reads like the real one, while a visible mark ('?' cannot be in a Windows path)
+        /// shows that it is not. Only U+0020 is kept as a space. Null gives "". Pure.
         /// </summary>
         public static string Marked(string raw, string mark)
         {
@@ -1256,7 +1259,7 @@ namespace RamOptimiser
             {
                 int width;
                 UnicodeCategory cat = CategoryAt(raw, i, out width);
-                if (Hidden(cat)) sb.Append(mark);
+                if (Hidden(cat) || LookAlikeSpace(raw[i], cat)) sb.Append(mark);
                 else sb.Append(raw, i, width);
                 i += width;
             }
@@ -1288,7 +1291,7 @@ namespace RamOptimiser
                     continue;
                 }
                 if (char.IsLowSurrogate(ch)) continue;
-                UnicodeCategory cat = char.GetUnicodeCategory(ch);
+                UnicodeCategory cat = CharUnicodeInfo.GetUnicodeCategory(ch);
                 if (ch == '\r' || ch == '\n' || ch == '\t' || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator)
                     sb.Append(' ');
                 else if (cat != UnicodeCategory.Control && cat != UnicodeCategory.Format)
@@ -1299,7 +1302,9 @@ namespace RamOptimiser
 
         /// <summary>
         /// The category of the code point at i. A surrogate pair is read as one character (width 2); a surrogate
-        /// without its partner reads Surrogate (width 1).
+        /// without its partner reads Surrogate (width 1). CharUnicodeInfo for single units too, not
+        /// char.GetUnicodeCategory: on .NET Framework the latter reads the soft hyphen U+00AD as DashPunctuation,
+        /// though Unicode makes it a format character (the JSON writer judges it the same way).
         /// </summary>
         public static UnicodeCategory CategoryAt(string s, int i, out int width)
         {
@@ -1310,13 +1315,19 @@ namespace RamOptimiser
                 return CharUnicodeInfo.GetUnicodeCategory(s, i);
             }
             width = 1;
-            return char.GetUnicodeCategory(c);
+            return CharUnicodeInfo.GetUnicodeCategory(c);
         }
 
         static bool Hidden(UnicodeCategory cat)
         {
             return cat == UnicodeCategory.Control || cat == UnicodeCategory.Format || cat == UnicodeCategory.Surrogate
                 || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator;
+        }
+
+        /// <summary>A space that is not U+0020 (every SpaceSeparator is in the BMP, so one unit is enough).</summary>
+        static bool LookAlikeSpace(char c, UnicodeCategory cat)
+        {
+            return cat == UnicodeCategory.SpaceSeparator && c != ' ';
         }
     }
 

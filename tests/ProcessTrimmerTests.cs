@@ -49,7 +49,7 @@ namespace RamOptimiser.Tests
                     continue;
                 }
                 if (char.IsLowSurrogate(c) || char.IsControl(c)
-                    || char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.Format) return false;
+                    || System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.Format) return false;
             }
             return true;
         }

@@ -68,6 +68,16 @@ namespace RamOptimiser.Tests
                 && AppPaths.DataFolderFor(@"\\server\pipes") == @"\\server\pipes\RamOptimiser");
             Check("paths: a folder named pipe deeper in a share is fine",
                 AppPaths.DataFolderFor(@"\\server\share\pipe") == @"\\server\share\pipe\RamOptimiser");
+
+            // IPC$ is the named-pipe share of a host, like \\host\pipe.
+            foreach (string bad in new[] { @"\\server\IPC$\x", @"\\server\ipc$", @"\\server\Ipc$\", @"\\server/IPC$/x",
+                @"\\server\\ipc$\x", @"\\server\IPC$.\x", @"\\server\IPC$ \x" })
+                Check("paths: refused " + bad, AppPaths.DataFolderFor(bad) == null, AppPaths.DataFolderFor(bad));
+            Check("paths: a share merely starting with ipc is a share",
+                AppPaths.DataFolderFor(@"\\server\ipcshare\x") == @"\\server\ipcshare\x\RamOptimiser"
+                && AppPaths.DataFolderFor(@"\\server\ipc\x") == @"\\server\ipc\x\RamOptimiser");
+            Check("paths: a folder named IPC$ deeper in a share is fine",
+                AppPaths.DataFolderFor(@"\\server\share\IPC$") == @"\\server\share\IPC$\RamOptimiser");
         }
 
         // ---------------------------------------------------------------- record 20, hardening 77/96: protected roots

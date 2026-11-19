@@ -599,8 +599,12 @@ namespace RamOptimiser
         /// The fatal-error path's restore: synchronous, and bounded, because the process ends as soon as the crash
         /// handler returns. Waits at most lockWait for the service lock (a Power Clean stuck on a stop may hold it)
         /// and gives up quietly if it does not come; the journal still names the services, so the next elevated start
-        /// finishes the job. budget (lock wait included) caps the whole restore: no service is started once it is
-        /// spent, and each service's waits are cut to what is left. Returns null when the lock was not taken.
+        /// finishes the job. budget (lock wait included) is one deadline for the whole restore: no service is opened
+        /// or sent a start once it is spent, and every wait (for a stop still under way, then for Running) is cut to
+        /// the time left, read again just before that wait. It is not a hard cap: ServiceController.Start and Continue
+        /// are synchronous calls to the service control manager that cannot be bounded (a slow service can hold
+        /// Start for as long as Windows lets it take to start), and a real WaitForStatus can run one 250 ms poll past
+        /// its limit. Returns null when the lock was not taken.
         /// </summary>
         public static List<ServiceAction> TryRestoreBounded(TimeSpan lockWait, TimeSpan budget)
         {
@@ -633,26 +637,44 @@ namespace RamOptimiser
             return RestoreLocked(names, null);
         }
 
-        /// <param name="timeLeft">Null for no overall limit (StopTimeout per wait); otherwise the time left, which
-        /// stops the loop before a service is opened once it is spent and cuts each wait to it. Services not reached
-        /// stay on the stopped list and in the journal.</param>
+        /// <param name="timeLeft">Null for no overall limit (StopTimeout per wait); otherwise the time left on one
+        /// deadline, read again before every wait and before every start: the loop stops before a service is opened
+        /// once it is spent, and each wait is cut to what is left at that moment, so two waits for one service never
+        /// add up to more than the deadline allows. Services not reached stay on the stopped list and in the journal.</param>
         internal static List<ServiceAction> RestoreLocked(List<string> names, Func<TimeSpan> timeLeft)
         {
+            return RestoreLocked(names, timeLeft, OpenService);
+        }
+
+        static IServiceControl OpenService(string name)
+        {
+            return new ServiceControl(new ServiceController(name));
+        }
+
+        /// <summary>RestoreLocked with the way a service is opened passed in, so tests can pass fakes and a fake clock.</summary>
+        internal static List<ServiceAction> RestoreLocked(List<string> names, Func<TimeSpan> timeLeft, Func<string, IServiceControl> open)
+        {
             var done = new List<ServiceAction>();
+            Func<TimeSpan> waitLimit = () =>
+            {
+                if (timeLeft == null) return StopTimeout;
+                TimeSpan left = timeLeft();
+                return left < StopTimeout ? left : StopTimeout;
+            };
             foreach (string name in names)
             {
-                TimeSpan timeout = StopTimeout;
-                if (timeLeft != null)
-                {
-                    TimeSpan left = timeLeft();
-                    if (left <= TimeSpan.Zero) break;
-                    if (left < timeout) timeout = left;
-                }
+                if (timeLeft != null && timeLeft() <= TimeSpan.Zero) break;
                 ServiceRule rule = ServiceCatalog.Find(name);
                 var a = new ServiceAction { Name = name, Label = rule != null ? rule.Label : name };
                 try
                 {
-                    using (var sc = new ServiceController(name)) RestoreOne(new ServiceControl(sc), a, timeout);
+                    IServiceControl sc = open(name);
+                    try { RestoreOne(sc, a, waitLimit); }
+                    finally
+                    {
+                        var d = sc as IDisposable;
+                        if (d != null) d.Dispose();
+                    }
                     if (a.Started) Forget(name);
                 }
                 catch (InvalidOperationException ex)
@@ -668,29 +690,51 @@ namespace RamOptimiser
 
         /// <summary>
         /// Starts one service again and records the outcome in a. A service still stopping (its stop timed out in
-        /// Stop) is waited for first, then started; a paused one is continued. Tests pass a fake service.
+        /// Stop) is waited for first, then started; a paused one is continued. Each wait is up to timeout. Tests pass
+        /// a fake service.
         /// </summary>
         internal static void RestoreOne(IServiceControl sc, ServiceAction a, TimeSpan timeout)
+        {
+            RestoreOne(sc, a, () => timeout);
+        }
+
+        /// <summary>
+        /// As above, with waitLimit read again before each wait and before the start, so the waits come out of one
+        /// deadline. Once it reads zero or less, nothing is waited for (the status is read once instead) and a
+        /// service not yet sent its start is not started: Start and Continue are synchronous and cannot be bounded.
+        /// </summary>
+        internal static void RestoreOne(IServiceControl sc, ServiceAction a, Func<TimeSpan> waitLimit)
         {
             ServiceControllerStatus status = sc.Status;
             if (status == ServiceControllerStatus.StopPending)
             {
-                try { sc.WaitForStatus(ServiceControllerStatus.Stopped, timeout); }
-                catch (System.ServiceProcess.TimeoutException)
+                TimeSpan limit = waitLimit();
+                if (!WaitFor(sc, ServiceControllerStatus.Stopped, limit))
                 {
-                    Mark(a, ServiceOutcome.StillStopping, "was still stopping after " + timeout.TotalSeconds + " s");
+                    Mark(a, ServiceOutcome.StillStopping, limit > TimeSpan.Zero ? "was still stopping after " + limit.TotalSeconds + " s"
+                        : "was still stopping when the time for the restore ran out");
                     return;
                 }
                 status = ServiceControllerStatus.Stopped;
             }
-            try
+            if (status == ServiceControllerStatus.Stopped || status == ServiceControllerStatus.Paused)
             {
+                if (waitLimit() <= TimeSpan.Zero) { Mark(a, ServiceOutcome.StartTimedOut, "not started: the time for the restore ran out"); return; }
                 if (status == ServiceControllerStatus.Stopped) sc.Start();
-                else if (status == ServiceControllerStatus.Paused) sc.Continue();
-                sc.WaitForStatus(ServiceControllerStatus.Running, timeout);
-                a.Outcome = ServiceOutcome.Started;
+                else sc.Continue();
             }
-            catch (System.ServiceProcess.TimeoutException) { Mark(a, ServiceOutcome.StartTimedOut, "still starting after " + timeout.TotalSeconds + " s"); }
+            TimeSpan run = waitLimit();
+            if (WaitFor(sc, ServiceControllerStatus.Running, run)) a.Outcome = ServiceOutcome.Started;
+            else Mark(a, ServiceOutcome.StartTimedOut, run > TimeSpan.Zero ? "still starting after " + run.TotalSeconds + " s"
+                : "still starting when the time for the restore ran out");
+        }
+
+        /// <summary>Waits up to limit for status; with no time left, reads the status once instead of waiting.</summary>
+        static bool WaitFor(IServiceControl sc, ServiceControllerStatus status, TimeSpan limit)
+        {
+            if (limit <= TimeSpan.Zero) return sc.Status == status;
+            try { sc.WaitForStatus(status, limit); return true; }
+            catch (System.ServiceProcess.TimeoutException) { return false; }
         }
 
         /// <summary>The ServiceController calls RestoreOne makes.</summary>
@@ -703,10 +747,11 @@ namespace RamOptimiser
             void WaitForStatus(ServiceControllerStatus status, TimeSpan timeout);
         }
 
-        sealed class ServiceControl : IServiceControl
+        sealed class ServiceControl : IServiceControl, IDisposable
         {
             readonly ServiceController sc;
             public ServiceControl(ServiceController sc) { this.sc = sc; }
+            public void Dispose() { sc.Dispose(); }
             public ServiceControllerStatus Status { get { sc.Refresh(); return sc.Status; } }
             public void Start() { sc.Start(); }
             public void Continue() { sc.Continue(); }

@@ -36,7 +36,42 @@ namespace RamOptimiser.Tests
             StartupDisplayTests();
             StartupWiringTests();
             CleanLogTextTests();
+            SoftHyphenAndSpaces();
             return failed;
+        }
+
+        // ---------------------------------------------------------------- final review: soft hyphen, look-alike spaces
+
+        static void SoftHyphenAndSpaces()
+        {
+            string shy = ((char)0xAD).ToString();
+            int width;
+            Check("soft hyphen: read as a format character", SafeText.CategoryAt("a" + shy, 1, out width) == UnicodeCategory.Format && width == 1,
+                SafeText.CategoryAt("a" + shy, 1, out width).ToString());
+            Check("soft hyphen: marked", SafeText.Marked("Disc" + shy + "ord", "?") == "Disc?ord", SafeText.Marked("Disc" + shy + "ord", "?"));
+            Check("soft hyphen: dropped from labels", SafeText.Visible("Disc" + shy + "ord") == "Discord", SafeText.Visible("Disc" + shy + "ord"));
+            Check("soft hyphen: Line drops it", SafeText.Line("a" + shy + "b", 200) == "ab", SafeText.Line("a" + shy + "b", 200));
+
+            // Spaces other than U+0020 look like one in a path, so the identity line marks them and labels normalise them.
+            foreach (int sp in new[] { 0x00A0, 0x2007, 0x202F, 0x3000, 0x2002 })
+            {
+                string s = ((char)sp).ToString();
+                string hex = sp.ToString("X4", CultureInfo.InvariantCulture);
+                string m = SafeText.Marked(@"C:\Program" + s + @"Files\x.exe", "?");
+                Check("look-alike space U+" + hex + ": marked", m == @"C:\Program?Files\x.exe", m);
+                string v = SafeText.Visible("a" + s + "b");
+                Check("look-alike space U+" + hex + ": a label shows an ASCII space", v == "a b", v);
+            }
+            Check("look-alike space: an ASCII space is not marked", SafeText.Marked(@"C:\Program Files\x.exe", "?") == @"C:\Program Files\x.exe");
+
+            KnownItem discord = StartupKnowledge.FindApp("Discord.exe");
+            var k = new StartupApp { Source = StartupSource.UserRun, Name = "Discord", Known = discord,
+                ExePath = @"C:\Program" + (char)0xA0 + @"Files\Discord\Discord.exe" };
+            string d = AppText.AppDetail(k, Win);
+            Check("startup detail: a no-break space in the path does not read as Program Files",
+                !d.Contains(@"Runs C:\Program Files\Discord\Discord.exe") && d.Contains(@"Runs C:\Program?Files\Discord\Discord.exe"), d);
+            string label = AppText.StartupLabel(new StartupApp { Source = StartupSource.UserRun, Name = "Evil" + (char)0x202F + "app" + shy });
+            Check("startup label: a narrow no-break space shows as a space, a soft hyphen goes", label == "Evil app", label);
         }
 
         static string Quote(string s)
@@ -99,9 +134,24 @@ namespace RamOptimiser.Tests
             string letters = "caf" + (char)0xE9 + " Stra" + (char)0xDF + "e " + (char)0x416 + (char)0x4E2D + " " + (char)0x928;
             Check("json: ordinary non-ASCII letters unchanged", Quote(letters) == "\"" + letters + "\"", Quote(letters));
 
-            // A valid surrogate pair is written as it is, a supplementary format character (a tag) included.
-            string smile = char.ConvertFromUtf32(0x1F600), tag = char.ConvertFromUtf32(0xE0041);
-            Check("json: valid surrogate pairs stay as they are", Quote(smile + tag) == "\"" + smile + tag + "\"", Quote(smile + tag));
+            // A valid surrogate pair is written as it is, unless its code point is a format character (a tag
+            // character): that is written as two escapes, one per surrogate, which is still valid JSON.
+            string smile = char.ConvertFromUtf32(0x1F600), tag = char.ConvertFromUtf32(0xE0041), han = char.ConvertFromUtf32(0x20000);
+            Check("json: ordinary surrogate pairs stay as they are", Quote(smile + han) == "\"" + smile + han + "\"", Quote(smile + han));
+            string tagQuoted = Quote(smile + tag);
+            Check("json: a supplementary format character is escaped as its two surrogates",
+                tagQuoted == "\"" + smile + U(tag[0]) + U(tag[1]) + "\"", tagQuoted);
+            object tagBack = null;
+            try { tagBack = new JavaScriptSerializer().DeserializeObject(tagQuoted); } catch (Exception) { }
+            Check("json: the escaped pair reads back as the same character", (tagBack as string) == smile + tag, tagQuoted);
+            var rawTags = new List<string>();
+            foreach (int cp in new[] { 0xE0001, 0xE0020, 0xE0041, 0xE007F })
+            {
+                string t = char.ConvertFromUtf32(cp);
+                string got = Quote("a" + t + "b");
+                if (got != "\"a" + U(t[0]) + U(t[1]) + "b\"" && rawTags.Count < 5) rawTags.Add(cp.ToString("X5", CultureInfo.InvariantCulture));
+            }
+            Check("json: every tag character is escaped", rawTags.Count == 0, string.Join(",", rawTags.ToArray()));
 
             string mixed = "x" + Rlo + Nel + (char)0x7F + Zw + (char)0xFEFF + letters + smile + Lsep + "y";
             string quoted = Quote(mixed);
