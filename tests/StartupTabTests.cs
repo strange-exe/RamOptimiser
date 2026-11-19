@@ -438,9 +438,12 @@ namespace RamOptimiser.Tests
             // E24: the tab lists the extra sources; E12: an elevated load tidies the journal after it was read.
             string query = Method(shell, "void QueryStartup()");
             Check("wiring: the tab reads packaged and run-once rows", query.Contains("StartupApps.Query(true)"), query);
-            int read = query.IndexOf("StartupServices.Query()", StringComparison.Ordinal);
+            int read = query.IndexOf("StartupServices.Query(out journalProblem)", StringComparison.Ordinal);
             int tidy = query.IndexOf("StartupServices.TidyJournal()", StringComparison.Ordinal);
             Check("wiring: tidy runs after the services were read", read > 0 && tidy > read, read + " / " + tidy);
+            // A refused ServiceStartup key reads as empty; its reason must reach error.log, not be dropped.
+            int logged = query.IndexOf("journal was not used: \" + journalProblem", StringComparison.Ordinal);
+            Check("wiring: a refused service journal is logged", read > 0 && logged > read, read + " / " + logged);
             Check("wiring: tidy only when elevated", Regex.IsMatch(query, @"if \(elevated && services != null\)[\s\S]{0,160}StartupServices\.TidyJournal\(\)"), query);
 
             // E13: the catch builds a typed failure; the row note decides error or note.

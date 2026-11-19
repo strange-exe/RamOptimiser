@@ -198,6 +198,23 @@ namespace RamOptimiser.App
                 return false;
             }
         }
+
+        /// <summary>
+        /// Runs a last step of the fatal route (AppMain.FailOnUiThread's Exit) and never lets it throw: onError gets
+        /// the exception, and a throwing onError is dropped too. Exit rethrows a teardown fault after it has started
+        /// the service restore (PowerCleanRecovery.TeardownThenRestore), and from the fault handler that rethrow
+        /// would escape to WinForms' ThreadException dialog (tray) or the AppDomain handler (dispatcher), whose
+        /// process end can cut the restore thread short. Nothing is lost by dropping it: the restore has started.
+        /// </summary>
+        public static void Quietly(Action body, Action<Exception> onError)
+        {
+            try { body(); }
+            catch (Exception ex)
+            {
+                try { onError(ex); }
+                catch (Exception) { }
+            }
+        }
     }
 
     public static class ServiceErrorRoute

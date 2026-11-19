@@ -170,6 +170,8 @@ namespace RamOptimiser.App
         static readonly TimeSpan SearchAnnounceDelay = TimeSpan.FromMilliseconds(300);
         int searchShown;
         bool startupSummaryAnnounced;
+        /// <summary>The ServiceStartup journal problem last written to error.log (QueryStartup, thread pool).</summary>
+        string startupJournalProblem;
 
         // Settings tab
         CheckBox settingsAutoSwitch, startupCheck, closeToTrayCheck, trayPercentCheck;
@@ -896,11 +898,17 @@ namespace RamOptimiser.App
             ThreadPool.QueueUserWorkItem(delegate
             {
                 List<StartupApp> apps = null; List<StartupService> services = null; string failure = null;
+                string journalProblem = null;
                 // E24: packaged and run-once rows too, shown read-only.
                 try { apps = StartupApps.Query(true); }
                 catch (Exception ex) { failure = AppText.Plain(ex.Message, "unknown error"); }
-                try { services = StartupServices.Query(); }
+                try { services = StartupServices.Query(out journalProblem); }
                 catch (Exception ex) { failure = failure ?? AppText.Plain(ex.Message, "unknown error"); }
+                // A refused ServiceStartup key hides every "turned off by this app" row and its Re-enable, so say why
+                // in error.log: once per distinct reason, not at every reload of the tab.
+                string loggedBefore = Interlocked.Exchange(ref startupJournalProblem, journalProblem);
+                if (journalProblem != null && journalProblem != loggedBefore)
+                    ErrorLog.TryWrite(ErrorLog.DefaultPath, "the Startup tab's service journal was not used: " + journalProblem, null);
                 Post(() =>
                 {
                     startupFlow.Loaded();

@@ -1242,6 +1242,28 @@ namespace RamOptimiser
         }
 
         /// <summary>
+        /// raw with each character Visible would drop replaced by mark (a surrogate pair counts as one). For text
+        /// that is an identity check, such as the Startup tab's 'Runs &lt;path&gt;' line: dropping hidden characters
+        /// there would let a crafted path read exactly like a protected one, while a visible mark ('?' cannot be in
+        /// a Windows path) shows that it is not. Null gives "". Pure.
+        /// </summary>
+        public static string Marked(string raw, string mark)
+        {
+            if (string.IsNullOrEmpty(raw)) return "";
+            var sb = new System.Text.StringBuilder(raw.Length);
+            int i = 0;
+            while (i < raw.Length)
+            {
+                int width;
+                UnicodeCategory cat = CategoryAt(raw, i, out width);
+                if (Hidden(cat)) sb.Append(mark);
+                else sb.Append(raw, i, width);
+                i += width;
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
         /// One safe line of free text (an error message, an activity row): CR, LF, tab and the Unicode line and
         /// paragraph separators become spaces, so words either side stay apart; other control and format characters
         /// (bidi overrides, zero-width marks) are dropped by category, lone surrogates are dropped, and the text is cut

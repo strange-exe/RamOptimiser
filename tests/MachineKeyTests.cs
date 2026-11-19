@@ -35,6 +35,7 @@ namespace RamOptimiser.Tests
             DescriptorTests();
             WalkTests();
             JournalTests();
+            StartupJournalTests();
             RealRegistryTests();
             Check("journal file: the old stopped-services.txt store is gone",
                 typeof(PowerCleanJournal).Assembly.GetType("RamOptimiser.Gui.StoppedServiceStore") == null);
@@ -219,6 +220,56 @@ namespace RamOptimiser.Tests
         {
             try { a(); return null; }
             catch (Exception ex) { return ex; }
+        }
+
+        // ---------------------------------------------------------------- the Startup tab's ServiceStartup journal
+
+        static void StartupJournalTests()
+        {
+            string problem;
+            var reg = new FakeRegistry();
+            Check("startup journal: a missing key reads as empty, with no problem",
+                StartupServices.ReadJournal(reg, out problem).Count == 0 && problem == null, problem);
+
+            reg = new FakeRegistry();
+            reg.Add("RamOptimiser", "ServiceStartup").SetValue("SysMain", "auto");
+            Dictionary<string, string> map = StartupServices.ReadJournal(reg, out problem);
+            Check("startup journal: a safe key is read", map.Count == 1 && map["SysMain"] == "auto" && problem == null, problem);
+
+            // A refused key reads as empty, and says why, so Query's caller can log it rather than drop every way back.
+            reg = new FakeRegistry();
+            reg.Add("RamOptimiser", "ServiceStartup").SetValue("SysMain", "auto");
+            reg.Find("RamOptimiser", "ServiceStartup").Sddl = "O:BAG:SYD:(A;CI;KA;;;BA)(A;CI;KW;;;BU)";
+            map = StartupServices.ReadJournal(reg, out problem);
+            Check("startup journal: a Users-writable key reads as empty and says why",
+                map.Count == 0 && problem != null && problem.Contains("ServiceStartup"), problem);
+
+            reg = new FakeRegistry();
+            reg.Add("RamOptimiser", "ServiceStartup").SetValue("SysMain", "auto");
+            reg.Find("RamOptimiser").SetValue(AppRegistry.LinkValueName, @"\REGISTRY\MACHINE\SOFTWARE\Elsewhere");
+            map = StartupServices.ReadJournal(reg, out problem);
+            Check("startup journal: a link above it reads as empty and says why",
+                map.Count == 0 && problem != null && problem.Contains("link"), problem);
+
+            // Every use of the ServiceStartup key goes through the checked walk: no direct HKLM open of the
+            // RamOptimiser path (it would follow links, skip the owner and permission checks and create keys at a
+            // link's target), and every JournalKey use outside its declaration is an AppRegistry.Open call.
+            string[] lines = File.ReadAllLines(Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                Path.Combine("..", Path.Combine("src", "Startup.cs")))));
+            var direct = new List<string>();
+            var bypass = new List<string>();
+            foreach (string line in lines)
+            {
+                string t = line.Trim();
+                if (t.StartsWith("//")) continue;
+                if (t.Contains("RamOptimiser") && (t.Contains("Registry.") || t.Contains("OpenSubKey") || t.Contains("CreateSubKey")))
+                    direct.Add(t);
+                if (t.Contains("JournalKey") && !t.Contains("AppRegistry.Open(") && !t.StartsWith("static readonly string[] JournalKey"))
+                    bypass.Add(t);
+            }
+            Check("startup journal: no direct HKLM open of the RamOptimiser key", direct.Count == 0, string.Join(" | ", direct.ToArray()));
+            Check("startup journal: every JournalKey use is a checked AppRegistry.Open", bypass.Count == 0,
+                string.Join(" | ", bypass.ToArray()));
         }
 
         // ---------------------------------------------------------------- PowerCleanJournal over the fake registry

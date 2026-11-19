@@ -820,7 +820,16 @@ namespace RamOptimiser
 
         public static List<StartupService> Query()
         {
-            Dictionary<string, string> journal = ReadJournal();
+            string journalProblem;
+            return Query(out journalProblem);
+        }
+
+        /// <param name="journalProblem">Why the ServiceStartup journal was not used (null when it was read or is
+        /// missing). Its rows then show no "turned off by this app" and cannot be re-enabled here, so the caller
+        /// logs it: otherwise the way back for every service the app turned off is gone without a trace.</param>
+        public static List<StartupService> Query(out string journalProblem)
+        {
+            Dictionary<string, string> journal = ReadJournal(AppRegistry.Machine, out journalProblem);
             var result = new List<StartupService>();
             var runningPerPid = new Dictionary<int, int>();
             var pids = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -983,6 +992,8 @@ namespace RamOptimiser
         /// Deletes the journal entries this app can no longer act on (ShouldForget): back on Automatic, Disabled by
         /// someone else, no longer listed, uninstalled, or malformed. Elevated only (returns 0 otherwise). Deletes
         /// values inside the journal key and nothing else: never the key, never a service change. Returns the count.
+        /// A key AppRegistry refuses deletes nothing; its reason is not repeated here, since the Query before every
+        /// tidy reports the same key's problem (Query's journalProblem, which the app logs).
         /// </summary>
         public static int TidyJournal()
         {
@@ -1139,9 +1150,15 @@ namespace RamOptimiser
         /// </summary>
         static Dictionary<string, string> ReadJournal()
         {
-            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             string problem;
-            using (IMachineKey key = AppRegistry.Open(JournalKey, false, false, out problem))
+            return ReadJournal(AppRegistry.Machine, out problem);
+        }
+
+        /// <summary>ReadJournal on the given registry; problem says why a refused key read as empty.</summary>
+        internal static Dictionary<string, string> ReadJournal(IMachineRegistry registry, out string problem)
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            using (IMachineKey key = AppRegistry.Open(registry, JournalKey, false, false, out problem))
             {
                 if (key == null) return map;
                 foreach (string name in key.ValueNames())

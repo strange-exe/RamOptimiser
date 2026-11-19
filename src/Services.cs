@@ -604,9 +604,20 @@ namespace RamOptimiser
         /// </summary>
         public static List<ServiceAction> TryRestoreBounded(TimeSpan lockWait, TimeSpan budget)
         {
-            if (StoppedThisSession().Count == 0) return new List<ServiceAction>();
+            return TryRestoreBounded(Operation, StoppedThisSession, lockWait, budget, RestoreLocked);
+        }
+
+        /// <summary>
+        /// TryRestoreBounded with its lock, its stopped list and its restore passed in, so tests can hold the lock
+        /// and see the deadline without a real service. names is read before the wait (nothing stopped: no wait)
+        /// and again under the lock; the budget's clock starts before the wait, so the wait spends the budget too.
+        /// </summary>
+        internal static List<ServiceAction> TryRestoreBounded(object gate, Func<List<string>> names, TimeSpan lockWait, TimeSpan budget,
+            Func<List<string>, Func<TimeSpan>, List<ServiceAction>> restore)
+        {
+            if (names().Count == 0) return new List<ServiceAction>();
             Stopwatch clock = Stopwatch.StartNew();
-            return TryLocked(Operation, lockWait, () => RestoreLocked(StoppedThisSession(), () => budget - clock.Elapsed));
+            return TryLocked(gate, lockWait, () => restore(names(), () => budget - clock.Elapsed));
         }
 
         /// <summary>Runs body under gate when the lock comes within wait; otherwise runs nothing and returns null.</summary>

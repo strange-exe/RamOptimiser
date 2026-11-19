@@ -4,6 +4,7 @@
 // bodies, and the deadline test uses a service name that is not installed.
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using RamOptimiser.App;
 using RamOptimiser.Gui;
@@ -75,6 +76,43 @@ namespace RamOptimiser.Tests
             Check("bounded restore: an exhausted budget starts nothing", done.Count == 0, done.Count + " action(s)");
             done = ServiceTrimmer.RestoreLocked(new List<string>(), null);
             Check("bounded restore: no names, no actions", done.Count == 0);
+
+            BoundedRestoreWiring();
+        }
+
+        /// <summary>
+        /// TryRestoreBounded itself with names to restore, over its own lock and a fake restore (no service): the
+        /// lock wait is lockWait, not the whole budget, and the budget's clock includes the lock wait.
+        /// </summary>
+        static void BoundedRestoreWiring()
+        {
+            var gate = new object();
+            var names = new List<string> { "RamOptimiserTestNoSuchService" };
+            bool ran = false;
+            using (new LockHolder(gate))
+            {
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                List<ServiceAction> done = ServiceTrimmer.TryRestoreBounded(gate, () => names, TimeSpan.FromMilliseconds(200),
+                    TimeSpan.FromSeconds(6), (n, left) => { ran = true; return new List<ServiceAction>(); });
+                clock.Stop();
+                Check("bounded restore: a held lock is waited for lockWait, not the budget", done == null && !ran
+                    && clock.Elapsed < TimeSpan.FromSeconds(3), clock.ElapsedMilliseconds + " ms");
+            }
+
+            // The lock comes after about 500 ms: the time left the restore sees has already lost that wait.
+            TimeSpan seen = TimeSpan.MaxValue;
+            List<string> given = null;
+            using (var holder = new LockHolder(gate))
+            {
+                var later = new Thread(() => { Thread.Sleep(500); holder.Dispose(); }) { IsBackground = true };
+                later.Start();
+                List<ServiceAction> done = ServiceTrimmer.TryRestoreBounded(gate, () => names, TimeSpan.FromSeconds(5),
+                    TimeSpan.FromSeconds(20), (n, left) => { given = n; seen = left(); return new List<ServiceAction>(); });
+                later.Join();
+                Check("bounded restore: the restore runs once the lock comes", done != null && given != null && given.Count == 1);
+            }
+            Check("bounded restore: the budget's clock includes the lock wait", seen <= TimeSpan.FromSeconds(20) - TimeSpan.FromMilliseconds(400),
+                seen.TotalMilliseconds + " ms left");
         }
 
         static bool FreeOnOtherThread(object gate)
@@ -109,8 +147,12 @@ namespace RamOptimiser.Tests
                 taken.WaitOne(TimeSpan.FromSeconds(10));
             }
 
+            int disposed;
+
+            /// <summary>Releases the lock; a second call (another thread already released it) does nothing.</summary>
             public void Dispose()
             {
+                if (Interlocked.Exchange(ref disposed, 1) != 0) return;
                 release.Set();
                 thread.Join(TimeSpan.FromSeconds(10));
                 taken.Close();
@@ -152,6 +194,32 @@ namespace RamOptimiser.Tests
             int ran = 0;
             completed = FaultRoute.Guard(() => ran++, ex => routed = ex);
             Check("tray fault: a handler that works runs once and is not routed", completed && ran == 1 && routed == null);
+
+            // The fatal route's own Exit may throw (TeardownThenRestore rethrows a teardown fault after starting the
+            // restore). Escaping there would reach WinForms' dialog from a tray handler, or the AppDomain handler
+            // from the dispatcher one, so it is logged and dropped.
+            Exception logged = null, escaped = null;
+            var exitFault = new InvalidOperationException("window close failed");
+            try { FaultRoute.Quietly(() => { throw exitFault; }, ex => logged = ex); }
+            catch (Exception ex) { escaped = ex; }
+            Check("fatal route: a throwing exit is logged, not rethrown", escaped == null && ReferenceEquals(logged, exitFault),
+                escaped == null ? null : escaped.Message);
+            escaped = null;
+            try { FaultRoute.Quietly(() => { throw exitFault; }, ex => { throw new InvalidOperationException("log failed"); }); }
+            catch (Exception ex) { escaped = ex; }
+            Check("fatal route: a throwing log does not escape either", escaped == null, escaped == null ? null : escaped.Message);
+            ran = 0;
+            logged = null;
+            FaultRoute.Quietly(() => ran++, ex => logged = ex);
+            Check("fatal route: a working exit runs once, nothing logged", ran == 1 && logged == null);
+
+            string main = File.ReadAllText(Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                Path.Combine("..", Path.Combine("src", Path.Combine("App", "AppMain.cs"))))));
+            int at = main.IndexOf("static void FailOnUiThread(", StringComparison.Ordinal);
+            int end = at < 0 ? -1 : main.IndexOf("\n        }", at, StringComparison.Ordinal);
+            string body = end < 0 ? "" : main.Substring(at, end - at);
+            int quiet = body.IndexOf("FaultRoute.Quietly(", StringComparison.Ordinal), exit = body.IndexOf("shell.Exit()", StringComparison.Ordinal);
+            Check("fatal route: FailOnUiThread runs Exit inside FaultRoute.Quietly", quiet >= 0 && exit > quiet, body);
         }
 
         // ---------------------------------------------------------------- record 21: elevated test runner

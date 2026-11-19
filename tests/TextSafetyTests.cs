@@ -146,13 +146,30 @@ namespace RamOptimiser.Tests
             var k = new StartupApp { Source = StartupSource.UserRun, Name = "Discord", ExePath = path, Known = discord };
             Check("startup label: a known row keeps the list's label", discord != null && AppText.StartupLabel(k) == discord.Label);
             string d = AppText.AppDetail(k, Win);
-            Check("startup detail: the Runs path is shown cleaned", d.Contains(@"Runs C:\Users\x\abcd\Discord.exe") && !HasHidden(d), d);
+            Check("startup detail: the Runs path shows each hidden character as ?", d.Contains(@"Runs C:\Users\x\a?b?c?d?\Discord.exe") && !HasHidden(d), d);
             Check("startup detail: the stored path is unchanged", k.ExePath == path);
 
             k.ExePath = null;
             k.Name = "Disc" + Rlo + "ord" + Lsep;
             d = AppText.AppDetail(k, Win);
-            Check("startup detail: the name used when there is no path is cleaned too", d.Contains("Runs Discord") && !HasHidden(d), d);
+            Check("startup detail: the name used when there is no path is marked too", d.Contains("Runs Disc?ord?") && !HasHidden(d), d);
+
+            // The 'Runs' line is the row's only identity check (the list matches by file name), so a path that differs
+            // from a real one only by hidden characters must not read as that path. '?' cannot be in a Windows path.
+            string real = @"C:\Program Files\Discord\Discord.exe";
+            k.ExePath = @"C:\Program" + Rlo + @" Files\Discord\Discord.exe";
+            d = AppText.AppDetail(k, Win);
+            Check("startup detail: a path padded with hidden characters does not read as the real one",
+                !d.Contains("Runs " + real) && d.Contains(@"Runs C:\Program? Files\Discord\Discord.exe"), d);
+            k.ExePath = real;
+            Check("startup detail: a plain path is shown as it is", AppText.AppDetail(k, Win).Contains("Runs " + real));
+
+            // SafeText.Marked: one mark per hidden code point (a pair counts once), visible text untouched.
+            string smile = char.ConvertFromUtf32(0x1F600), tag = char.ConvertFromUtf32(0xE0041);
+            string marked = SafeText.Marked("a" + Rlo + "b" + Zw + Lsep + Nel + Bel + smile + tag + (char)0xD800 + "z", "?");
+            Check("marked: each hidden code point becomes one mark", marked == "a?b????" + smile + "??z", marked);
+            Check("marked: null and empty give empty", SafeText.Marked(null, "?") == "" && SafeText.Marked("", "?") == "");
+            Check("marked: plain text is unchanged", SafeText.Marked(real, "?") == real);
 
             string longPath = @"C:\Users\x\" + new string('p', 300) + @"\Discord.exe";
             k.ExePath = longPath;

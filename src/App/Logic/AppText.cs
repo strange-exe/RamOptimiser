@@ -839,12 +839,13 @@ namespace RamOptimiser.App
         const int MaxShownPath = 32767;
 
         /// <summary>
-        /// A program path as the 'Runs' line shows it: SafeText's filter (control, format and separator characters
-        /// dropped) with no practical length cap, because that line is the row's identity check. Pure.
+        /// A program path as the 'Runs' line shows it, with no practical length cap, because that line is the row's
+        /// identity check. Control, format and separator characters are shown as '?' (SafeText.Marked), not dropped:
+        /// dropped, "C:\Program&lt;U+202E&gt; Files\..." would read exactly like the real Program Files path. Pure.
         /// </summary>
-        static string ShownPath(string path)
+        internal static string ShownPath(string path)
         {
-            return SafeText.Name(path, MaxShownPath, "...");
+            return SafeText.Name(SafeText.Marked(path, "?"), MaxShownPath, "...");
         }
 
         /// <summary>As below, with the real Windows folder.</summary>
@@ -866,8 +867,8 @@ namespace RamOptimiser.App
                 parts.Add(a.Known.Purpose);
                 // A run-once row has no off to describe.
                 if (!string.IsNullOrEmpty(a.Known.Effect) && !StartupApps.IsRunOnce(a.Source)) parts.Add("If off: " + a.Known.Effect);
-                // The list matches by file name only, so say which file this row really runs (shown cleaned, so a
-                // crafted path can't fake a second line or reorder itself).
+                // The list matches by file name only, so say which file this row really runs (hidden characters
+                // shown as '?', so a crafted path can't fake a second line, reorder itself or pass as a real path).
                 parts.Add("Runs " + ShownPath(a.ExePath ?? a.Name));
             }
             parts.Add(PublisherLine(a, windowsFolder));

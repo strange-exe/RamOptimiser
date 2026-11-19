@@ -133,8 +133,13 @@ namespace RamOptimiser.App
         internal static void FailOnUiThread(string context, Exception ex)
         {
             Fatal(context, ex);
-            if (shell != null) shell.Exit();
-            else if (Application.Current != null) Application.Current.Shutdown(1);
+            // Exit rethrows a teardown fault once its restore has started; escaping from here would hand it to
+            // WinForms' dialog or the AppDomain handler (FaultRoute.Quietly), so it is logged instead.
+            FaultRoute.Quietly(() =>
+            {
+                if (shell != null) shell.Exit();
+                else if (Application.Current != null) Application.Current.Shutdown(1);
+            }, e => ErrorLog.TryWrite(ErrorLog.DefaultPath, "exit after an error failed", e));
         }
 
         static void OnDomainUnhandledException(object sender, UnhandledExceptionEventArgs e)

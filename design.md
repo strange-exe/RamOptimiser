@@ -280,7 +280,8 @@ Not verified: high contrast, Narrator on the tray menu, a real sleep and wake.
   per-process trim summary: it walks code points, so supplementary format characters (tag characters) and
   unpaired surrogates go too, and terminal escape sequences lose their control character. `top --json` keeps the
   raw name (the JSON writer escapes every control, format and separator character); it is data, not display.
-  Startup app rows use the same cleaner for their own names (`AppText.StartupLabel`) and the 'Runs <path>' line.
+  Startup app rows use the same cleaner for their own names (`AppText.StartupLabel`). The 'Runs <path>' line is
+  the row's identity check, so it shows each hidden character as '?' (`SafeText.Marked`) instead of dropping it.
 - **Locked controls (U21).** The last selected area stays enabled and in the Tab order; unticking it is refused (the
   box stays ticked, nothing is saved) and "At least one area must stay selected, so Process working sets stays on."
   shows under the list as a polite live region, read out on every attempt. While locked the box has ItemStatus
