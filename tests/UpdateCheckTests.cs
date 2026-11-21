@@ -267,18 +267,20 @@ namespace RamOptimiser.Tests
         {
             Check("text: row", AppText.UpdateRowTitle == "Check for updates"
                 && AppText.UpdateRowNote == "Once a day, asks GitHub for the latest version number. Nothing is downloaded or installed.");
-            Check("text: not checked yet", AppText.UpdateStatusLine(true, "2026.11.19", null) == "Version 2026.11.19.");
-            Check("text: off", AppText.UpdateStatusLine(false, "2026.11.19", UpdateCheck.Compare(V("2026.12.01"), V("2026.11.19"))) == "Version 2026.11.19.");
-            Check("text: up to date", AppText.UpdateStatusLine(true, "2026.11.19", UpdateCheck.Compare(V("2026.11.19"), V("2026.11.19")))
-                == "Version 2026.11.19. Up to date.");
-            Check("text: available", AppText.UpdateStatusLine(true, "2026.11.19", UpdateCheck.Compare(V("2026.12.01"), V("2026.11.19")))
+            // The running version has its own line, shown in every state (owner request 2026-11-21); the status line
+            // under it reports only the check.
+            Check("text: version line", AppText.VersionLine("2026.11.19") == "Version 2026.11.19");
+            Check("text: not checked yet", AppText.UpdateStatusLine(true, null) == "Not checked yet.");
+            Check("text: off", AppText.UpdateStatusLine(false, UpdateCheck.Compare(V("2026.12.01"), V("2026.11.19"))) == "Update check is off.");
+            Check("text: up to date", AppText.UpdateStatusLine(true, UpdateCheck.Compare(V("2026.11.19"), V("2026.11.19"))) == "Up to date.");
+            Check("text: available", AppText.UpdateStatusLine(true, UpdateCheck.Compare(V("2026.12.01"), V("2026.11.19")))
                 == "Version 2026.12.01 is available.");
-            string failedLine = AppText.UpdateStatusLine(true, "2026.11.19", UpdateResult.Failed(UpdateFailure.HttpStatus, 404));
+            string failedLine = AppText.UpdateStatusLine(true, UpdateResult.Failed(UpdateFailure.HttpStatus, 404));
             Check("text: failed names the status", failedLine == "Couldn't check: GitHub answered 404.", failedLine);
             foreach (UpdateFailure f in Enum.GetValues(typeof(UpdateFailure)))
             {
                 if (f == UpdateFailure.None) continue;
-                string line = AppText.UpdateStatusLine(true, "2026.11.19", UpdateResult.Failed(f, 500));
+                string line = AppText.UpdateStatusLine(true, UpdateResult.Failed(f, 500));
                 Check("text: failure " + f + " has a short reason", line.StartsWith("Couldn't check: ", StringComparison.Ordinal) && line.EndsWith(".")
                     && line.Length < 70 && line.Length > "Couldn't check: .".Length, line);
             }
@@ -624,6 +626,14 @@ namespace RamOptimiser.Tests
             Check("row: status line is a polite live region in the row", region != null && region.LocalName == "LiveRegion"
                 && region.GetAttribute("AutomationProperties.LiveSetting") == "Polite" && row != null && Ancestor(region, "Border") == row
                 && region.SelectSingleNode(".//*[@x:Name='UpdateStatus']", ns) != null);
+            // The running version: always shown, in the row, before the status line, never inside the live region
+            // (it does not change while the app runs, so it is not read out on every check).
+            var version = doc.SelectSingleNode("//*[@x:Name='AppVersion']", ns) as XmlElement;
+            Check("row: the version line is a visible text in the row, above the status, outside the live region",
+                version != null && version.LocalName == "TextBlock" && row != null && Ancestor(version, "Border") == row
+                && Ancestor(version, "LiveRegion") == null && version.GetAttribute("Visibility") == ""
+                && File.ReadAllText(path).IndexOf("x:Name=\"AppVersion\"", StringComparison.Ordinal)
+                    < File.ReadAllText(path).IndexOf("x:Name=\"UpdateStatusRegion\"", StringComparison.Ordinal));
             foreach (string[] b in new[] { new[] { "UpdateOpen", AppText.UpdateOpenLabel }, new[] { "UpdateCopy", AppText.UpdateCopyLabel } })
             {
                 var e = doc.SelectSingleNode("//*[@x:Name='" + b[0] + "']", ns) as XmlElement;
@@ -687,6 +697,9 @@ namespace RamOptimiser.Tests
             Check("wiring: copy puts only the constant on the clipboard", Body(shell, "void CopyDownloadLink()").Contains("Clipboard.SetText(UpdateCheck.DownloadPage)")
                 && Count(shell, "Clipboard.SetText(") == 1);
             Check("wiring: the link box shows the constant", shell.Contains("updateLink.Text = UpdateCheck.DownloadPage;"));
+            Check("wiring: the version line shows the build's version, set once",
+                shell.Contains("F<TextBlock>(\"AppVersion\").Text = AppText.VersionLine(BuildInfo.Version);")
+                && Count(shell, "AppText.VersionLine(") == 1);
 
             string check = Body(shell, "void MaybeCheckForUpdates()");
             Check("wiring: checks go through the schedule with the setting and exiting", check.Contains("updateSchedule.TryStart(settings.CheckForUpdates, exiting, DateTime.UtcNow)"), check);

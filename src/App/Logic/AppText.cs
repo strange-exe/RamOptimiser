@@ -1909,18 +1909,25 @@ namespace RamOptimiser.App
         public const string UpdateCopyFailed = "The link could not be copied. Select it and press Ctrl+C.";
 
         /// <summary>
-        /// The line under the switch: this version before the first answer and while the check is off, then what the
-        /// last check found. Only versions the app formatted and its own reasons appear; nothing from the answer.
+        /// The line under the version: what the last check found. Only versions the app formatted and its own reasons
+        /// appear; nothing from the answer.
         /// </summary>
-        public static string UpdateStatusLine(bool enabled, string current, UpdateResult r)
+        public static string UpdateStatusLine(bool enabled, UpdateResult r)
         {
-            if (!enabled || r == null) return "Version " + current + ".";
+            if (!enabled) return "Update check is off.";
+            if (r == null) return "Not checked yet.";
             switch (r.Outcome)
             {
-                case UpdateOutcome.UpToDate: return "Version " + current + ". Up to date.";
+                case UpdateOutcome.UpToDate: return "Up to date.";
                 case UpdateOutcome.UpdateAvailable: return "Version " + r.Latest.Format() + " is available.";
                 default: return "Couldn't check: " + UpdateFailureReason(r) + ".";
             }
+        }
+
+        /// <summary>The running build's version, shown in Settings in every state (owner request 2026-11-21).</summary>
+        public static string VersionLine(string current)
+        {
+            return "Version " + current;
         }
 
         /// <summary>A few words for why a check failed.</summary>

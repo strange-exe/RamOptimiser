@@ -653,6 +653,7 @@ namespace RamOptimiser.App
             updateCopy = F<Button>("UpdateCopy");
             updateLink = F<TextBox>("UpdateLink");
             updateLink.Text = UpdateCheck.DownloadPage;
+            F<TextBlock>("AppVersion").Text = AppText.VersionLine(BuildInfo.Version);
             hotkeyBox = F<TextBox>("HotkeyBox");
             hotkeyRemove = F<Button>("HotkeyRemove");
             hotkeyNote = F<TextBlock>("HotkeyNote");
@@ -1993,7 +1994,7 @@ namespace RamOptimiser.App
         {
             if (updateStatusRegion == null) return;
             bool available = settings.CheckForUpdates && updateResult != null && updateResult.Outcome == UpdateOutcome.UpdateAvailable;
-            string line = updateOpenFailed ? AppText.UpdateOpenFailed : AppText.UpdateStatusLine(settings.CheckForUpdates, BuildInfo.Version, updateResult);
+            string line = updateOpenFailed ? AppText.UpdateOpenFailed : AppText.UpdateStatusLine(settings.CheckForUpdates, updateResult);
             updateStatus.Text = line;
             updateOpen.Visibility = available || updateOpenFailed ? Visibility.Visible : Visibility.Collapsed;
             updateCopy.Visibility = updateOpenFailed ? Visibility.Visible : Visibility.Collapsed;

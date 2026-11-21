@@ -737,7 +737,9 @@
                               VerticalAlignment="Center" AutomationProperties.Name="Check for updates"
                               AutomationProperties.HelpText="Once a day, asks GitHub for the latest version number. Nothing is downloaded or installed."/>
                   </Grid>
-                  <app:LiveRegion x:Name="UpdateStatusRegion" Margin="0,6,0,0" AutomationProperties.LiveSetting="Polite"
+                  <!-- The running version, always shown (owner request 2026-11-21); not a live region: it never changes. -->
+                  <TextBlock x:Name="AppVersion" Margin="0,6,0,0" Style="{StaticResource Small}" Foreground="{DynamicResource Text}"/>
+                  <app:LiveRegion x:Name="UpdateStatusRegion" Margin="0,2,0,0" AutomationProperties.LiveSetting="Polite"
                                   AutomationProperties.Name="Updates">
                     <TextBlock x:Name="UpdateStatus" Style="{StaticResource Small}" Foreground="{DynamicResource Text}"/>
                   </app:LiveRegion>
