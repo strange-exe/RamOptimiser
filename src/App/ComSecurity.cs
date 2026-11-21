@@ -27,6 +27,9 @@ namespace RamOptimiser.App
 
         const uint SddlRevision1 = 1;
 
+        /// <summary>True once CoInitializeSecurity took the policy. The Explorer route of the update page relies on it.</summary>
+        public static bool Applied { get; private set; }
+
         public static void Apply()
         {
             try
@@ -35,6 +38,7 @@ namespace RamOptimiser.App
                 int hr = absolute == IntPtr.Zero ? Marshal.GetHRForLastWin32Error()
                     : CoInitializeSecurity(absolute, -1, IntPtr.Zero, IntPtr.Zero, ComSecurityPolicy.AuthnLevel,
                         ComSecurityPolicy.ImpLevel, IntPtr.Zero, ComSecurityPolicy.Capabilities, IntPtr.Zero);
+                Applied = absolute != IntPtr.Zero && hr >= 0;
                 // A failed descriptor is never replaced by NULL: that would let any caller in.
                 string line = ComSecurityPolicy.LogLine(hr < 0 ? hr : 0);
                 if (line != null) ErrorLog.TryWrite(ErrorLog.DefaultPath, line, null);

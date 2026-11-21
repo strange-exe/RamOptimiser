@@ -2011,7 +2011,9 @@ namespace RamOptimiser.App
         {
             if (exiting) return;
             ClearUpdateOpenFailed(); // a new attempt: only its own failure shows the link again
-            if (UpdateOpen.Route(elevated) == UpdateOpenRoute.ExplorerShell)
+            UpdateOpenRoute route = UpdateOpen.Route(elevated || Elevation.IsHighIntegrity(), ComSecurity.Applied);
+            if (route == UpdateOpenRoute.CopyLink) { ShowUpdateLink(); return; }
+            if (route == UpdateOpenRoute.ExplorerShell)
             {
                 ShellOpen.OpenUnelevated(UpdateCheck.DownloadPage, ok => Post(() => { if (!ok) ShowUpdateLink(); }));
                 return;

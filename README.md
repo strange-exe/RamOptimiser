@@ -57,6 +57,11 @@ while it runs (6 hours after a check that failed). That is one HTTPS request to
 `RamOptimiser/<version>`, and nothing else is sent (no account, cookie or ID). Only the version number is read from
 the answer. Nothing is downloaded or installed.
 
+The request uses the proxy you set by hand in Windows (Settings > Network & internet > Proxy > Use a proxy server),
+or no proxy. It never uses automatic proxy detection or a setup script, because the app often runs as administrator,
+and it never signs in to a proxy. On a network that can only be reached through a setup script, the check fails and
+Settings says it couldn't check; the download page still opens.
+
 When a newer version is out, a tray notification says so (once per version while the app runs); clicking it opens
 the download page. Settings shows the same with an **Open download page** link. When the app runs as administrator
 it asks Explorer to open the page, so your browser never runs as administrator; if that fails, Settings shows the

@@ -264,6 +264,10 @@ namespace RamOptimiser.Tests
             Check("task cleanup: one exec action whose path is exactly this exe", p.Contains("$a.Count -eq 1")
                 && p.Contains("$a[0].Type -eq 0") && p.Contains("$a[0].Path.Trim([char]34) -eq $app"), "");
             Check("task cleanup: deletes in one place only", Count(p, "DeleteTask") == 1, Count(p, "DeleteTask") + " calls");
+            // A task whose definition cannot be read must never be judged by the previous task's actions.
+            int reset = p.IndexOf("$a=$null; try { $a=@($t.Definition.Actions) } catch { continue }; ", StringComparison.Ordinal);
+            Check("task cleanup: actions reset each pass, an unreadable task is skipped, before the delete check",
+                reset >= 0 && reset < p.IndexOf("$a.Count -eq 1", StringComparison.Ordinal) && Count(p, "$a=") == 2, "");
             Check("task cleanup: the script has no double quote of its own (only the two around -Command)", Count(p, "\"") == 2,
                 Count(p, "\"") + " double quotes");
 

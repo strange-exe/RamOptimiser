@@ -141,7 +141,8 @@ namespace RamOptimiser.Gui
 
         /// <summary>
         /// The check against any https address, or a loopback http one (the tests' server). direct skips the proxy, so a
-        /// test's request never leaves the machine; the app always goes through the system proxy like a browser would.
+        /// test's request never leaves the machine; the app takes the user's manual proxy only (UpdateProxy), never
+        /// automatic detection or a PAC script.
         /// </summary>
         internal static UpdateResult Fetch(Uri uri, string currentVersion, TimeSpan timeout, int maxBytes, bool direct)
         {
@@ -170,7 +171,7 @@ namespace RamOptimiser.Gui
                 req.PreAuthenticate = false;
                 req.CookieContainer = null;
                 req.AutomaticDecompression = DecompressionMethods.None;
-                if (direct) req.Proxy = null;
+                req.Proxy = direct ? null : UpdateProxy.ForRequest(uri);
                 Stopwatch clock = Stopwatch.StartNew();
                 try { resp = (HttpWebResponse)req.GetResponse(); }
                 catch (WebException ex)
@@ -362,17 +363,19 @@ namespace RamOptimiser.Gui
         }
     }
 
-    public enum UpdateOpenRoute { ShellExecute, ExplorerShell }
+    public enum UpdateOpenRoute { ShellExecute, ExplorerShell, CopyLink }
 
     /// <summary>
-    /// How the download page opens (owner decision 2026-11-19): elevated, the normal Explorer shell opens it, so the
-    /// browser never runs as administrator; not elevated, the app opens it itself.
+    /// How the download page opens (owner decision 2026-11-19): at high integrity (elevated, or any token at that
+    /// level), the normal Explorer shell opens it, so the browser never runs as administrator; that route relies on the
+    /// process-wide COM security, so without it the row only shows the link to copy. Otherwise the app opens it itself.
     /// </summary>
     public static class UpdateOpen
     {
-        public static UpdateOpenRoute Route(bool elevated)
+        public static UpdateOpenRoute Route(bool highIntegrity, bool comSecurityApplied)
         {
-            return elevated ? UpdateOpenRoute.ExplorerShell : UpdateOpenRoute.ShellExecute;
+            if (!highIntegrity) return UpdateOpenRoute.ShellExecute;
+            return comSecurityApplied ? UpdateOpenRoute.ExplorerShell : UpdateOpenRoute.CopyLink;
         }
     }
 }

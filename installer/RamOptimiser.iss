@@ -78,7 +78,8 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "{code:Task
 // The PowerShell command for [UninstallRun], expanded when setup writes the uninstall log. It uses the Task
 // Scheduler COM object rather than the ScheduledTasks module, so no module file is loaded and the execution
 // policy does not apply. The script holds no double quote (only the two around -Command), and the path is put in
-// single quotes with any single quote doubled, so nothing in it can end the string.
+// single quotes with any single quote doubled, so nothing in it can end the string. $a is cleared on every pass and
+// a task whose definition cannot be read is skipped, so one task is never judged by the last one's action.
 function TaskCleanupParams(Param: String): String;
 var
   App: String;
@@ -89,7 +90,7 @@ begin
     '$s=New-Object -ComObject Schedule.Service; $s.Connect(); $f=$s.GetFolder(''\''); ' +
     'foreach ($t in @($f.GetTasks(1))) { ' +
     'if ($t.Name -ne ''RamOptimiser'' -and $t.Name -notmatch ''^RamOptimiser-S-1-[0-9-]+$'') { continue }; ' +
-    '$a=@($t.Definition.Actions); ' +
+    '$a=$null; try { $a=@($t.Definition.Actions) } catch { continue }; ' +
     'if ($a.Count -eq 1 -and $a[0].Type -eq 0 -and $a[0].Path.Trim([char]34) -eq $app) { try { $f.DeleteTask($t.Name, 0) } catch { } } }"';
 end;
 

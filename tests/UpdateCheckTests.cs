@@ -36,6 +36,7 @@ namespace RamOptimiser.Tests
             CompareTests();
             ParseTests();
             ConstantTests();
+            ProxyTests();
             ScheduleTests();
             NoticeTests();
             WordingTests();
@@ -198,8 +199,54 @@ namespace RamOptimiser.Tests
             Check("const: user agent names the version", UpdateCheck.UserAgent("2026.11.19") == "RamOptimiser/2026.11.19");
             Check("const: schedule", UpdateSchedule.FirstDelay == TimeSpan.FromMinutes(2) && UpdateSchedule.Interval == TimeSpan.FromHours(24)
                 && UpdateSchedule.RetryAfterFailure == TimeSpan.FromHours(6));
-            Check("open route: elevated goes through the Explorer shell", UpdateOpen.Route(true) == UpdateOpenRoute.ExplorerShell);
-            Check("open route: not elevated opens directly", UpdateOpen.Route(false) == UpdateOpenRoute.ShellExecute);
+            Check("open route: high integrity with COM security goes through the Explorer shell",
+                UpdateOpen.Route(true, true) == UpdateOpenRoute.ExplorerShell);
+            Check("open route: high integrity without COM security only shows the link",
+                UpdateOpen.Route(true, false) == UpdateOpenRoute.CopyLink);
+            Check("open route: not high integrity opens directly", UpdateOpen.Route(false, true) == UpdateOpenRoute.ShellExecute
+                && UpdateOpen.Route(false, false) == UpdateOpenRoute.ShellExecute);
+            Check("integrity: medium and medium plus are not high", !Elevation.IsHighIntegrityRid(0x2000) && !Elevation.IsHighIntegrityRid(0x2100));
+            Check("integrity: high and system are high", Elevation.IsHighIntegrityRid(0x3000) && Elevation.IsHighIntegrityRid(0x4000));
+            Check("integrity: label SID gives its last part", Elevation.IntegrityRid("S-1-16-12288") == 12288L
+                && Elevation.IntegrityRid("S-1-16-8192") == 8192L);
+            Check("integrity: anything but a label SID gives nothing", Elevation.IntegrityRid("S-1-5-32-544") == null
+                && Elevation.IntegrityRid("S-1-16-") == null && Elevation.IntegrityRid("S-1-16-x") == null
+                && Elevation.IntegrityRid("") == null && Elevation.IntegrityRid(null) == null
+                && Elevation.IntegrityRid("S-1-16-99999999999") == null);
+        }
+
+        // ---------------------------------------------------------------- proxy: manual settings only
+        static void ProxyTests()
+        {
+            var api = new Uri(UpdateCheck.ApiUri);
+            Func<string, string, string> pick = (list, bypass) =>
+            {
+                Uri p = UpdateProxy.Choose(list, bypass, api);
+                return p == null ? null : p.AbsoluteUri;
+            };
+            Check("proxy: one server for every scheme", pick("proxy.corp:8080", null) == "http://proxy.corp:8080/", pick("proxy.corp:8080", null));
+            Check("proxy: the https entry wins", pick("http=a.corp:1;https=b.corp:2", null) == "http://b.corp:2/", pick("http=a.corp:1;https=b.corp:2", null));
+            Check("proxy: whitespace separates entries too", pick("ftp=f:1 https=b.corp:2", null) == "http://b.corp:2/");
+            Check("proxy: scheme names are case-insensitive", pick("HTTPS=b.corp:2", null) == "http://b.corp:2/");
+            Check("proxy: only an http entry means direct for https", pick("http=a.corp:1", null) == null);
+            Check("proxy: socks only means direct", pick("socks=s.corp:1080", null) == null);
+            Check("proxy: an explicit http:// server is kept", pick("http://p.corp:3", null) == "http://p.corp:3/");
+            Check("proxy: any other scheme on the server means direct", pick("https://p.corp:3", null) == null
+                && pick("socks://p.corp:3", null) == null);
+            Check("proxy: nothing set means direct", pick(null, null) == null && pick("", null) == null && pick(" ; ", null) == null);
+            Check("proxy: a path, user name or bad port means direct", pick("p.corp:8080/x", null) == null
+                && pick("u@p.corp:1", null) == null && pick("p.corp:abc", null) == null && pick("p.corp:99999", null) == null);
+            Check("proxy: a bypass wildcard for the host means direct", pick("p:1", "*.github.com") == null
+                && pick("p:1", "<local>;*github*") == null && pick("p:1", "API.GITHUB.COM") == null);
+            Check("proxy: a bypass entry may carry a scheme and port", pick("p:1", "https://api.github.com:443") == null);
+            Check("proxy: <local> does not cover a dotted host", pick("p:1", "<local>") == "http://p:1/");
+            Check("proxy: an unrelated bypass keeps the proxy", pick("p:1", "github.com;*.corp;10.*") == "http://p:1/");
+            Check("glob: star matches any run, others match one for one", UpdateProxy.Glob("*.github.com", "api.github.com")
+                && UpdateProxy.Glob("a*c*e", "abcde") && !UpdateProxy.Glob("a*c*e", "abcdf") && UpdateProxy.Glob("*", "")
+                && !UpdateProxy.Glob("", "x") && UpdateProxy.Glob("**", "x"));
+            var slow = Stopwatch.StartNew();
+            UpdateProxy.Glob(new string('*', 200) + "b", new string('a', 2000));
+            Check("glob: no runaway backtracking", slow.ElapsedMilliseconds < 1000, slow.ElapsedMilliseconds + " ms");
         }
 
         // ---------------------------------------------------------------- policy on a fake clock
@@ -677,7 +724,24 @@ namespace RamOptimiser.Tests
         {
             string shell = Source("App", "AppShell.cs");
             string open = Body(shell, "void OpenDownloadPage()");
-            int route = open.IndexOf("if (UpdateOpen.Route(elevated) == UpdateOpenRoute.ExplorerShell)", StringComparison.Ordinal);
+            Check("wiring: the route asks about integrity level and COM security",
+                open.Contains("UpdateOpenRoute route = UpdateOpen.Route(elevated || Elevation.IsHighIntegrity(), ComSecurity.Applied);"), open);
+            int copyOnly = open.IndexOf("if (route == UpdateOpenRoute.CopyLink) { ShowUpdateLink(); return; }", StringComparison.Ordinal);
+            int route = open.IndexOf("if (route == UpdateOpenRoute.ExplorerShell)", StringComparison.Ordinal);
+            Check("wiring: without COM security the elevated copy only shows the link, before any open", copyOnly >= 0 && route > copyOnly, open);
+            string apply = Source("App", "ComSecurity.cs");
+            Check("wiring: COM security counts as applied only when CoInitializeSecurity succeeded",
+                apply.Contains("public static bool Applied { get; private set; }")
+                && apply.Contains("Applied = absolute != IntPtr.Zero && hr >= 0;") && Count(apply, "Applied = ") == 1, "");
+            string fetch = Body(Source("Gui", "UpdateCheck.cs"), "internal static UpdateResult Fetch(");
+            Check("wiring: the request uses the manual proxy only, never the system default",
+                fetch.Contains("req.Proxy = direct ? null : UpdateProxy.ForRequest(uri);") && Count(fetch, "req.Proxy") == 1, fetch.Length.ToString());
+            string proxySource = Source("Gui", "UpdateProxy.cs");
+            Check("wiring: the proxy object offers no credentials and runs no script",
+                proxySource.Contains("Credentials = null") && proxySource.Contains("UseDefaultCredentials = false")
+                && !proxySource.Contains("DefaultWebProxy") && !proxySource.Contains("GetSystemWebProxy")
+                && !proxySource.Contains("WinHttpGetProxyForUrl") && proxySource.Contains("WinHttpGetIEProxyConfigForCurrentUser")
+                && Count(proxySource, "GlobalFree(") >= 1, "");
             int ret = route < 0 ? -1 : open.IndexOf("return;", route, StringComparison.Ordinal);
             string elevatedBranch = route < 0 || ret < 0 ? "" : open.Substring(route, ret - route);
             Check("wiring: the elevated path asks Explorer to open the constant", elevatedBranch.Contains("ShellOpen.OpenUnelevated(UpdateCheck.DownloadPage,"), open);

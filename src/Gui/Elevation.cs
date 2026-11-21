@@ -2,6 +2,8 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Threading;
 
 namespace RamOptimiser.Gui
@@ -14,6 +16,64 @@ namespace RamOptimiser.Gui
         public static bool IsElevated()
         {
             return Privileges.IsElevated();
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, int length, out int returned);
+
+        [DllImport("kernel32.dll")]
+        static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll")]
+        static extern bool CloseHandle(IntPtr handle);
+
+        const uint TokenQuery = 0x0008;
+        const int TokenIntegrityLevel = 25;
+        /// <summary>SECURITY_MANDATORY_HIGH_RID. https://learn.microsoft.com/en-us/windows/win32/secauthz/well-known-sids</summary>
+        public const long HighIntegrityRid = 0x3000;
+
+        /// <summary>
+        /// Whether this process runs at high integrity or above, whatever its groups (IsElevated asks only about the
+        /// Administrators group). When the level cannot be read the answer is true, so callers take the cautious path.
+        /// </summary>
+        public static bool IsHighIntegrity()
+        {
+            IntPtr token = IntPtr.Zero, buffer = IntPtr.Zero;
+            try
+            {
+                if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out token)) return true;
+                int size;
+                GetTokenInformation(token, TokenIntegrityLevel, IntPtr.Zero, 0, out size);
+                if (size <= 0 || size > 4096) return true;
+                buffer = Marshal.AllocHGlobal(size);
+                if (!GetTokenInformation(token, TokenIntegrityLevel, buffer, size, out size)) return true;
+                // TOKEN_MANDATORY_LABEL starts with SID_AND_ATTRIBUTES, whose first member is the label SID.
+                long? rid = IntegrityRid(new SecurityIdentifier(Marshal.ReadIntPtr(buffer)).Value);
+                return rid == null || IsHighIntegrityRid(rid.Value);
+            }
+            catch (Exception) { return true; }
+            finally
+            {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+                if (token != IntPtr.Zero) CloseHandle(token);
+            }
+        }
+
+        public static bool IsHighIntegrityRid(long rid) { return rid >= HighIntegrityRid; }
+
+        /// <summary>The level of a mandatory label SID ("S-1-16-12288" gives 12288); null for any other text.</summary>
+        public static long? IntegrityRid(string sid)
+        {
+            const string prefix = "S-1-16-";
+            if (sid == null || !sid.StartsWith(prefix, StringComparison.Ordinal)) return null;
+            string digits = sid.Substring(prefix.Length);
+            uint rid;
+            if (digits.Length == 0 || !uint.TryParse(digits, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out rid)) return null;
+            return rid;
         }
 
         /// <summary>
